@@ -177,6 +177,9 @@ pub const Connection = struct {
     reader_thread: ?std.Thread = null,
     flusher_thread: ?std.Thread = null,
     should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    
+    // Shutdown signaling for reader thread
+    shutdown_pipe: [2]std.posix.fd_t = .{ -1, -1 }, // [read_fd, write_fd]
 
     // Main connection mutex (protects most fields)
     mutex: std.Thread.Mutex = .{},
@@ -212,6 +215,7 @@ pub const Connection = struct {
             .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .parser = Parser.init(allocator),
+            .shutdown_pipe = .{ -1, -1 }, // Will be created in connect()
         };
     }
 
@@ -236,6 +240,14 @@ pub const Connection = struct {
         self.server_info_arena.deinit();
 
         self.parser.deinit();
+        
+        // Close shutdown pipe if created
+        if (self.shutdown_pipe[0] != -1) {
+            std.posix.close(self.shutdown_pipe[0]);
+        }
+        if (self.shutdown_pipe[1] != -1) {
+            std.posix.close(self.shutdown_pipe[1]);
+        }
     }
 
     pub fn connect(self: *Self, url: []const u8) !void {
@@ -288,7 +300,10 @@ pub const Connection = struct {
         self.stream = stream;
         self.should_stop.store(false, .monotonic);
 
-        // Handle initial handshake (outside mutex)
+        // Create shutdown signaling pipe for this connection
+        self.shutdown_pipe = try std.posix.pipe();
+
+        // Handle initial handshake (outside mutex) - before setting non-blocking
         self.processInitialHandshake() catch |err| {
             self.stream = null;
             stream.close();
@@ -309,6 +324,12 @@ pub const Connection = struct {
         self.abort_reconnect = false;
         self.mutex.unlock();
 
+        // Set socket to non-blocking mode to allow graceful shutdown
+        self.setNonBlocking() catch |err| {
+            log.warn("Failed to set socket to non-blocking mode: {}", .{err});
+            // Continue anyway, this is not critical for functionality
+        };
+
         // Start reader thread
         self.reader_thread = try std.Thread.spawn(.{}, readerLoop, .{self});
 
@@ -326,6 +347,12 @@ pub const Connection = struct {
         log.info("Closing connection", .{});
         self.should_stop.store(true, .release);
         self.status = .closed;
+        
+        // Signal reader thread to wake up from poll() (if pipe exists)
+        if (self.shutdown_pipe[1] != -1) {
+            const signal_byte: u8 = 1;
+            _ = std.posix.write(self.shutdown_pipe[1], &[_]u8{signal_byte}) catch {};
+        }
 
         // Interrupt and wait for reconnection thread (like C library)
         self.mutex.lock();
@@ -528,7 +555,7 @@ pub const Connection = struct {
         log.debug("Published request to {s} with reply {s}: {s}", .{ subject, reply, data });
     }
     
-    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ns: u64) !?*Message {
+    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !?*Message {
         if (self.status != .connected) {
             return ConnectionError.ConnectionClosed;
         }
@@ -550,7 +577,7 @@ pub const Connection = struct {
         try self.publishRequest(subject, reply_subject, data);
 
         // 4. Wait for response with timeout
-        return sub.nextMessageTimeout(timeout_ns);
+        return sub.nextMsg(timeout_ms);
     }
 
 
@@ -615,15 +642,61 @@ pub const Connection = struct {
         log.debug("Handshake completed successfully", .{});
     }
 
+    fn setNonBlocking(self: *Self) !void {
+        const stream = self.stream orelse return ConnectionError.ConnectionClosed;
+        
+        // Get current flags
+        const current_flags = try std.posix.fcntl(stream.handle, std.posix.F.GETFL, 0);
+        
+        // Set O_NONBLOCK flag
+        const O_NONBLOCK = 0o4000; // Linux O_NONBLOCK value
+        const new_flags = current_flags | O_NONBLOCK;
+        _ = try std.posix.fcntl(stream.handle, std.posix.F.SETFL, new_flags);
+    }
+
     fn readerLoop(self: *Self) void {
         var buffer: [4096]u8 = undefined;
         const stream = self.stream orelse return;
         const reader = stream.reader();
 
         log.debug("Reader loop started", .{});
+        
+        // Pipes must be set up before reader thread starts
+        std.debug.assert(self.shutdown_pipe[0] != -1);
+        std.debug.assert(self.shutdown_pipe[1] != -1);
 
         while (!self.should_stop.load(.acquire)) {
+            // Use poll() to wait for data or shutdown signal efficiently
+            var fds = [_]std.posix.pollfd{
+                .{ .fd = stream.handle, .events = std.posix.POLL.IN, .revents = 0 },
+                .{ .fd = self.shutdown_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
+            };
+            
+            const poll_result = std.posix.poll(&fds, 1000) catch |err| { // 1 second timeout
+                log.err("Poll error: {}", .{err});
+                break;
+            };
+            
+            if (poll_result == 0) continue; // Timeout - check should_stop and retry
+            
+            // Check shutdown signal first
+            if (fds[1].revents & std.posix.POLL.IN != 0) {
+                log.debug("Shutdown signal received", .{});
+                break;
+            }
+            
+            // Check socket data
+            if (!(fds[0].revents & std.posix.POLL.IN != 0)) {
+                continue; // No socket data ready
+            }
+            
+            // Read socket data
             const bytes_read = reader.read(&buffer) catch |err| {
+                // Handle EAGAIN/EWOULDBLOCK for non-blocking socket  
+                if (err == error.WouldBlock) {
+                    continue; // This shouldn't happen after poll() indicates ready
+                }
+                
                 log.err("Read error: {}", .{err});
                 if (self.status == .connected) {
                     self.triggerReconnect(err);
@@ -845,12 +918,20 @@ pub const Connection = struct {
     }
 
     pub fn processPing(self: *Self) !void {
+        std.debug.print("processPing: status={}, stream={}\n", .{self.status, self.stream != null});
+        const ping_start = std.time.nanoTimestamp();
+        
         if (self.status == .connected and self.stream != null) {
             const writer = self.stream.?.writer();
+            std.debug.print("processPing: about to writeAll PONG\n", .{});
             writer.writeAll("PONG\r\n") catch |err| {
+                std.debug.print("processPing: writeAll failed: {}\n", .{err});
                 log.err("Failed to send PONG: {}", .{err});
             };
+            std.debug.print("processPing: PONG write took {d}ms\n", .{@divTrunc(std.time.nanoTimestamp() - ping_start, std.time.ns_per_ms)});
             log.debug("Sent PONG in response to PING", .{});
+        } else {
+            std.debug.print("processPing: skipped (not connected or no stream)\n", .{});
         }
     }
 
