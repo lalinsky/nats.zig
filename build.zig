@@ -74,9 +74,19 @@ pub fn build(b: *std.Build) void {
     });
     basic_example.root_module.addImport("nats", lib_mod);
     
+    // Create debug pubsub test
+    const debug_example = b.addExecutable(.{
+        .name = "debug_pubsub",
+        .root_source_file = b.path("examples/debug_pubsub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    debug_example.root_module.addImport("nats", lib_mod);
+    
     // This declares intent for the examples to be installed
     b.installArtifact(example);
     b.installArtifact(basic_example);
+    b.installArtifact(debug_example);
     
     // Create run step for example
     const run_example = b.addRunArtifact(example);

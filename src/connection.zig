@@ -5,6 +5,7 @@ const ArrayList = std.ArrayList;
 const Mutex = std.Thread.Mutex;
 const Condition = std.Thread.Condition;
 const Parser = @import("parser.zig").Parser;
+const Buffer = @import("buffer.zig").Buffer;
 
 const log = std.log.scoped(.connection);
 
@@ -115,17 +116,13 @@ pub const Connection = struct {
     stream: ?net.Stream = null,
     current_server: []const u8 = "",
 
-    // Buffered I/O (used throughout connection lifetime)
-    buffered_reader: ?std.io.BufferedReader(4096, net.Stream.Reader) = null,
-    buffered_writer: ?std.io.BufferedWriter(4096, net.Stream.Writer) = null,
-
     // Threading
     reader_thread: ?std.Thread = null,
     writer_thread: ?std.Thread = null,
     should_stop: bool = false,
 
-    // Write buffering
-    write_buffer: ArrayList(u8),
+    // Write buffering - using our Buffer component
+    write_buffer: Buffer,
     write_condition: Condition = .{},
     write_signaled: bool = false,
 
@@ -149,7 +146,7 @@ pub const Connection = struct {
         return Self{
             .allocator = allocator,
             .options = options,
-            .write_buffer = ArrayList(u8).init(allocator),
+            .write_buffer = Buffer.init(allocator, 4096) catch Buffer.empty(),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .parser = Parser.init(allocator),
         };
@@ -192,10 +189,6 @@ pub const Connection = struct {
         self.stream = stream;
         self.reconnect_attempts = 0;
         self.should_stop = false;
-
-        // Set up buffered I/O for the connection lifetime
-        self.buffered_reader = std.io.bufferedReader(stream.reader());
-        self.buffered_writer = std.io.bufferedWriter(stream.writer());
 
         // Handle initial handshake synchronously (like C/Go libraries)
         try self.processInitialHandshake();
@@ -267,18 +260,14 @@ pub const Connection = struct {
 
         // For basic connectivity test, just send PING and assume it works
         // The server will echo it back and close the connection anyway
-        const writer = if (self.buffered_writer) |*bw| bw.writer() else {
-            return ConnectionError.ConnectionFailed;
-        };
+        const stream = self.stream orelse return ConnectionError.ConnectionClosed;
+        const writer = stream.writer();
 
         writer.writeAll(PING_PROTO) catch {
             return ConnectionError.ConnectionFailed;
         };
-        self.buffered_writer.?.flush() catch {
-            return ConnectionError.ConnectionFailed;
-        };
 
-        std.log.debug("flushTimeout: sent PING and flushed", .{});
+        std.log.debug("flushTimeout: sent PING", .{});
 
         // For now, just assume flush worked if we got this far
         // This is sufficient for basic connectivity testing
@@ -315,39 +304,110 @@ pub const Connection = struct {
         return .{ .host = host, .port = port };
     }
 
+    // Lightweight handshake context for initial connection setup
+    const HandshakeContext = struct {
+        allocator: Allocator,
+        got_info: bool = false,
+        got_ok: bool = false,
+        got_pong: bool = false,
+        error_msg: ?[]const u8 = null,
+        info_json: ?[]const u8 = null,
+        
+        pub fn processInfo(self: *HandshakeContext, json: []const u8) !void {
+            self.got_info = true;
+            self.info_json = try self.allocator.dupe(u8, json);
+        }
+        
+        pub fn processPong(self: *HandshakeContext) !void {
+            self.got_pong = true;
+        }
+        
+        pub fn processOK(self: *HandshakeContext) !void {
+            self.got_ok = true;
+        }
+        
+        pub fn processErr(self: *HandshakeContext, err: []const u8) !void {
+            self.error_msg = try self.allocator.dupe(u8, err);
+        }
+        
+        // Stub methods for messages we don't expect during handshake
+        pub fn processMsg(_: *HandshakeContext, _: []const u8) !void {
+            return ConnectionError.InvalidProtocol; // Unexpected during handshake
+        }
+        pub fn processPing(_: *HandshakeContext) !void {
+            return ConnectionError.InvalidProtocol; // Server shouldn't ping during handshake
+        }
+        
+        pub fn deinit(self: *HandshakeContext) void {
+            if (self.info_json) |json| self.allocator.free(json);
+            if (self.error_msg) |msg| self.allocator.free(msg);
+        }
+    };
+
     fn processInitialHandshake(self: *Self) !void {
-        // Use the connection's buffered I/O
-        const reader = self.buffered_reader.?.reader();
-        const writer = self.buffered_writer.?.writer();
+        const stream = self.stream orelse return ConnectionError.ConnectionClosed;
+        const writer = stream.writer();
+        const reader = stream.reader();
 
-        // 1. Read INFO message from server
-        var info_line = std.ArrayList(u8).init(self.allocator);
-        defer info_line.deinit();
+        // Create a temporary parser and handshake context
+        var handshake_parser = Parser.init(self.allocator);
+        defer handshake_parser.deinit();
+        
+        var handshake_ctx = HandshakeContext{ .allocator = self.allocator };
+        defer handshake_ctx.deinit();
 
-        try reader.streamUntilDelimiter(info_line.writer(), '\n', 4096);
-        const info_str = info_line.items;
-
-        std.log.debug("Handshake - received: {s}", .{info_str});
-
-        // Verify it's an INFO message
-        if (!std.mem.startsWith(u8, info_str, "INFO ")) {
-            std.log.err("Expected INFO, got: {s}", .{info_str});
+        // 1. Read and parse INFO message from server
+        var read_buffer: [4096]u8 = undefined;
+        
+        // Keep reading until we get INFO
+        while (!handshake_ctx.got_info) {
+            const bytes_read = try reader.read(&read_buffer);
+            if (bytes_read == 0) {
+                return ConnectionError.ConnectionClosed;
+            }
+            
+            try handshake_parser.parse(&handshake_ctx, read_buffer[0..bytes_read]);
+            
+            if (handshake_ctx.error_msg) |err| {
+                std.log.err("Server error during handshake: {s}", .{err});
+                return ConnectionError.InvalidProtocol;
+            }
+        }
+        
+        // Process the INFO
+        if (handshake_ctx.info_json) |json| {
+            try self.processInfo(json);
+        } else {
             return ConnectionError.InvalidProtocol;
         }
 
-        // Extract and process JSON (everything after "INFO ")
-        const json_start = 5;
-        const json_end = if (std.mem.lastIndexOfScalar(u8, info_str, '\r')) |idx| idx else info_str.len;
-        const info_json = info_str[json_start..json_end];
-
-        try self.processInfo(info_json);
-
-        // 2. Send CONNECT message
-        std.log.debug("Handshake - sending CONNECT", .{});
+        // 2. Send CONNECT + PING together (critical for proper handshake)
+        std.log.debug("Handshake - sending CONNECT + PING", .{});
         try writer.writeAll(CONNECT_PROTO);
-        try self.buffered_writer.?.flush();
+        try writer.writeAll(PING_PROTO);
 
-        std.log.debug("Handshake - completed successfully", .{});
+        // 3. Read response - expecting PONG (and maybe +OK if verbose)
+        while (!handshake_ctx.got_pong) {
+            const bytes_read = try reader.read(&read_buffer);
+            if (bytes_read == 0) {
+                return ConnectionError.ConnectionClosed;
+            }
+            
+            try handshake_parser.parse(&handshake_ctx, read_buffer[0..bytes_read]);
+            
+            if (handshake_ctx.error_msg) |err| {
+                std.log.err("Server error after CONNECT: {s}", .{err});
+                // Check for auth errors
+                if (std.mem.indexOf(u8, err, "Authorization") != null or
+                    std.mem.indexOf(u8, err, "User") != null or
+                    std.mem.indexOf(u8, err, "Password") != null) {
+                    return ConnectionError.AuthFailed;
+                }
+                return ConnectionError.InvalidProtocol;
+            }
+        }
+
+        std.log.debug("Handshake completed - got INFO and PONG", .{});
     }
 
     pub fn publish(self: *Self, subject: []const u8, data: []const u8) !void {
@@ -362,7 +422,11 @@ pub const Connection = struct {
         var msg_buffer: [4096]u8 = undefined;
         const msg = try std.fmt.bufPrint(&msg_buffer, "PUB {s} {d}\r\n{s}\r\n", .{ subject, data.len, data });
 
-        try self.write_buffer.appendSlice(msg);
+        std.log.debug("publish: queuing message: {s}", .{msg});
+        try self.write_buffer.append(msg);
+        std.log.debug("publish: queued {} bytes for writer thread", .{msg.len});
+        
+        // Signal writer thread
         self.write_signaled = true;
         self.write_condition.signal();
     }
@@ -379,7 +443,7 @@ pub const Connection = struct {
         var msg_buffer: [4096]u8 = undefined;
         const msg = try std.fmt.bufPrint(&msg_buffer, "PUB {s} {s} {d}\r\n{s}\r\n", .{ subject, reply, data.len, data });
 
-        try self.write_buffer.appendSlice(msg);
+        try self.write_buffer.append(msg);
         self.write_signaled = true;
         self.write_condition.signal();
     }
@@ -403,7 +467,7 @@ pub const Connection = struct {
         var msg_buffer: [1024]u8 = undefined;
         const msg = try std.fmt.bufPrint(&msg_buffer, "SUB {s} {d}\r\n", .{ subject, sid });
 
-        try self.write_buffer.appendSlice(msg);
+        try self.write_buffer.append(msg);
         self.write_signaled = true;
         self.write_condition.signal();
 
@@ -422,7 +486,7 @@ pub const Connection = struct {
         var msg_buffer: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&msg_buffer, "UNSUB {d}\r\n", .{sub.sid});
 
-        try self.write_buffer.appendSlice(msg);
+        try self.write_buffer.append(msg);
         self.write_signaled = true;
         self.write_condition.signal();
 
@@ -433,7 +497,7 @@ pub const Connection = struct {
 
     fn sendConnect(self: *Self) !void {
         // Caller must hold mutex
-        try self.write_buffer.appendSlice(CONNECT_PROTO);
+        try self.write_buffer.append(CONNECT_PROTO);
         self.write_signaled = true;
         self.write_condition.signal();
     }
@@ -491,72 +555,66 @@ pub const Connection = struct {
     }
 
     fn writerLoop(self: *Self) void {
+        log.debug("writerLoop: started", .{});
         while (true) {
+            // Use polling instead of condition variable for now
+            std.time.sleep(10 * std.time.ns_per_ms); // Poll every 10ms
+            
             self.mutex.lock();
 
-            // Wait for data to write or stop signal
-            while (!self.write_signaled and !self.should_stop) {
-                self.write_condition.wait(&self.mutex);
-            }
-
             if (self.should_stop) {
+                log.debug("writerLoop: stop signal received", .{});
                 self.mutex.unlock();
                 break;
             }
 
-            if (self.status != .connected) {
-                // Reset signal and continue waiting
-                self.write_signaled = false;
+            // Allow writing in most states, only skip if closed
+            if (self.status == .closed) {
+                log.debug("writerLoop: connection closed, continuing", .{});
                 self.mutex.unlock();
                 continue;
             }
 
             // Only proceed if we have data to write
             if (self.write_buffer.items.len == 0) {
-                self.write_signaled = false;
                 self.mutex.unlock();
                 continue;
             }
 
             // Copy buffer data
+            log.debug("writerLoop: found {} bytes to write", .{self.write_buffer.items.len});
             const data = self.write_buffer.toOwnedSlice() catch {
-                self.write_signaled = false;
+                log.err("writerLoop: failed to copy buffer data", .{});
                 self.mutex.unlock();
                 continue;
             };
 
             self.write_buffer = ArrayList(u8).init(self.allocator);
-            self.write_signaled = false;
 
-            const writer = if (self.buffered_writer) |*bw| bw.writer() else {
-                self.allocator.free(data);
-                self.mutex.unlock();
-                continue;
-            };
-
+            const stream = self.stream;
             self.mutex.unlock();
 
-            // Write data using buffered writer
-            writer.writeAll(data) catch {
-                self.allocator.free(data);
-                self.handleDisconnection();
-                break;
-            };
-
-            // Flush the buffered writer
-            self.mutex.lock();
-            if (self.buffered_writer) |*bw| {
-                bw.flush() catch {
-                    self.mutex.unlock();
+            // Write data directly to stream
+            if (stream) |s| {
+                log.debug("writerLoop: writing: {s}", .{data});
+                const writer = s.writer();
+                writer.writeAll(data) catch {
+                    log.err("writerLoop: write failed", .{});
                     self.allocator.free(data);
                     self.handleDisconnection();
                     break;
                 };
+                log.debug("writerLoop: write SUCCESS", .{});
+            } else {
+                log.err("writerLoop: no stream", .{});
+                self.allocator.free(data);
+                self.handleDisconnection();
+                break;
             }
-            self.mutex.unlock();
 
             self.allocator.free(data);
         }
+        log.debug("writerLoop: exited", .{});
     }
 
     // Parser callback methods
