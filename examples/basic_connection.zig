@@ -10,7 +10,8 @@ pub fn main() !void {
     const options = nats.ConnectionOptions{
         .name = "basic-test",
         .timeout_ms = 5000,
-        .allow_reconnect = false, // Disable reconnection for simpler testing
+        .verbose = false,
+        .send_asap = true, // Send immediately for simpler testing
     };
     
     // Connect to NATS server
