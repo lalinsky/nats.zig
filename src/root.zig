@@ -7,6 +7,7 @@ pub const ConnectionStatus = @import("connection.zig").ConnectionStatus;
 pub const ConnectionError = @import("connection.zig").ConnectionError;
 pub const Message = @import("connection.zig").Message;
 pub const Subscription = @import("connection.zig").Subscription;
+pub const inbox = @import("inbox.zig");
 
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 

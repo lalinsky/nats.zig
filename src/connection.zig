@@ -3,6 +3,7 @@ const net = std.net;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const Parser = @import("parser.zig").Parser;
+const inbox = @import("inbox.zig");
 
 const log = std.log.scoped(.connection);
 
@@ -69,6 +70,19 @@ pub const Subscription = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.messages.readItem();
+    }
+    
+    pub fn nextMessageTimeout(self: *Subscription, timeout_ns: u64) ?*Message {
+        const deadline = std.time.nanoTimestamp() + @as(i128, timeout_ns);
+        
+        while (std.time.nanoTimestamp() < deadline) {
+            if (self.nextMessage()) |msg| {
+                return msg;
+            }
+            // Sleep for 1ms before retrying
+            std.time.sleep(1_000_000);
+        }
+        return null;
     }
 };
 
@@ -245,6 +259,25 @@ pub const Connection = struct {
         log.debug("Subscribed to {s} with sid {d}", .{ subject, sid });
         return sub;
     }
+    
+    pub fn unsubscribe(self: *Self, sub: *Subscription) !void {
+        if (self.status != .connected) {
+            return ConnectionError.ConnectionClosed;
+        }
+
+        // Remove from subscriptions map
+        self.subs_mutex.lock();
+        defer self.subs_mutex.unlock();
+        _ = self.subscriptions.remove(sub.sid);
+
+        // Send UNSUB command
+        var buffer = ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+        try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
+        try self.bufferWrite(buffer.items);
+
+        log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
+    }
 
     pub fn flush(self: *Self) !void {
         if (self.status != .connected) {
@@ -269,6 +302,50 @@ pub const Connection = struct {
         try self.bufferWrite("PING\r\n");
 
         log.debug("Sent PING for flush", .{});
+    }
+    
+    pub fn publishRequest(self: *Self, subject: []const u8, reply: []const u8, data: []const u8) !void {
+        if (self.status != .connected) {
+            return ConnectionError.ConnectionClosed;
+        }
+
+        // Format: PUB <subject> <reply> <size>\r\n<data>\r\n
+        var buffer = ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+
+        try buffer.writer().print("PUB {s} {s} {d}\r\n", .{ subject, reply, data.len });
+        try buffer.appendSlice(data);
+        try buffer.appendSlice("\r\n");
+
+        // Send via buffer
+        try self.bufferWrite(buffer.items);
+
+        log.debug("Published request to {s} with reply {s}: {s}", .{ subject, reply, data });
+    }
+    
+    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ns: u64) !?*Message {
+        if (self.status != .connected) {
+            return ConnectionError.ConnectionClosed;
+        }
+
+        // 1. Create unique inbox
+        const reply_subject = try inbox.newInbox(self.allocator);
+        defer self.allocator.free(reply_subject);
+
+        // 2. Subscribe to inbox
+        const sub = try self.subscribe(reply_subject);
+        defer {
+            self.unsubscribe(sub) catch |err| {
+                log.warn("Failed to unsubscribe from inbox: {}", .{err});
+            };
+            sub.deinit(self.allocator);
+        }
+
+        // 3. Publish with reply-to
+        try self.publishRequest(subject, reply_subject, data);
+
+        // 4. Wait for response with timeout
+        return sub.nextMessageTimeout(timeout_ns);
     }
 
     fn parseUrl(self: *Self, url: []const u8) !struct { host: []const u8, port: u16 } {
