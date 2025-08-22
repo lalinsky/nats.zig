@@ -9,8 +9,8 @@ pub const Message = struct {
     reply: ?[]const u8,
     data: []const u8,
     
-    // Headers (optional)
-    headers: ?std.hash_map.StringHashMapUnmanaged(ArrayList([]const u8)),
+    // Headers
+    headers: std.hash_map.StringHashMapUnmanaged(ArrayList([]const u8)),
     
     // Raw header data for lazy parsing
     raw_headers: ?[]const u8,
@@ -46,7 +46,7 @@ pub const Message = struct {
             .subject = try arena_allocator.dupe(u8, subject),
             .reply = if (reply) |r| try arena_allocator.dupe(u8, r) else null,
             .data = try arena_allocator.dupe(u8, data),
-            .headers = null,
+            .headers = .{},
             .raw_headers = null,
             .needs_header_parsing = false,
             .sid = 0,
@@ -78,7 +78,7 @@ pub const Message = struct {
             .subject = try arena_allocator.dupe(u8, subject),
             .reply = if (reply) |r| try arena_allocator.dupe(u8, r) else null,
             .data = try arena_allocator.dupe(u8, data),
-            .headers = null,
+            .headers = .{},
             .raw_headers = if (raw_headers) |h| try arena_allocator.dupe(u8, h) else null,
             .needs_header_parsing = raw_headers != null,
             .sid = 0,
@@ -107,9 +107,6 @@ pub const Message = struct {
         
         const arena_allocator = self.arena.allocator();
         
-        if (self.headers == null) {
-            self.headers = .{};
-        }
         
         while (lines.next()) |line| {
             if (line.len == 0) break; // End of headers
@@ -124,7 +121,7 @@ pub const Message = struct {
             const owned_key = try arena_allocator.dupe(u8, key);
             const owned_value = try arena_allocator.dupe(u8, value);
             
-            const result = try self.headers.?.getOrPut(arena_allocator, owned_key);
+            const result = try self.headers.getOrPut(arena_allocator, owned_key);
             if (!result.found_existing) {
                 result.value_ptr.* = ArrayList([]const u8).init(arena_allocator);
             }
@@ -141,12 +138,9 @@ pub const Message = struct {
         
         const arena_allocator = self.arena.allocator();
         
-        if (self.headers == null) {
-            self.headers = .{};
-        }
         
         // Remove existing values (arena will clean up memory automatically)
-        _ = self.headers.?.fetchRemove(key);
+        _ = self.headers.fetchRemove(key);
         
         // Add new value
         const owned_key = try arena_allocator.dupe(u8, key);
@@ -155,17 +149,15 @@ pub const Message = struct {
         var values = ArrayList([]const u8).init(arena_allocator);
         try values.append(owned_value);
         
-        try self.headers.?.put(arena_allocator, owned_key, values);
+        try self.headers.put(arena_allocator, owned_key, values);
     }
     
     pub fn headerGet(self: *Self, key: []const u8) !?[]const u8 {
         try self.ensureHeadersParsed();
         
-        if (self.headers) |*headers| {
-            if (headers.get(key)) |values| {
-                if (values.items.len > 0) {
-                    return values.items[0];
-                }
+        if (self.headers.get(key)) |values| {
+            if (values.items.len > 0) {
+                return values.items[0];
             }
         }
         
@@ -175,10 +167,8 @@ pub const Message = struct {
     pub fn headerGetAll(self: *Self, key: []const u8) !?[]const []const u8 {
         try self.ensureHeadersParsed();
         
-        if (self.headers) |*headers| {
-            if (headers.get(key)) |values| {
-                return values.items; // No copy needed - arena owns the data
-            }
+        if (self.headers.get(key)) |values| {
+            return values.items; // No copy needed - arena owns the data
         }
         
         return null;
@@ -187,10 +177,8 @@ pub const Message = struct {
     pub fn headerDelete(self: *Self, key: []const u8) !void {
         try self.ensureHeadersParsed();
         
-        if (self.headers) |*headers| {
-            // Arena will clean up memory automatically
-            _ = headers.fetchRemove(key);
-        }
+        // Arena will clean up memory automatically
+        _ = self.headers.fetchRemove(key);
     }
     
     // Check if message indicates "no responders"
@@ -205,11 +193,11 @@ pub const Message = struct {
     pub fn encodeHeaders(self: *Self, writer: anytype) !void {
         try self.ensureHeadersParsed();
         
-        if (self.headers == null) return;
+        if (self.headers.count() == 0) return;
         
         try writer.writeAll("NATS/1.0\r\n");
         
-        var iter = self.headers.?.iterator();
+        var iter = self.headers.iterator();
         while (iter.next()) |entry| {
             const key = entry.key_ptr.*;
             const values = entry.value_ptr.*;
