@@ -21,7 +21,7 @@ pub fn main() !void {
     // Creates a synchronous subscription on subject "help",
     // waiting for a request. When a message arrives on this
     // subject, we will send a reply.
-    const sub = conn.subscribe("help") catch |err| {
+    const sub = conn.subscribeSync("help") catch |err| {
         std.debug.print("Failed to subscribe: {}\n", .{err});
         std.process.exit(2);
     };

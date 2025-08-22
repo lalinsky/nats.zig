@@ -15,8 +15,8 @@ pub fn main() !void {
     
     try conn.connect("nats://localhost:4222");
     
-    // Subscribe to subject
-    const sub = try conn.subscribe("foo");
+    // Subscribe to subject (sync)
+    const sub = try conn.subscribeSync("foo");
     
     std.log.info("Waiting for message (5 second timeout)...", .{});
     

@@ -74,7 +74,8 @@ The request/reply examples demonstrate:
 ## API Features Used
 
 - `Connection.request()` - Send request with timeout
-- `Connection.subscribe()` - Subscribe to subjects  
+- `Connection.subscribeSync()` - Synchronous subscribe to subjects
+- `Connection.subscribe()` - Asynchronous subscribe with callback  
 - `Connection.publish()` - Publish messages with reply-to
 - `Subscription.nextMessage()` - Synchronous message retrieval
 - `inbox.newInbox()` - Generate unique inbox subjects
