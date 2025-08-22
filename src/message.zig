@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ArrayList = std.ArrayList;
+const ArrayListUnmanaged = std.ArrayListUnmanaged;
 
 // Simple, idiomatic Zig message implementation using ArenaAllocator
 pub const Message = struct {
@@ -10,7 +10,7 @@ pub const Message = struct {
     data: []const u8,
     
     // Headers
-    headers: std.hash_map.StringHashMapUnmanaged(ArrayList([]const u8)),
+    headers: std.hash_map.StringHashMapUnmanaged(ArrayListUnmanaged([]const u8)),
     
     // Raw header data for lazy parsing
     raw_headers: ?[]const u8,
@@ -123,10 +123,10 @@ pub const Message = struct {
             
             const result = try self.headers.getOrPut(arena_allocator, owned_key);
             if (!result.found_existing) {
-                result.value_ptr.* = ArrayList([]const u8).init(arena_allocator);
+                result.value_ptr.* = .{};
             }
             
-            try result.value_ptr.append(owned_value);
+            try result.value_ptr.append(arena_allocator, owned_value);
         }
         
         self.needs_header_parsing = false;
@@ -146,8 +146,8 @@ pub const Message = struct {
         const owned_key = try arena_allocator.dupe(u8, key);
         const owned_value = try arena_allocator.dupe(u8, value);
         
-        var values = ArrayList([]const u8).init(arena_allocator);
-        try values.append(owned_value);
+        var values: ArrayListUnmanaged([]const u8) = .{};
+        try values.append(arena_allocator, owned_value);
         
         try self.headers.put(arena_allocator, owned_key, values);
     }
