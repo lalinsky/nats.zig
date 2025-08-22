@@ -91,8 +91,7 @@ pub const PendingBuffer = struct {
     
     pub fn flush(self: *PendingBuffer, stream: net.Stream) !void {
         if (self.buffer.items.len > 0) {
-            const writer = stream.writer();
-            try writer.writeAll(self.buffer.items);
+            try stream.writeAll(self.buffer.items);
             self.buffer.clearRetainingCapacity();
         }
     }
@@ -584,7 +583,6 @@ pub const Connection = struct {
     fn processInitialHandshake(self: *Self) !void {
         const stream = self.stream orelse return ConnectionError.ConnectionClosed;
         const reader = stream.reader();
-        const writer = stream.writer();
 
         // Read INFO message
         var info_buffer: [4096]u8 = undefined;
@@ -611,8 +609,8 @@ pub const Connection = struct {
         else
             "CONNECT {\"verbose\":false,\"pedantic\":false}\r\n";
 
-        try writer.writeAll(connect_msg);
-        try writer.writeAll("PING\r\n");
+        try stream.writeAll(connect_msg);
+        try stream.writeAll("PING\r\n");
 
         // Wait for PONG (or +OK then PONG if verbose)
         var response_buffer: [256]u8 = undefined;
@@ -657,7 +655,6 @@ pub const Connection = struct {
     fn readerLoop(self: *Self) void {
         var buffer: [4096]u8 = undefined;
         const stream = self.stream orelse return;
-        const reader = stream.reader();
 
         log.debug("Reader loop started", .{});
         
@@ -690,8 +687,8 @@ pub const Connection = struct {
                 continue; // No socket data ready
             }
             
-            // Read socket data
-            const bytes_read = reader.read(&buffer) catch |err| {
+            // Read socket data directly from stream
+            const bytes_read = stream.read(&buffer) catch |err| {
                 // Handle EAGAIN/EWOULDBLOCK for non-blocking socket  
                 if (err == error.WouldBlock) {
                     continue; // This shouldn't happen after poll() indicates ready
@@ -758,10 +755,9 @@ pub const Connection = struct {
 
             if (should_flush) {
                 const stream = self.stream.?;
-                const writer = stream.writer();
 
                 // Write all buffered data
-                if (writer.writeAll(self.write_buffer.items)) {
+                if (stream.writeAll(self.write_buffer.items)) {
                     log.debug("Flushed {} bytes", .{self.write_buffer.items.len});
                     self.write_buffer.clearRetainingCapacity();
                 } else |err| {
@@ -790,8 +786,7 @@ pub const Connection = struct {
         if (self.options.send_asap) {
             // Send immediately
             const stream = self.stream orelse return ConnectionError.ConnectionClosed;
-            const writer = stream.writer();
-            writer.writeAll(data) catch |err| {
+            stream.writeAll(data) catch |err| {
                 if (self.status == .connected) {
                     self.triggerReconnect(err);
                 }
@@ -921,10 +916,10 @@ pub const Connection = struct {
         std.debug.print("processPing: status={}, stream={}\n", .{self.status, self.stream != null});
         const ping_start = std.time.nanoTimestamp();
         
-        if (self.status == .connected and self.stream != null) {
-            const writer = self.stream.?.writer();
+        if (self.status == .connected) {
+            const stream = self.stream orelse return ConnectionError.ConnectionClosed;
             std.debug.print("processPing: about to writeAll PONG\n", .{});
-            writer.writeAll("PONG\r\n") catch |err| {
+            stream.writeAll("PONG\r\n") catch |err| {
                 std.debug.print("processPing: writeAll failed: {}\n", .{err});
                 log.err("Failed to send PONG: {}", .{err});
             };
@@ -1173,8 +1168,7 @@ pub const Connection = struct {
             
             // Send directly (bypass buffering since we're reconnecting)
             const stream = self.stream orelse return ConnectionError.ConnectionClosed;
-            const writer = stream.writer();
-            try writer.writeAll(buffer.items);
+            try stream.writeAll(buffer.items);
             
             log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
         }
