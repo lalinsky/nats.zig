@@ -19,5 +19,15 @@ services:
       - nats-data:/data
     restart: unless-stopped
 
+  # NATS management UI (optional, for development convenience)
+  nats-box:
+    image: natsio/nats-box:latest
+    container_name: nats-box
+    depends_on:
+      - nats
+    entrypoint: /bin/sh
+    stdin_open: true
+    tty: true
+
 volumes:
   nats-data:
