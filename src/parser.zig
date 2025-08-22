@@ -71,6 +71,16 @@ pub const Parser = struct {
         self.arg_buf.deinit();
         self.msg_buf.deinit();
     }
+    
+    pub fn reset(self: *Self) void {
+        self.state = .OP_START;
+        self.after_space = 0;
+        self.drop = 0;
+        self.hdr = -1;
+        self.ma = .{};
+        self.arg_buf.clearRetainingCapacity();
+        self.msg_buf.clearRetainingCapacity();
+    }
 
     pub fn parse(self: *Self, conn: anytype, buf: []const u8) !void {
         var i: usize = 0;

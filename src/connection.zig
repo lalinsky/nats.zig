@@ -8,8 +8,46 @@ const Message = @import("message.zig").Message;
 const subscription_mod = @import("subscription.zig");
 const Subscription = subscription_mod.Subscription;
 const MsgHandler = subscription_mod.MsgHandler;
+const server_pool_mod = @import("server_pool.zig");
+const ServerPool = server_pool_mod.ServerPool;
+const Server = server_pool_mod.Server;
 
 const log = std.log.scoped(.connection);
+
+pub const PendingBuffer = struct {
+    buffer: ArrayList(u8),
+    max_size: usize,
+    
+    pub fn init(allocator: Allocator, max_size: usize) PendingBuffer {
+        return PendingBuffer{
+            .buffer = ArrayList(u8).init(allocator),
+            .max_size = max_size,
+        };
+    }
+    
+    pub fn deinit(self: *PendingBuffer) void {
+        self.buffer.deinit();
+    }
+    
+    pub fn addMessage(self: *PendingBuffer, data: []const u8) !void {
+        if (self.buffer.items.len + data.len > self.max_size) {
+            return ConnectionError.OutOfMemory;
+        }
+        try self.buffer.appendSlice(data);
+    }
+    
+    pub fn flush(self: *PendingBuffer, stream: net.Stream) !void {
+        if (self.buffer.items.len > 0) {
+            const writer = stream.writer();
+            try writer.writeAll(self.buffer.items);
+            self.buffer.clearRetainingCapacity();
+        }
+    }
+    
+    pub fn clear(self: *PendingBuffer) void {
+        self.buffer.clearRetainingCapacity();
+    }
+};
 
 pub const ConnectionError = error{
     ConnectionFailed,
@@ -25,16 +63,38 @@ pub const ConnectionStatus = enum {
     disconnected,
     connecting,
     connected,
+    reconnecting,
     closed,
+    draining_subs,
+    draining_pubs,
 };
 
 
+
+pub const ReconnectOptions = struct {
+    max_reconnect: i32 = 60,  // -1 = unlimited
+    reconnect_wait_ms: u64 = 2000,  // milliseconds
+    reconnect_jitter_ms: u64 = 100,
+    reconnect_jitter_tls_ms: u64 = 1000,
+    reconnect_buf_size: usize = 8 * 1024 * 1024,
+    allow_reconnect: bool = true,
+    custom_reconnect_delay_cb: ?*const fn(attempts: u32) u64 = null,
+};
+
+pub const ConnectionCallbacks = struct {
+    disconnected_cb: ?*const fn(*Connection) void = null,
+    reconnected_cb: ?*const fn(*Connection) void = null,
+    closed_cb: ?*const fn(*Connection) void = null,
+    error_cb: ?*const fn(*Connection, []const u8) void = null,
+};
 
 pub const ConnectionOptions = struct {
     name: ?[]const u8 = null,
     timeout_ms: u64 = 5000,
     verbose: bool = false,
     send_asap: bool = false,
+    reconnect: ReconnectOptions = .{},
+    callbacks: ConnectionCallbacks = .{},
 };
 
 pub const Connection = struct {
@@ -44,6 +104,19 @@ pub const Connection = struct {
     // Network
     stream: ?net.Stream = null,
     status: ConnectionStatus = .disconnected,
+
+    // Server management
+    server_pool: ServerPool,
+    current_server: ?*Server = null, // Track current server like C library
+    
+    // Reconnection state
+    reconnect_thread: ?std.Thread = null,
+    in_reconnect: i32 = 0, // Regular int like C library, protected by mutex
+    abort_reconnect: bool = false, // Like C library's nc->ar flag, protected by mutex
+    pending_buffer: PendingBuffer,
+    
+    // Reconnection coordination
+    reconnect_condition: std.Thread.Condition = .{},
 
     // Threading
     reader_thread: ?std.Thread = null,
@@ -75,6 +148,8 @@ pub const Connection = struct {
         return Self{
             .allocator = allocator,
             .options = options,
+            .server_pool = ServerPool.init(allocator),
+            .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .parser = Parser.init(allocator),
         };
@@ -93,6 +168,10 @@ pub const Connection = struct {
         // Clean up write buffer
         self.write_buffer.deinit(self.allocator);
 
+        // Clean up server pool and pending buffer
+        self.server_pool.deinit();
+        self.pending_buffer.deinit();
+
         self.parser.deinit();
     }
 
@@ -101,20 +180,71 @@ pub const Connection = struct {
             return ConnectionError.ConnectionFailed;
         }
 
-        self.status = .connecting;
+        // Add server to pool if it's not already there
+        if (self.server_pool.getSize() == 0) {
+            try self.server_pool.addServer(url, false); // Explicit server
+        }
 
-        // Parse URL and establish TCP connection
-        const parsed = try self.parseUrl(url);
-        const stream = net.tcpConnectToHost(self.allocator, parsed.host, parsed.port) catch {
+        return self.connectToServer();
+    }
+    
+    pub fn addServer(self: *Self, url: []const u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.server_pool.addServer(url, false); // Explicit server
+    }
+    
+    fn connectToServer(self: *Self) !void {
+        // This is called from initial connect() - needs to manage its own mutex
+        self.mutex.lock();
+        
+        self.status = .connecting;
+        
+        // Get server using C library's GetNextServer algorithm
+        const selected_server = try self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) orelse {
             self.status = .disconnected;
+            self.mutex.unlock();
+            return ConnectionError.ConnectionFailed;
+        };
+        
+        // Update current server and track reconnection attempt (like C library)
+        self.current_server = selected_server;
+        selected_server.reconnects += 1;
+        
+        self.mutex.unlock();
+
+        // Establish TCP connection (outside mutex like C library)
+        const stream = net.tcpConnectToHost(self.allocator, selected_server.host, selected_server.port) catch |err| {
+            self.mutex.lock();
+            selected_server.last_error = err;
+            self.status = .disconnected;
+            self.mutex.unlock();
             return ConnectionError.ConnectionFailed;
         };
 
         self.stream = stream;
         self.should_stop.store(false, .monotonic);
 
-        // Handle initial handshake
-        try self.processInitialHandshake();
+        // Handle initial handshake (outside mutex)
+        self.processInitialHandshake() catch |err| {
+            self.stream = null;
+            stream.close();
+            self.mutex.lock();
+            selected_server.last_error = err;
+            self.status = .disconnected;
+            self.mutex.unlock();
+            return err;
+        };
+
+        // Mark successful connection (back under mutex)
+        self.mutex.lock();
+        selected_server.did_connect = true;
+        selected_server.reconnects = 0; // Reset on success
+        self.status = .connected;
+        
+        // Reset reconnection state (under mutex)
+        self.abort_reconnect = false;
+        self.mutex.unlock();
 
         // Start reader thread
         self.reader_thread = try std.Thread.spawn(.{}, readerLoop, .{self});
@@ -124,9 +254,7 @@ pub const Connection = struct {
             self.flusher_thread = try std.Thread.spawn(.{}, flusherLoop, .{self});
         }
 
-        self.status = .connected;
-
-        log.info("Connected successfully", .{});
+        log.info("Connected successfully to {s}", .{selected_server.url});
     }
 
     pub fn close(self: *Self) void {
@@ -135,6 +263,19 @@ pub const Connection = struct {
         log.info("Closing connection", .{});
         self.should_stop.store(true, .release);
         self.status = .closed;
+
+        // Interrupt and wait for reconnection thread (like C library)
+        self.mutex.lock();
+        const reconnect_thread = self.reconnect_thread;
+        
+        // Wake up sleeping reconnection thread 
+        self.reconnect_condition.signal();
+        self.mutex.unlock();
+        
+        // Wait for reconnection thread to complete
+        if (reconnect_thread) |thread| {
+            thread.join();
+        }
 
         // Stop flusher thread
         if (self.flusher_thread) |thread| {
@@ -155,6 +296,14 @@ pub const Connection = struct {
         if (self.reader_thread) |thread| {
             thread.join();
             self.reader_thread = null;
+        }
+
+        // Clear pending buffer
+        self.pending_buffer.clear();
+
+        // Invoke closed callback
+        if (self.options.callbacks.closed_cb) |callback| {
+            callback(self);
         }
     }
 
@@ -318,24 +467,6 @@ pub const Connection = struct {
         return sub.nextMessageTimeout(timeout_ns);
     }
 
-    fn parseUrl(self: *Self, url: []const u8) !struct { host: []const u8, port: u16 } {
-        _ = self;
-
-        const uri = std.Uri.parse(url) catch return ConnectionError.InvalidUrl;
-
-        if (!std.mem.eql(u8, uri.scheme, "nats")) {
-            return ConnectionError.InvalidUrl;
-        }
-
-        const host_component = uri.host orelse return ConnectionError.InvalidUrl;
-        const host = switch (host_component) {
-            .raw => |h| h,
-            .percent_encoded => |h| h,
-        };
-
-        const port = uri.port orelse 4222;
-        return .{ .host = host, .port = port };
-    }
 
     fn processInitialHandshake(self: *Self) !void {
         const stream = self.stream orelse return ConnectionError.ConnectionClosed;
@@ -401,11 +532,17 @@ pub const Connection = struct {
         while (!self.should_stop.load(.acquire)) {
             const bytes_read = reader.read(&buffer) catch |err| {
                 log.err("Read error: {}", .{err});
+                if (self.status == .connected) {
+                    self.triggerReconnect(err);
+                }
                 break;
             };
 
             if (bytes_read == 0) {
                 log.debug("Connection closed by server", .{});
+                if (self.status == .connected) {
+                    self.triggerReconnect(ConnectionError.ConnectionClosed);
+                }
                 break;
             }
 
@@ -414,6 +551,11 @@ pub const Connection = struct {
             // Parse the received data
             self.parser.parse(self, buffer[0..bytes_read]) catch |err| {
                 log.err("Parser error: {}", .{err});
+                // Reset parser state on error to prevent corruption
+                self.parser.reset();
+                if (self.status == .connected) {
+                    self.triggerReconnect(err);
+                }
                 break;
             };
         }
@@ -459,6 +601,11 @@ pub const Connection = struct {
                 } else |err| {
                     log.err("Flush error: {}", .{err});
                     // Keep the data in buffer for retry
+                    if (self.status == .connected) {
+                        self.mutex.unlock(); // Release mutex before triggering reconnect
+                        self.triggerReconnect(err);
+                        return; // Exit flusher loop
+                    }
                 }
             }
 
@@ -469,11 +616,21 @@ pub const Connection = struct {
     }
 
     fn bufferWrite(self: *Self, data: []const u8) !void {
+        // If we're reconnecting, buffer the message for later
+        if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
+            return self.pending_buffer.addMessage(data);
+        }
+        
         if (self.options.send_asap) {
             // Send immediately
             const stream = self.stream orelse return ConnectionError.ConnectionClosed;
             const writer = stream.writer();
-            try writer.writeAll(data);
+            writer.writeAll(data) catch |err| {
+                if (self.status == .connected) {
+                    self.triggerReconnect(err);
+                }
+                return err;
+            };
         } else {
             // Buffer and signal flusher
             self.mutex.lock();
@@ -558,6 +715,251 @@ pub const Connection = struct {
                 log.err("Failed to send PONG: {}", .{err});
             };
             log.debug("Sent PONG in response to PING", .{});
+        }
+    }
+
+    // Reconnection Logic
+
+    fn triggerReconnect(self: *Self, err: anyerror) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        
+        // Check if we should start reconnection (like C library's _processOpError)
+        if (!self.options.reconnect.allow_reconnect or 
+            self.status == .closed or 
+            self.in_reconnect > 0) {
+            return; // Already reconnecting or closed
+        }
+
+        log.info("Connection lost ({}), starting reconnection", .{err});
+        
+        // Mark current server as having an error (already under connection mutex)
+        if (self.current_server) |server| {
+            server.last_error = err;
+            server.reconnects += 1;
+        }
+
+        self.status = .reconnecting;
+        self.abort_reconnect = false; // Reset abort flag when starting reconnection
+
+        // Close current stream
+        if (self.stream) |stream| {
+            stream.close();
+            self.stream = null;
+        }
+        
+        // Reset parser state for clean reconnection
+        self.parser.reset();
+
+        // Invoke disconnected callback
+        if (self.options.callbacks.disconnected_cb) |callback| {
+            callback(self);
+        }
+
+        // Start reconnection thread (protected by mutex like C library)
+        const thread = std.Thread.spawn(.{}, doReconnect, .{self}) catch |spawn_err| {
+            log.err("Failed to start reconnection thread: {}", .{spawn_err});
+            self.status = .closed;
+            return;
+        };
+        
+        // Successfully created thread - update state (under mutex like C library)
+        self.reconnect_thread = thread;
+        self.in_reconnect += 1; // Increment like C library
+    }
+
+    fn doReconnect(self: *Self) void {
+        log.info("Reconnection loop started", .{});
+
+        // Follow C library pattern: main loop under mutex with selective releases
+        self.mutex.lock();
+        
+        var total_attempts: u32 = 0;
+        var server_cycle_count: u32 = 0;
+
+        // Main reconnection loop (like C library: continue while status OK and servers available)
+        while (self.status != .closed and !self.abort_reconnect and self.server_pool.getSize() > 0) {
+            
+            // Check if we've exhausted our reconnection attempts (under mutex)
+            if (self.options.reconnect.max_reconnect >= 0 and 
+                total_attempts >= self.options.reconnect.max_reconnect) {
+                log.err("Max reconnection attempts ({}) reached", .{self.options.reconnect.max_reconnect});
+                break;
+            }
+
+            // Sleep after trying all servers once (under mutex like C library)
+            if (server_cycle_count >= self.server_pool.getSize() and total_attempts > 0) {
+                server_cycle_count = 0;
+                
+                // Check if connection closed before sleep (like C library)
+                if (self.status == .closed) break;
+                
+                const delay_ms = self.calculateReconnectDelay(total_attempts);
+                log.debug("Waiting {}ms before next reconnection attempt", .{delay_ms});
+                
+                // Exception: Custom delay callback outside mutex (like C library)
+                if (self.options.reconnect.custom_reconnect_delay_cb) |callback| {
+                    self.mutex.unlock(); // Release for callback
+                    const custom_delay = callback(total_attempts);
+                    self.mutex.lock();   // Re-acquire after callback
+                    
+                    const timeout_ns = custom_delay * std.time.ns_per_ms;
+                    self.reconnect_condition.timedWait(&self.mutex, timeout_ns) catch {};
+                } else {
+                    // Regular sleep with interruptible wait (under mutex)
+                    const timeout_ns = delay_ms * std.time.ns_per_ms;
+                    self.reconnect_condition.timedWait(&self.mutex, timeout_ns) catch {};
+                }
+            }
+            
+            // Check if connection closed after potential sleep (like C library)
+            if (self.status == .closed) break;
+
+            // Get next server using C library algorithm (under mutex)
+            const server = self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) catch |err| {
+                log.err("Server pool error: {}", .{err});
+                break;
+            } orelse {
+                log.err("No servers available for reconnection", .{});
+                break;
+            };
+
+            // Update current server and track attempt (under mutex)
+            self.current_server = server;
+            server.reconnects += 1;
+            total_attempts += 1;
+            server_cycle_count += 1;
+            
+            self.status = .connecting;
+            
+            // Exception: Release mutex for actual TCP connection (like C library)
+            self.mutex.unlock();
+            
+            // Establish TCP connection (outside mutex)
+            const stream = net.tcpConnectToHost(self.allocator, server.host, server.port) catch |err| {
+                self.mutex.lock(); // Re-acquire for error handling
+                server.last_error = err;
+                log.debug("Reconnection attempt {} failed: {}", .{ total_attempts, err });
+                continue; // Continue loop (mutex still held)
+            };
+
+            self.stream = stream;
+            self.should_stop.store(false, .monotonic);
+
+            // Handle initial handshake (outside mutex)
+            const handshake_result = self.processInitialHandshake();
+            
+            self.mutex.lock(); // Re-acquire mutex
+            
+            if (handshake_result) |_| {
+                // Success! Update connection state (under mutex)
+                server.did_connect = true;
+                server.reconnects = 0;
+                self.status = .connected;
+                self.abort_reconnect = false;
+                
+                // Clean up thread state
+                self.in_reconnect -= 1;
+                const thread = self.reconnect_thread;
+                self.reconnect_thread = null;
+                
+                self.mutex.unlock(); // Release before operations that don't need mutex
+                
+                // Re-establish subscriptions (outside mutex like C library)
+                self.resendSubscriptions() catch |err| {
+                    log.err("Failed to re-establish subscriptions: {}", .{err});
+                    // Continue anyway, connection is established
+                };
+
+                // Flush pending messages (outside mutex like C library) 
+                self.pending_buffer.flush(self.stream.?) catch |err| {
+                    log.warn("Failed to flush pending messages: {}", .{err});
+                    // Continue anyway, connection is established
+                };
+
+                // Exception: Invoke callback outside mutex (like C library)
+                if (self.options.callbacks.reconnected_cb) |callback| {
+                    callback(self);
+                }
+
+                log.info("Reconnection successful after {} attempts", .{total_attempts});
+
+                // Detach thread for cleanup (like C library)
+                if (thread) |t| {
+                    t.detach();
+                }
+                return;
+            } else |err| {
+                // Handshake failed, clean up and continue  
+                self.stream = null;
+                stream.close();
+                server.last_error = err;
+                self.status = .reconnecting;
+                log.debug("Handshake failed for reconnection attempt {}: {}", .{ total_attempts, err });
+                
+                // Check if connection closed or should abort after error (like C library)
+                if (self.status == .closed or self.abort_reconnect) {
+                    break;
+                }
+                // Continue loop (mutex still held)
+            }
+        }
+
+        // Failed to reconnect - cleanup (under mutex like C library)
+        log.err("Reconnection failed after {} attempts", .{total_attempts});
+        
+        self.in_reconnect -= 1; // Always decrement
+        self.reconnect_thread = null;
+        self.status = .closed;
+        self.abort_reconnect = true; // Mark as aborted
+        
+        self.mutex.unlock(); // Final release
+        
+        // Exception: Invoke callback outside mutex (like C library)
+        if (self.options.callbacks.closed_cb) |callback| {
+            callback(self);
+        }
+    }
+
+    fn calculateReconnectDelay(self: *Self, attempts: u32) u64 {
+        if (self.options.reconnect.custom_reconnect_delay_cb) |callback| {
+            return callback(attempts);
+        }
+
+        var base_wait = self.options.reconnect.reconnect_wait_ms;
+        const jitter = self.options.reconnect.reconnect_jitter_ms;
+
+        if (jitter > 0) {
+            var rng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+            const random_jitter = rng.random().uintLessThan(u64, jitter);
+            base_wait += random_jitter;
+        }
+
+        return base_wait;
+    }
+
+    fn resendSubscriptions(self: *Self) !void {
+        log.debug("Re-establishing subscriptions", .{});
+        
+        self.subs_mutex.lock();
+        defer self.subs_mutex.unlock();
+
+        var iter = self.subscriptions.iterator();
+        while (iter.next()) |entry| {
+            const sub = entry.value_ptr.*;
+            
+            // Send SUB command
+            var buffer = ArrayList(u8).init(self.allocator);
+            defer buffer.deinit();
+            
+            try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
+            
+            // Send directly (bypass buffering since we're reconnecting)
+            const stream = self.stream orelse return ConnectionError.ConnectionClosed;
+            const writer = stream.writer();
+            try writer.writeAll(buffer.items);
+            
+            log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
         }
     }
 };
