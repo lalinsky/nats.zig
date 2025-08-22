@@ -55,21 +55,23 @@ pub const Parser = struct {
     hdr: i32 = -1,
     ma: MsgArg = .{},
     scratch: [MAX_CONTROL_LINE_SIZE]u8 = undefined,
-    arg_buf: std.ArrayList(u8),
-    msg_buf: std.ArrayList(u8),
+    arg_buf_rec: std.ArrayList(u8),  // The actual arg buffer storage
+    arg_buf: ?*std.ArrayList(u8) = null,  // Nullable pointer, null = fast path
+    msg_buf_rec: std.ArrayList(u8),  // The actual msg buffer storage
+    msg_buf: ?*std.ArrayList(u8) = null,  // Nullable pointer, null = fast path
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
-            .arg_buf = std.ArrayList(u8).init(allocator),
-            .msg_buf = std.ArrayList(u8).init(allocator),
+            .arg_buf_rec = std.ArrayList(u8).init(allocator),
+            .msg_buf_rec = std.ArrayList(u8).init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.arg_buf.deinit();
-        self.msg_buf.deinit();
+        self.arg_buf_rec.deinit();
+        self.msg_buf_rec.deinit();
     }
     
     pub fn reset(self: *Self) void {
@@ -78,8 +80,10 @@ pub const Parser = struct {
         self.drop = 0;
         self.hdr = -1;
         self.ma = .{};
-        self.arg_buf.clearRetainingCapacity();
-        self.msg_buf.clearRetainingCapacity();
+        self.arg_buf = null;  // Reset to fast path
+        self.arg_buf_rec.clearRetainingCapacity();
+        self.msg_buf = null;  // Reset to fast path
+        self.msg_buf_rec.clearRetainingCapacity();
     }
 
     pub fn parse(self: *Self, conn: anytype, buf: []const u8) !void {
@@ -145,6 +149,7 @@ pub const Parser = struct {
                         else => {
                             self.state = .MSG_ARG;
                             self.after_space = i;
+                            // Don't use arg_buf for fast path - let MSG_ARG handle it
                         },
                     }
                 },
@@ -153,17 +158,23 @@ pub const Parser = struct {
                     switch (b) {
                         '\r' => self.drop = 1,
                         '\n' => {
-                            // Process message arguments
-                            const arg_start = if (self.arg_buf.items.len > 0)
-                                self.arg_buf.items
+                            // Process message arguments using C-style two-mode approach
+                            const arg_start = if (self.arg_buf) |arg_buf|
+                                arg_buf.items  // Slow path: accumulated from split buffer
                             else
-                                buf[self.after_space..i - self.drop];
+                                buf[self.after_space..i - self.drop];  // Fast path: direct slice
 
                             try self.processMsgArgs(arg_start);
 
                             self.drop = 0;
                             self.after_space = i + 1;
                             self.state = .MSG_PAYLOAD;
+                            
+                            // Clear split buffer mode
+                            if (self.arg_buf) |_| {
+                                self.arg_buf = null;
+                                self.arg_buf_rec.clearRetainingCapacity();
+                            }
 
                             // Jump ahead to message end if possible - check bounds
                             // ma.size already contains total size (headers + payload)
@@ -173,8 +184,10 @@ pub const Parser = struct {
                             }
                         },
                         else => {
-                            // Accumulate argument bytes
-                            try self.arg_buf.append(b);
+                            // Only accumulate if we're in split buffer mode
+                            if (self.arg_buf) |arg_buf| {
+                                try arg_buf.append(b);
+                            }
                         },
                     }
                 },
@@ -185,36 +198,46 @@ pub const Parser = struct {
                     // ma.size now contains total size (matching C parser)
                     const total_msg_size = @as(usize, @intCast(self.ma.size));
 
-                    if (self.msg_buf.items.len >= total_msg_size) {
-                        // Process accumulated message
-                        const payload_start = if (self.hdr >= 0) @as(usize, @intCast(self.hdr)) else 0;
-                        const payload_len = if (self.hdr >= 0) total_msg_size - @as(usize, @intCast(self.hdr)) else total_msg_size;
-                        const payload = self.msg_buf.items[payload_start..payload_start + payload_len];
-                        try conn.processMsg(payload);
-                        done = true;
-                    } else if (self.msg_buf.items.len == 0 and i - self.after_space >= total_msg_size) {
-                        // Process message directly from buffer
+                    if (self.msg_buf) |msg_buf| {
+                        // Slow path: using accumulated buffer
+                        if (msg_buf.items.len >= total_msg_size) {
+                            // Process accumulated message
+                            const payload_start = if (self.hdr >= 0) @as(usize, @intCast(self.hdr)) else 0;
+                            const payload_len = if (self.hdr >= 0) total_msg_size - @as(usize, @intCast(self.hdr)) else total_msg_size;
+                            const payload = msg_buf.items[payload_start..payload_start + payload_len];
+                            try conn.processMsg(payload);
+                            done = true;
+                        } else {
+                            // Continue accumulating message bytes
+                            const needed = total_msg_size - msg_buf.items.len;
+                            const available = buf.len - i;
+                            const to_copy = @min(needed, available);
+
+                            if (to_copy > 0) {
+                                try msg_buf.appendSlice(buf[i..i + to_copy]);
+                                i += to_copy - 1;
+                            }
+                        }
+                    } else if (i - self.after_space >= total_msg_size) {
+                        // Fast path: process message directly from buffer
                         const msg_start = self.after_space;
                         const payload_start = if (self.hdr >= 0) msg_start + @as(usize, @intCast(self.hdr)) else msg_start;
                         const payload_len = if (self.hdr >= 0) total_msg_size - @as(usize, @intCast(self.hdr)) else total_msg_size;
                         const payload = buf[payload_start..payload_start + payload_len];
                         try conn.processMsg(payload);
                         done = true;
-                    } else {
-                        // Accumulate message bytes
-                        const needed = total_msg_size - self.msg_buf.items.len;
-                        const available = buf.len - i;
-                        const to_copy = @min(needed, available);
-
-                        if (to_copy > 0) {
-                            try self.msg_buf.appendSlice(buf[i..i + to_copy]);
-                            i += to_copy - 1;
-                        }
                     }
 
                     if (done) {
-                        self.arg_buf.clearRetainingCapacity();
-                        self.msg_buf.clearRetainingCapacity();
+                        // Clear split buffer modes
+                        if (self.arg_buf) |_| {
+                            self.arg_buf = null;
+                            self.arg_buf_rec.clearRetainingCapacity();
+                        }
+                        if (self.msg_buf) |_| {
+                            self.msg_buf = null;
+                            self.msg_buf_rec.clearRetainingCapacity();
+                        }
                         self.state = .MSG_END;
                     }
                 },
@@ -347,7 +370,6 @@ pub const Parser = struct {
                     switch (b) {
                         ' ', '\t' => {
                             self.state = .OP_MINUS_ERR_SPC;
-                            self.arg_buf.clearRetainingCapacity();
                         },
                         else => return error.InvalidProtocol,
                     }
@@ -358,21 +380,39 @@ pub const Parser = struct {
                         ' ', '\t' => {},
                         else => {
                             self.state = .MINUS_ERR_ARG;
-                            try self.arg_buf.append(b);
+                            self.after_space = i;
+                            // Don't set up arg_buf yet - use fast path first
                         },
                     }
                 },
 
                 .MINUS_ERR_ARG => {
                     switch (b) {
+                        '\r' => self.drop = 1,
                         '\n' => {
-                            const err_msg = if (self.arg_buf.items.len > 0) self.arg_buf.items else "";
+                            // Process error message using C-style two-mode approach
+                            const err_msg = if (self.arg_buf) |arg_buf|
+                                arg_buf.items  // Slow path: accumulated from split buffer
+                            else
+                                buf[self.after_space..i - self.drop];  // Fast path: direct slice
+
                             try conn.processErr(err_msg);
+                            
+                            self.drop = 0;
+                            self.after_space = i + 1;
                             self.state = .OP_START;
+                            
+                            // Clear split buffer mode
+                            if (self.arg_buf) |_| {
+                                self.arg_buf = null;
+                                self.arg_buf_rec.clearRetainingCapacity();
+                            }
                         },
-                        '\r' => {}, // Skip CR
                         else => {
-                            try self.arg_buf.append(b);
+                            // Only accumulate if we're in split buffer mode
+                            if (self.arg_buf) |arg_buf| {
+                                try arg_buf.append(b);
+                            }
                         },
                     }
                 },
@@ -403,7 +443,6 @@ pub const Parser = struct {
                     switch (b) {
                         ' ', '\t' => {
                             self.state = .OP_INFO_SPC;
-                            self.arg_buf.clearRetainingCapacity();
                         },
                         else => return error.InvalidProtocol,
                     }
@@ -414,27 +453,68 @@ pub const Parser = struct {
                         ' ', '\t' => {},
                         else => {
                             self.state = .INFO_ARG;
-                            try self.arg_buf.append(b);
+                            self.after_space = i;
+                            // Don't set up arg_buf yet - use fast path first
                         },
                     }
                 },
 
                 .INFO_ARG => {
                     switch (b) {
+                        '\r' => self.drop = 1,
                         '\n' => {
-                            const info_json = if (self.arg_buf.items.len > 0) self.arg_buf.items else "";
+                            // Process INFO JSON using C-style two-mode approach
+                            const info_json = if (self.arg_buf) |arg_buf|
+                                arg_buf.items  // Slow path: accumulated from split buffer
+                            else
+                                buf[self.after_space..i - self.drop];  // Fast path: direct slice
+
                             try conn.processInfo(info_json);
+                            
+                            self.drop = 0;
+                            self.after_space = i + 1;
                             self.state = .OP_START;
+                            
+                            // Clear split buffer mode
+                            if (self.arg_buf) |_| {
+                                self.arg_buf = null;
+                                self.arg_buf_rec.clearRetainingCapacity();
+                            }
                         },
-                        '\r' => {}, // Skip CR
                         else => {
-                            try self.arg_buf.append(b);
+                            // Only accumulate if we're in split buffer mode
+                            if (self.arg_buf) |arg_buf| {
+                                try arg_buf.append(b);
+                            }
                         },
                     }
                 },
             }
 
             i += 1;
+        }
+        
+        // Check for split buffer scenarios (like C parser)
+        if ((self.state == .MSG_ARG or 
+             self.state == .MINUS_ERR_ARG or 
+             self.state == .INFO_ARG) and 
+            self.arg_buf == null) {
+            // We're in argument parsing state but haven't finished parsing
+            // Set up arg_buf for next parse() call
+            self.arg_buf = &self.arg_buf_rec;
+            self.arg_buf_rec.clearRetainingCapacity();
+            const remaining_args = buf[self.after_space..i - self.drop];
+            try self.arg_buf_rec.appendSlice(remaining_args);
+        }
+        
+        // Check for split message scenarios (like C parser)
+        if (self.state == .MSG_PAYLOAD and self.msg_buf == null) {
+            // We're in MSG_PAYLOAD state but haven't finished parsing the message
+            // Set up msg_buf for next parse() call
+            self.msg_buf = &self.msg_buf_rec;
+            self.msg_buf_rec.clearRetainingCapacity();
+            const remaining_msg = buf[self.after_space..];
+            try self.msg_buf_rec.appendSlice(remaining_msg);
         }
     }
 
@@ -621,6 +701,8 @@ test "parser msg" {
     try parser.parse(&mock_conn, "MSG foo 1 5\r\nhello\r\n");
     try testing.expectEqual(1, mock_conn.msg_count);
     try testing.expectEqualStrings("hello", mock_conn.last_msg);
+    // Test that subject is parsed correctly (would fail if first char dropped)
+    try testing.expectEqualStrings("foo", parser.ma.subject);
 }
 
 test "parser msg with reply" {
@@ -653,4 +735,90 @@ test "parser hmsg" {
     // Verify internal state matches C parser expectations
     try testing.expectEqual(@as(i32, 22), parser.ma.hdr);  // Header size
     try testing.expectEqual(@as(i32, 27), parser.ma.size);  // Total size (like C parser)
+}
+
+test "parser split msg arguments" {
+    const testing = std.testing;
+
+    var parser = Parser.init(testing.allocator);
+    defer parser.deinit();
+
+    var mock_conn = MockConnection{};
+    defer mock_conn.deinit();
+
+    // Split the MSG arguments across two parse calls
+    try parser.parse(&mock_conn, "MSG test.subj"); // Missing end of arguments
+    try testing.expectEqual(0, mock_conn.msg_count); // Should not process yet
+    try testing.expectEqual(parser.state, .MSG_ARG); // Should be waiting for more
+    try testing.expect(parser.arg_buf != null); // Should have set up slow path
+
+    // Complete the arguments and message
+    try parser.parse(&mock_conn, "ect 1 11\r\nhello world\r\n");
+    try testing.expectEqual(1, mock_conn.msg_count);
+    try testing.expectEqualStrings("hello world", mock_conn.last_msg);
+    try testing.expectEqualStrings("test.subject", parser.ma.subject);
+}
+
+test "parser split msg payload" {
+    const testing = std.testing;
+
+    var parser = Parser.init(testing.allocator);
+    defer parser.deinit();
+
+    var mock_conn = MockConnection{};
+    defer mock_conn.deinit();
+
+    // Split the message payload across two parse calls
+    try parser.parse(&mock_conn, "MSG foo 1 11\r\nhello"); // Missing end of payload
+    try testing.expectEqual(0, mock_conn.msg_count); // Should not process yet
+    try testing.expectEqual(parser.state, .MSG_PAYLOAD); // Should be waiting for more
+    try testing.expect(parser.msg_buf != null); // Should have set up slow path
+
+    // Complete the payload
+    try parser.parse(&mock_conn, " world\r\n");
+    try testing.expectEqual(1, mock_conn.msg_count);
+    try testing.expectEqualStrings("hello world", mock_conn.last_msg);
+    try testing.expectEqualStrings("foo", parser.ma.subject);
+}
+
+test "parser split err message" {
+    const testing = std.testing;
+
+    var parser = Parser.init(testing.allocator);
+    defer parser.deinit();
+
+    var mock_conn = MockConnection{};
+    defer mock_conn.deinit();
+
+    // Split the ERR message across two parse calls
+    try parser.parse(&mock_conn, "-ERR Authentication"); // Missing end of error
+    try testing.expectEqual(0, mock_conn.err_count); // Should not process yet
+    try testing.expectEqual(parser.state, .MINUS_ERR_ARG); // Should be waiting for more
+    try testing.expect(parser.arg_buf != null); // Should have set up slow path
+
+    // Complete the error message
+    try parser.parse(&mock_conn, " Required\r\n");
+    try testing.expectEqual(1, mock_conn.err_count);
+    try testing.expectEqualStrings("Authentication Required", mock_conn.last_err);
+}
+
+test "parser split info message" {
+    const testing = std.testing;
+
+    var parser = Parser.init(testing.allocator);
+    defer parser.deinit();
+
+    var mock_conn = MockConnection{};
+    defer mock_conn.deinit();
+
+    // Split the INFO message across two parse calls
+    try parser.parse(&mock_conn, "INFO {\"server_id\":\"test\",\"ver"); // Missing end of JSON
+    try testing.expectEqual(0, mock_conn.info_count); // Should not process yet
+    try testing.expectEqual(parser.state, .INFO_ARG); // Should be waiting for more
+    try testing.expect(parser.arg_buf != null); // Should have set up slow path
+
+    // Complete the INFO JSON
+    try parser.parse(&mock_conn, "sion\":\"2.0.0\"}\r\n");
+    try testing.expectEqual(1, mock_conn.info_count);
+    try testing.expectEqualStrings("{\"server_id\":\"test\",\"version\":\"2.0.0\"}", mock_conn.last_info);
 }
