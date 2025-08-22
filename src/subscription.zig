@@ -86,18 +86,25 @@ pub const Subscription = struct {
         self.release(allocator);
     }
 
-    pub fn nextMessage(self: *Subscription) ?*Message {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return self.messages.readItem();
-    }
-    
-    pub fn nextMessageTimeout(self: *Subscription, timeout_ns: u64) ?*Message {
+    pub fn nextMsg(self: *Subscription, timeout_ms: u64) ?*Message {
+        if (timeout_ms == 0) {
+            // Non-blocking mode
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            return self.messages.readItem();
+        }
+        
+        // Blocking mode with timeout
+        const timeout_ns = timeout_ms * std.time.ns_per_ms;
         const deadline = std.time.nanoTimestamp() + @as(i128, timeout_ns);
         
         while (std.time.nanoTimestamp() < deadline) {
-            if (self.nextMessage()) |msg| {
-                return msg;
+            self.mutex.lock();
+            const msg = self.messages.readItem();
+            self.mutex.unlock();
+            
+            if (msg) |m| {
+                return m;
             }
             // Sleep for 1ms before retrying
             std.time.sleep(1_000_000);

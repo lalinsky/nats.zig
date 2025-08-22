@@ -15,7 +15,7 @@ test "request reply basic functionality" {
     defer conn.deinit();
     
     // Test that request fails when disconnected
-    const result = conn.request("test.subject", "request data", std.time.ns_per_s);
+    const result = conn.request("test.subject", "request data", 1000);
     try std.testing.expectError(ConnectionError.ConnectionClosed, result);
 }
 
@@ -54,7 +54,7 @@ test "subscription timeout" {
     
     // Test immediate timeout (should return null)
     const start = std.time.nanoTimestamp();
-    const result = sub.nextMessageTimeout(1_000_000); // 1ms
+    const result = sub.nextMsg(1); // 1ms
     const duration = std.time.nanoTimestamp() - start;
     
     try std.testing.expectEqual(@as(?*Message, null), result);
