@@ -29,7 +29,7 @@ pub const ServerVersion = struct {
         var result = ServerVersion{};
         
         if (version_str) |str| {
-            var iter = std.mem.split(u8, str, ".");
+            var iter = std.mem.splitSequence(u8, str, ".");
             
             if (iter.next()) |major_str| {
                 result.major = std.fmt.parseInt(u32, major_str, 10) catch 0;
@@ -540,6 +540,13 @@ pub const Connection = struct {
             if (!std.mem.startsWith(u8, info_line, "INFO ")) {
                 return ConnectionError.InvalidProtocol;
             }
+            
+            // Extract and parse the JSON part after "INFO "
+            const json_start = "INFO ".len;
+            if (info_line.len > json_start) {
+                const info_json = std.mem.trim(u8, info_line[json_start..], " \r\n");
+                try self.processInfo(info_json);
+            }
         } else {
             return ConnectionError.ConnectionClosed;
         }
@@ -759,7 +766,7 @@ pub const Connection = struct {
             ServerInfo, 
             arena, 
             info_json, 
-            .{}
+            .{ .ignore_unknown_fields = true }
         ) catch |err| {
             log.err("Failed to parse INFO JSON: {}", .{err});
             return;
