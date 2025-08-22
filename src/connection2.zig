@@ -76,6 +76,7 @@ pub const ConnectionOptions = struct {
     name: ?[]const u8 = null,
     timeout_ms: u64 = 5000,
     verbose: bool = false,
+    send_asap: bool = false,
 };
 
 pub const Connection = struct {
@@ -88,7 +89,19 @@ pub const Connection = struct {
     
     // Threading
     reader_thread: ?std.Thread = null,
+    flusher_thread: ?std.Thread = null,
     should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    
+    // Main connection mutex (protects most fields)
+    mutex: std.Thread.Mutex = .{},
+    
+    // Flusher synchronization (protected by main mutex)
+    flusher_stop: bool = false,
+    flusher_signaled: bool = false,
+    flusher_condition: std.Thread.Condition = .{},
+    
+    // Write buffer (protected by main mutex)
+    write_buffer: std.ArrayListUnmanaged(u8) = .{},
     
     // Subscriptions
     next_sid: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
@@ -119,6 +132,9 @@ pub const Connection = struct {
         }
         self.subscriptions.deinit();
         
+        // Clean up write buffer
+        self.write_buffer.deinit(self.allocator);
+        
         self.parser.deinit();
     }
 
@@ -144,6 +160,12 @@ pub const Connection = struct {
 
         // Start reader thread
         self.reader_thread = try std.Thread.spawn(.{}, readerLoop, .{self});
+        
+        // Start flusher thread if not send_asap mode
+        if (!self.options.send_asap) {
+            self.flusher_thread = try std.Thread.spawn(.{}, flusherLoop, .{self});
+        }
+        
         self.status = .connected;
         
         log.info("Connected successfully", .{});
@@ -155,6 +177,17 @@ pub const Connection = struct {
         log.info("Closing connection", .{});
         self.should_stop.store(true, .release);
         self.status = .closed;
+
+        // Stop flusher thread
+        if (self.flusher_thread) |thread| {
+            self.mutex.lock();
+            self.flusher_stop = true;
+            self.flusher_condition.signal();
+            self.mutex.unlock();
+            
+            thread.join();
+            self.flusher_thread = null;
+        }
 
         if (self.stream) |stream| {
             stream.close();
@@ -176,13 +209,16 @@ pub const Connection = struct {
             return ConnectionError.ConnectionClosed;
         }
 
-        const stream = self.stream orelse return ConnectionError.ConnectionClosed;
-        const writer = stream.writer();
-
-        // Send PUB command directly - no buffering, no threading complications
-        try writer.print("PUB {s} {d}\r\n", .{ subject, data.len });
-        try writer.writeAll(data);
-        try writer.writeAll("\r\n");
+        // Format the complete PUB message
+        var buffer = ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+        
+        try buffer.writer().print("PUB {s} {d}\r\n", .{ subject, data.len });
+        try buffer.appendSlice(data);
+        try buffer.appendSlice("\r\n");
+        
+        // Send via buffer (either immediate or flusher thread)
+        try self.bufferWrite(buffer.items);
         
         log.debug("Published to {s}: {s}", .{ subject, data });
     }
@@ -200,10 +236,11 @@ pub const Connection = struct {
         defer self.subs_mutex.unlock();
         try self.subscriptions.put(sid, sub);
 
-        // Send SUB command
-        const stream = self.stream orelse return ConnectionError.ConnectionClosed;
-        const writer = stream.writer();
-        try writer.print("SUB {s} {d}\r\n", .{ subject, sid });
+        // Send SUB command via buffer
+        var buffer = ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+        try buffer.writer().print("SUB {s} {d}\r\n", .{ subject, sid });
+        try self.bufferWrite(buffer.items);
         
         log.debug("Subscribed to {s} with sid {d}", .{ subject, sid });
         return sub;
@@ -214,9 +251,22 @@ pub const Connection = struct {
             return ConnectionError.ConnectionClosed;
         }
 
-        const stream = self.stream orelse return ConnectionError.ConnectionClosed;
-        const writer = stream.writer();
-        try writer.writeAll("PING\r\n");
+        if (self.options.send_asap) {
+            // In send_asap mode, everything is already sent
+            return;
+        }
+
+        // Force flush any pending writes
+        self.mutex.lock();
+        const has_pending = self.write_buffer.items.len > 0;
+        if (has_pending) {
+            self.flusher_signaled = true;
+            self.flusher_condition.signal();
+        }
+        self.mutex.unlock();
+
+        // Send PING to ensure server acknowledges all previous messages
+        try self.bufferWrite("PING\r\n");
         
         log.debug("Sent PING for flush", .{});
     }
@@ -322,6 +372,72 @@ pub const Connection = struct {
         }
 
         log.debug("Reader loop exited", .{});
+    }
+
+    fn flusherLoop(self: *Self) void {
+        log.debug("Flusher loop started", .{});
+
+        while (true) {
+            self.mutex.lock();
+
+            // Wait for signal or stop condition
+            while (!self.flusher_signaled and !self.flusher_stop) {
+                self.flusher_condition.wait(&self.mutex);
+            }
+
+            if (self.flusher_stop) {
+                self.mutex.unlock();
+                break;
+            }
+
+            // Give a chance to accumulate more requests (like C implementation)
+            self.flusher_condition.timedWait(&self.mutex, 1_000_000) catch {}; // 1ms in nanoseconds
+
+            self.flusher_signaled = false;
+
+            // Check if we should flush
+            const should_flush = (self.status == .connected) and 
+                                (self.stream != null) and 
+                                (self.write_buffer.items.len > 0);
+
+            if (should_flush) {
+                const stream = self.stream.?;
+                const writer = stream.writer();
+                
+                // Write all buffered data
+                if (writer.writeAll(self.write_buffer.items)) {
+                    log.debug("Flushed {} bytes", .{self.write_buffer.items.len});
+                    self.write_buffer.clearRetainingCapacity();
+                } else |err| {
+                    log.err("Flush error: {}", .{err});
+                    // Keep the data in buffer for retry
+                }
+            }
+
+            self.mutex.unlock();
+        }
+
+        log.debug("Flusher loop exited", .{});
+    }
+
+    fn bufferWrite(self: *Self, data: []const u8) !void {
+        if (self.options.send_asap) {
+            // Send immediately
+            const stream = self.stream orelse return ConnectionError.ConnectionClosed;
+            const writer = stream.writer();
+            try writer.writeAll(data);
+        } else {
+            // Buffer and signal flusher
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            
+            try self.write_buffer.appendSlice(self.allocator, data);
+            
+            if (!self.flusher_signaled) {
+                self.flusher_signaled = true;
+                self.flusher_condition.signal();
+            }
+        }
     }
 
     // Parser callback methods

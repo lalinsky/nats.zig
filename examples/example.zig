@@ -10,8 +10,8 @@ pub fn main() !void {
     const options = nats.ConnectionOptions{
         .name = "example-client",
         .timeout_ms = 5000,
-        .allow_reconnect = true,
-        .max_reconnect_attempts = 3,
+        .verbose = false,
+        .send_asap = false, // Use flusher thread for batched writes
     };
     
     // Connect to NATS server
