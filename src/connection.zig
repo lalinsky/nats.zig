@@ -670,8 +670,23 @@ pub const Connection = struct {
             };
             
             const poll_result = std.posix.poll(&fds, 1000) catch |err| { // 1 second timeout
-                log.err("Poll error: {}", .{err});
-                break;
+                switch (err) {
+                    error.SignalInterrupt => {
+                        log.debug("Poll interrupted by signal, retrying", .{});
+                        continue; // EINTR - always retry
+                    },
+                    error.SystemResources => {
+                        log.warn("Poll system resources error, retrying: {}", .{err});
+                        continue; // ENOMEM - might be temporary
+                    },
+                    else => {
+                        log.err("Fatal poll error: {}", .{err});
+                        if (self.status == .connected) {
+                            self.triggerReconnect(err);
+                        }
+                        break;
+                    }
+                }
             };
             
             if (poll_result == 0) continue; // Timeout - check should_stop and retry
