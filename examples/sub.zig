@@ -26,10 +26,7 @@ pub fn main() !void {
     
     while (attempts < max_attempts) {
         if (sub.nextMessage()) |msg| {
-            defer {
-                msg.deinit(allocator);
-                allocator.destroy(msg);
-            }
+            defer msg.deinit();
             
             std.log.info("Received message: {s} - {s}", .{ msg.subject, msg.data });
             return;

@@ -27,10 +27,7 @@ pub fn main() !void {
     };
 
     if (reply) |msg| {
-        defer {
-            msg.deinit(allocator);
-            allocator.destroy(msg);
-        }
+        defer msg.deinit();
 
         // If we are here, we should have received the reply
         std.debug.print("Received reply: {s}\n", .{msg.data});

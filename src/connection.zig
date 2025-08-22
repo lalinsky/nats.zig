@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const Parser = @import("parser.zig").Parser;
 const inbox = @import("inbox.zig");
+const Message = @import("message_simple.zig").Message;
 
 const log = std.log.scoped(.connection);
 
@@ -24,20 +25,6 @@ pub const ConnectionStatus = enum {
     closed,
 };
 
-pub const Message = struct {
-    subject: []const u8,
-    data: []const u8,
-    reply: ?[]const u8 = null,
-    sid: u64,
-
-    pub fn deinit(self: *Message, allocator: Allocator) void {
-        allocator.free(self.subject);
-        allocator.free(self.data);
-        if (self.reply) |reply| {
-            allocator.free(reply);
-        }
-    }
-};
 
 pub const Subscription = struct {
     sid: u64,
@@ -59,8 +46,7 @@ pub const Subscription = struct {
         allocator.free(self.subject);
         // Clean up pending messages
         while (self.messages.readItem()) |msg| {
-            msg.deinit(allocator);
-            allocator.destroy(msg);
+            msg.deinit();
         }
         self.messages.deinit();
         allocator.destroy(self);
@@ -526,14 +512,16 @@ pub const Connection = struct {
         defer self.subs_mutex.unlock();
 
         if (self.subscriptions.get(msg_arg.sid)) |sub| {
-            // Create message
-            const message = try self.allocator.create(Message);
-            message.* = Message{
-                .subject = try self.allocator.dupe(u8, msg_arg.subject),
-                .data = try self.allocator.dupe(u8, payload),
-                .reply = if (msg_arg.reply) |reply| try self.allocator.dupe(u8, reply) else null,
-                .sid = msg_arg.sid,
-            };
+            // Create message copying data from parser buffers (like C implementation)
+            // This is necessary because parser buffers get reused on next read
+            const message = try Message.init(
+                self.allocator,
+                msg_arg.subject,
+                msg_arg.reply,
+                payload
+            );
+            message.sid = msg_arg.sid;
+            // TODO: handle headers when parser supports them
 
             // Deliver to subscription
             sub.mutex.lock();

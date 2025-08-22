@@ -36,10 +36,7 @@ pub fn main() !void {
     while (true) {
         // Wait for the next message (blocks until one arrives)
         if (sub.nextMessage()) |msg| {
-            defer {
-                msg.deinit(allocator);
-                allocator.destroy(msg);
-            }
+            defer msg.deinit();
 
             std.debug.print("Received msg: {s} - {s}\n", .{ msg.subject, msg.data });
 
