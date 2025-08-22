@@ -60,6 +60,8 @@ pub fn build(b: *std.Build) void {
     const example_files = [_]struct { name: []const u8, file: []const u8 }{
         .{ .name = "pub", .file = "examples/pub.zig" },
         .{ .name = "sub", .file = "examples/sub.zig" },
+        .{ .name = "requestor", .file = "examples/requestor.zig" },
+        .{ .name = "replier", .file = "examples/replier.zig" },
     };
     
     const examples_step = b.step("examples", "Build all examples");
