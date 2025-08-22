@@ -54,7 +54,6 @@ pub const Parser = struct {
     drop: usize = 0,
     hdr: i32 = -1,
     ma: MsgArg = .{},
-    scratch: [MAX_CONTROL_LINE_SIZE]u8 = undefined,
     arg_buf_rec: std.ArrayList(u8),  // The actual arg buffer storage
     arg_buf: ?*std.ArrayList(u8) = null,  // Nullable pointer, null = fast path
     msg_buf_rec: std.ArrayList(u8),  // The actual msg buffer storage
@@ -81,8 +80,8 @@ pub const Parser = struct {
         self.hdr = -1;
         self.ma = .{};
         self.arg_buf = null;  // Reset to fast path
-        self.arg_buf_rec.clearRetainingCapacity();
         self.msg_buf = null;  // Reset to fast path
+        self.arg_buf_rec.clearRetainingCapacity();
         self.msg_buf_rec.clearRetainingCapacity();
     }
 
@@ -501,21 +500,29 @@ pub const Parser = struct {
             self.arg_buf == null) {
             // We're in argument parsing state but haven't finished parsing
             // Set up arg_buf for next parse() call
-            self.arg_buf = &self.arg_buf_rec;
-            self.arg_buf_rec.clearRetainingCapacity();
+            try self.setupArgBuf();
             const remaining_args = buf[self.after_space..i - self.drop];
-            try self.arg_buf_rec.appendSlice(remaining_args);
+            try self.arg_buf.?.appendSlice(remaining_args);
         }
         
         // Check for split message scenarios (like C parser)
         if (self.state == .MSG_PAYLOAD and self.msg_buf == null) {
             // We're in MSG_PAYLOAD state but haven't finished parsing the message
             // Set up msg_buf for next parse() call
-            self.msg_buf = &self.msg_buf_rec;
-            self.msg_buf_rec.clearRetainingCapacity();
+            try self.setupMsgBuf();
             const remaining_msg = buf[self.after_space..];
-            try self.msg_buf_rec.appendSlice(remaining_msg);
+            try self.msg_buf.?.appendSlice(remaining_msg);
         }
+    }
+
+    fn setupArgBuf(self: *Self) !void {
+        self.arg_buf_rec.clearRetainingCapacity();
+        self.arg_buf = &self.arg_buf_rec;
+    }
+    
+    fn setupMsgBuf(self: *Self) !void {
+        self.msg_buf_rec.clearRetainingCapacity();
+        self.msg_buf = &self.msg_buf_rec;
     }
 
     fn processMsgArgs(self: *Self, args: []const u8) !void {
@@ -822,3 +829,4 @@ test "parser split info message" {
     try testing.expectEqual(1, mock_conn.info_count);
     try testing.expectEqualStrings("{\"server_id\":\"test\",\"version\":\"2.0.0\"}", mock_conn.last_info);
 }
+
