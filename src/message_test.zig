@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const Message = @import("message_simple.zig").Message;
+const Message = @import("message.zig").Message;
 
 test "Message owned data lifecycle" {
     const allocator = testing.allocator;

@@ -4,7 +4,10 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const Parser = @import("parser.zig").Parser;
 const inbox = @import("inbox.zig");
-const Message = @import("message_simple.zig").Message;
+const Message = @import("message.zig").Message;
+const subscription_mod = @import("subscription.zig");
+const Subscription = subscription_mod.Subscription;
+const MsgHandler = subscription_mod.MsgHandler;
 
 const log = std.log.scoped(.connection);
 
@@ -26,51 +29,6 @@ pub const ConnectionStatus = enum {
 };
 
 
-pub const Subscription = struct {
-    sid: u64,
-    subject: []const u8,
-    messages: std.fifo.LinearFifo(*Message, .Dynamic),
-    mutex: std.Thread.Mutex = .{},
-
-    pub fn init(allocator: Allocator, sid: u64, subject: []const u8) !*Subscription {
-        const sub = try allocator.create(Subscription);
-        sub.* = Subscription{
-            .sid = sid,
-            .subject = try allocator.dupe(u8, subject),
-            .messages = std.fifo.LinearFifo(*Message, .Dynamic).init(allocator),
-        };
-        return sub;
-    }
-
-    pub fn deinit(self: *Subscription, allocator: Allocator) void {
-        allocator.free(self.subject);
-        // Clean up pending messages
-        while (self.messages.readItem()) |msg| {
-            msg.deinit();
-        }
-        self.messages.deinit();
-        allocator.destroy(self);
-    }
-
-    pub fn nextMessage(self: *Subscription) ?*Message {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return self.messages.readItem();
-    }
-    
-    pub fn nextMessageTimeout(self: *Subscription, timeout_ns: u64) ?*Message {
-        const deadline = std.time.nanoTimestamp() + @as(i128, timeout_ns);
-        
-        while (std.time.nanoTimestamp() < deadline) {
-            if (self.nextMessage()) |msg| {
-                return msg;
-            }
-            // Sleep for 1ms before retrying
-            std.time.sleep(1_000_000);
-        }
-        return null;
-    }
-};
 
 pub const ConnectionOptions = struct {
     name: ?[]const u8 = null,
@@ -223,13 +181,13 @@ pub const Connection = struct {
         log.debug("Published to {s}: {s}", .{ subject, data });
     }
 
-    pub fn subscribe(self: *Self, subject: []const u8) !*Subscription {
+    pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
         if (self.status != .connected) {
             return ConnectionError.ConnectionClosed;
         }
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject);
+        const sub = try Subscription.initSync(self.allocator, sid, subject);
 
         // Add to subscriptions map
         self.subs_mutex.lock();
@@ -242,7 +200,33 @@ pub const Connection = struct {
         try buffer.writer().print("SUB {s} {d}\r\n", .{ subject, sid });
         try self.bufferWrite(buffer.items);
 
-        log.debug("Subscribed to {s} with sid {d}", .{ subject, sid });
+        log.debug("Subscribed to {s} with sid {d} (sync)", .{ subject, sid });
+        return sub;
+    }
+    
+    pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
+        if (self.status != .connected) {
+            return ConnectionError.ConnectionClosed;
+        }
+
+        // Create type-erased message handler
+        const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
+
+        const sid = self.next_sid.fetchAdd(1, .monotonic);
+        const sub = try Subscription.initAsync(self.allocator, sid, subject, handler);
+
+        // Add to subscriptions map
+        self.subs_mutex.lock();
+        defer self.subs_mutex.unlock();
+        try self.subscriptions.put(sid, sub);
+
+        // Send SUB command via buffer
+        var buffer = ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+        try buffer.writer().print("SUB {s} {d}\r\n", .{ subject, sid });
+        try self.bufferWrite(buffer.items);
+
+        log.debug("Subscribed to {s} with sid {d} (async)", .{ subject, sid });
         return sub;
     }
     
@@ -319,7 +303,7 @@ pub const Connection = struct {
         defer self.allocator.free(reply_subject);
 
         // 2. Subscribe to inbox
-        const sub = try self.subscribe(reply_subject);
+        const sub = try self.subscribeSync(reply_subject);
         defer {
             self.unsubscribe(sub) catch |err| {
                 log.warn("Failed to unsubscribe from inbox: {}", .{err});
@@ -508,27 +492,42 @@ pub const Connection = struct {
     pub fn processMsg(self: *Self, payload: []const u8) !void {
         const msg_arg = self.parser.ma;
 
+        // Create message copying data from parser buffers (like C implementation)
+        // This is necessary because parser buffers get reused on next read
+        const message = try Message.init(
+            self.allocator,
+            msg_arg.subject,
+            msg_arg.reply,
+            payload
+        );
+        message.sid = msg_arg.sid;
+        // TODO: handle headers when parser supports them
+
+        // Retain subscription while holding lock, then release lock
         self.subs_mutex.lock();
-        defer self.subs_mutex.unlock();
+        const sub = self.subscriptions.get(msg_arg.sid);
+        if (sub) |s| {
+            s.retain(); // Keep subscription alive
+        }
+        self.subs_mutex.unlock();
 
-        if (self.subscriptions.get(msg_arg.sid)) |sub| {
-            // Create message copying data from parser buffers (like C implementation)
-            // This is necessary because parser buffers get reused on next read
-            const message = try Message.init(
-                self.allocator,
-                msg_arg.subject,
-                msg_arg.reply,
-                payload
-            );
-            message.sid = msg_arg.sid;
-            // TODO: handle headers when parser supports them
-
-            // Deliver to subscription
-            sub.mutex.lock();
-            defer sub.mutex.unlock();
-            try sub.messages.writeItem(message);
+        if (sub) |s| {
+            defer s.release(self.allocator); // Release when done
+            
+            if (s.handler) |handler| {
+                // Execute callback without holding locks
+                handler.call(message);
+            } else {
+                // Sync subscription - queue message
+                s.mutex.lock();
+                defer s.mutex.unlock();
+                try s.messages.writeItem(message);
+            }
 
             log.debug("Delivered message to subscription {d}: {s}", .{ msg_arg.sid, payload });
+        } else {
+            // No subscription found, clean up message
+            message.deinit();
         }
     }
 
