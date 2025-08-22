@@ -1,24 +1,14 @@
 const std = @import("std");
 
 // Re-export key types and functions
-pub const Connection = @import("connection2.zig").Connection;
-pub const ConnectionOptions = @import("connection2.zig").ConnectionOptions;
-pub const ConnectionStatus = @import("connection2.zig").ConnectionStatus;
-pub const ConnectionError = @import("connection2.zig").ConnectionError;
-pub const Message = @import("connection2.zig").Message;
-pub const Subscription = @import("connection2.zig").Subscription;
+pub const Connection = @import("connection.zig").Connection;
+pub const ConnectionOptions = @import("connection.zig").ConnectionOptions;
+pub const ConnectionStatus = @import("connection.zig").ConnectionStatus;
+pub const ConnectionError = @import("connection.zig").ConnectionError;
+pub const Message = @import("connection.zig").Message;
+pub const Subscription = @import("connection.zig").Subscription;
 
-/// Create a new NATS connection
-pub fn connect(allocator: std.mem.Allocator, url: []const u8, options: ConnectionOptions) !Connection {
-    var conn = Connection.init(allocator, options);
-    try conn.connect(url);
-    return conn;
-}
-
-/// Create a connection to localhost:4222 with default options
-pub fn connectDefault(allocator: std.mem.Allocator) !Connection {
-    return connect(allocator, "nats://localhost:4222", .{});
-}
+// Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 
 // Test basic functionality
 test "basic connection lifecycle" {

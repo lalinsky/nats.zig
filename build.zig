@@ -56,48 +56,25 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     
-    // Create example executable
-    const example = b.addExecutable(.{
-        .name = "example",
-        .root_source_file = b.path("examples/example.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    example.root_module.addImport("nats", lib_mod);
+    // Create all example executables
+    const example_files = [_]struct { name: []const u8, file: []const u8 }{
+        .{ .name = "pub", .file = "examples/pub.zig" },
+        .{ .name = "sub", .file = "examples/sub.zig" },
+    };
     
-    // Create basic connection test
-    const basic_example = b.addExecutable(.{
-        .name = "basic_connection",
-        .root_source_file = b.path("examples/basic_connection.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    basic_example.root_module.addImport("nats", lib_mod);
+    const examples_step = b.step("examples", "Build all examples");
     
-    // Create debug pubsub test
-    const debug_example = b.addExecutable(.{
-        .name = "debug_pubsub",
-        .root_source_file = b.path("examples/debug_pubsub.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    debug_example.root_module.addImport("nats", lib_mod);
-    
-    // This declares intent for the examples to be installed
-    b.installArtifact(example);
-    b.installArtifact(basic_example);
-    b.installArtifact(debug_example);
-    
-    // Create run step for example
-    const run_example = b.addRunArtifact(example);
-    run_example.step.dependOn(b.getInstallStep());
-    
-    const run_basic = b.addRunArtifact(basic_example);
-    run_basic.step.dependOn(b.getInstallStep());
-    
-    const example_step = b.step("example", "Run the example program");
-    example_step.dependOn(&run_example.step);
-    
-    const basic_step = b.step("basic", "Run the basic connection test");
-    basic_step.dependOn(&run_basic.step);
+    for (example_files) |example_info| {
+        const exe = b.addExecutable(.{
+            .name = example_info.name,
+            .root_source_file = b.path(example_info.file),
+            .target = target,
+            .optimize = optimize,
+        });
+        exe.root_module.addImport("nats", lib_mod);
+        
+        // Only install examples when explicitly building examples step
+        const install_exe = b.addInstallArtifact(exe, .{});
+        examples_step.dependOn(&install_exe.step);
+    }
 }
