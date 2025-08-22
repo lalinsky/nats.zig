@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// Thread-safe atomic reference counter
-/// 
+///
 /// This implementation follows best practices for atomic reference counting:
 /// - Uses .monotonic ordering for increments (weakest safe ordering)
 /// - Uses .release ordering for decrements (ensures memory operations are visible)
@@ -53,18 +53,18 @@ pub fn RefCounter(comptime T: type) type {
 // Test the RefCounter implementation
 test "RefCounter basic operations" {
     var counter = RefCounter(u32).init();
-    
+
     // Initial count should be 1
     try std.testing.expect(counter.count() == 1);
-    
+
     // Increment
     counter.incr();
     try std.testing.expect(counter.count() == 2);
-    
+
     // Decrement (not yet zero)
     try std.testing.expect(!counter.decr());
     try std.testing.expect(counter.count() == 1);
-    
+
     // Final decrement (reaches zero)
     try std.testing.expect(counter.decr());
     try std.testing.expect(counter.count() == 0);
@@ -72,16 +72,16 @@ test "RefCounter basic operations" {
 
 test "RefCounter thread safety simulation" {
     var counter = RefCounter(u32).init();
-    
+
     // Simulate multiple increments
     counter.incr();
     counter.incr();
     counter.incr();
     try std.testing.expect(counter.count() == 4);
-    
+
     // Simulate multiple decrements
     try std.testing.expect(!counter.decr()); // 3
     try std.testing.expect(!counter.decr()); // 2
     try std.testing.expect(!counter.decr()); // 1
-    try std.testing.expect(counter.decr());  // 0 - should return true
+    try std.testing.expect(counter.decr()); // 0 - should return true
 }
