@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
-const HashMap = std.HashMap;
 
 // Simple, idiomatic Zig message implementation using ArenaAllocator
 pub const Message = struct {
@@ -11,7 +10,7 @@ pub const Message = struct {
     data: []const u8,
     
     // Headers (optional)
-    headers: ?HashMap([]const u8, ArrayList([]const u8), StringContext, std.hash_map.default_max_load_percentage),
+    headers: ?std.hash_map.StringHashMapUnmanaged(ArrayList([]const u8)),
     
     // Raw header data for lazy parsing
     raw_headers: ?[]const u8,
@@ -27,17 +26,6 @@ pub const Message = struct {
     
     const Self = @This();
     
-    const StringContext = struct {
-        pub fn hash(self: @This(), key: []const u8) u64 {
-            _ = self;
-            return std.hash_map.hashString(key);
-        }
-        
-        pub fn eql(self: @This(), a: []const u8, b: []const u8) bool {
-            _ = self;
-            return std.mem.eql(u8, a, b);
-        }
-    };
     
     // Create message copying all data into an arena
     pub fn init(
@@ -46,13 +34,12 @@ pub const Message = struct {
         reply: ?[]const u8,
         data: []const u8,
     ) !*Self {
-        const msg = try allocator.create(Self);
-        errdefer allocator.destroy(msg);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
         
-        msg.arena = std.heap.ArenaAllocator.init(allocator);
-        errdefer msg.arena.deinit();
+        const arena_allocator = arena.allocator();
         
-        const arena_allocator = msg.arena.allocator();
+        const msg = try arena_allocator.create(Self);
         
         // Copy all data using arena - much simpler!
         msg.* = .{
@@ -65,7 +52,7 @@ pub const Message = struct {
             .sid = 0,
             .seq = 0,
             .time = 0,
-            .arena = msg.arena,
+            .arena = arena,
         };
         
         return msg;
@@ -79,13 +66,12 @@ pub const Message = struct {
         data: []const u8,
         raw_headers: ?[]const u8,
     ) !*Self {
-        const msg = try allocator.create(Self);
-        errdefer allocator.destroy(msg);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
         
-        msg.arena = std.heap.ArenaAllocator.init(allocator);
-        errdefer msg.arena.deinit();
+        const arena_allocator = arena.allocator();
         
-        const arena_allocator = msg.arena.allocator();
+        const msg = try arena_allocator.create(Self);
         
         // Copy all data using arena
         msg.* = .{
@@ -98,20 +84,15 @@ pub const Message = struct {
             .sid = 0,
             .seq = 0,
             .time = 0,
-            .arena = msg.arena,
+            .arena = arena,
         };
         
         return msg;
     }
     
     pub fn deinit(self: *Self) void {
-        const backing_allocator = self.arena.child_allocator;
-        
-        // Arena takes care of all allocations - super simple!
+        // Arena takes care of ALL allocations including the message struct itself!
         self.arena.deinit();
-        
-        // Only need to free the message struct itself
-        backing_allocator.destroy(self);
     }
     
     // Lazy header parsing
@@ -127,7 +108,7 @@ pub const Message = struct {
         const arena_allocator = self.arena.allocator();
         
         if (self.headers == null) {
-            self.headers = HashMap([]const u8, ArrayList([]const u8), StringContext, std.hash_map.default_max_load_percentage).init(arena_allocator);
+            self.headers = .{};
         }
         
         while (lines.next()) |line| {
@@ -143,7 +124,7 @@ pub const Message = struct {
             const owned_key = try arena_allocator.dupe(u8, key);
             const owned_value = try arena_allocator.dupe(u8, value);
             
-            const result = try self.headers.?.getOrPut(owned_key);
+            const result = try self.headers.?.getOrPut(arena_allocator, owned_key);
             if (!result.found_existing) {
                 result.value_ptr.* = ArrayList([]const u8).init(arena_allocator);
             }
@@ -161,7 +142,7 @@ pub const Message = struct {
         const arena_allocator = self.arena.allocator();
         
         if (self.headers == null) {
-            self.headers = HashMap([]const u8, ArrayList([]const u8), StringContext, std.hash_map.default_max_load_percentage).init(arena_allocator);
+            self.headers = .{};
         }
         
         // Remove existing values (arena will clean up memory automatically)
@@ -174,7 +155,7 @@ pub const Message = struct {
         var values = ArrayList([]const u8).init(arena_allocator);
         try values.append(owned_value);
         
-        try self.headers.?.put(owned_key, values);
+        try self.headers.?.put(arena_allocator, owned_key, values);
     }
     
     pub fn headerGet(self: *Self, key: []const u8) !?[]const u8 {
