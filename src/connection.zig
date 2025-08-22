@@ -14,6 +14,59 @@ const Server = server_pool_mod.Server;
 
 const log = std.log.scoped(.connection);
 
+pub const ServerVersion = struct {
+    major: u32 = 0,
+    minor: u32 = 0,
+    update: u32 = 0,
+
+    pub fn isAtLeast(self: ServerVersion, major: u32, minor: u32, update: u32) bool {
+        return (self.major > major) or
+               (self.major == major and self.minor > minor) or
+               (self.major == major and self.minor == minor and self.update >= update);
+    }
+
+    pub fn parse(version_str: ?[]const u8) ServerVersion {
+        var result = ServerVersion{};
+        
+        if (version_str) |str| {
+            var iter = std.mem.split(u8, str, ".");
+            
+            if (iter.next()) |major_str| {
+                result.major = std.fmt.parseInt(u32, major_str, 10) catch 0;
+            }
+            if (iter.next()) |minor_str| {
+                result.minor = std.fmt.parseInt(u32, minor_str, 10) catch 0;
+            }
+            if (iter.next()) |update_str| {
+                result.update = std.fmt.parseInt(u32, update_str, 10) catch 0;
+            }
+        }
+        
+        return result;
+    }
+};
+
+pub const ServerInfo = struct {
+    server_id: ?[]const u8 = null,
+    version: ?[]const u8 = null,
+    host: ?[]const u8 = null,
+    port: i32 = 4222,
+    auth_required: bool = false,
+    tls_required: bool = false,
+    tls_available: bool = false,
+    max_payload: i64 = 1048576,
+    connect_urls: ?[][]const u8 = null,
+    proto: i32 = 1,
+    client_id: u64 = 0,
+    nonce: ?[]const u8 = null,
+    client_ip: ?[]const u8 = null,
+    ldm: bool = false, // lame_duck_mode
+    headers: bool = false,
+    
+    // Parsed version for easy comparison (like C implementation's srvVersion)
+    parsed_version: ServerVersion = .{},
+};
+
 pub const PendingBuffer = struct {
     buffer: ArrayList(u8),
     max_size: usize,
@@ -108,6 +161,8 @@ pub const Connection = struct {
     // Server management
     server_pool: ServerPool,
     current_server: ?*Server = null, // Track current server like C library
+    server_info: ServerInfo = .{}, // Current server info from INFO message
+    server_info_arena: std.heap.ArenaAllocator, // Arena for server_info strings
     
     // Reconnection state
     reconnect_thread: ?std.Thread = null,
@@ -149,6 +204,7 @@ pub const Connection = struct {
             .allocator = allocator,
             .options = options,
             .server_pool = ServerPool.init(allocator),
+            .server_info_arena = std.heap.ArenaAllocator.init(allocator),
             .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .parser = Parser.init(allocator),
@@ -171,6 +227,9 @@ pub const Connection = struct {
         // Clean up server pool and pending buffer
         self.server_pool.deinit();
         self.pending_buffer.deinit();
+
+        // Clean up server info arena
+        self.server_info_arena.deinit();
 
         self.parser.deinit();
     }
@@ -689,8 +748,43 @@ pub const Connection = struct {
     }
 
     pub fn processInfo(self: *Self, info_json: []const u8) !void {
-        _ = self;
         log.debug("Received INFO: {s}", .{info_json});
+        
+        // Reset arena to clear any previous server info strings
+        _ = self.server_info_arena.reset(.retain_capacity);
+        const arena = self.server_info_arena.allocator();
+        
+        // Parse JSON directly into ServerInfo struct using leaky parser
+        self.server_info = std.json.parseFromSliceLeaky(
+            ServerInfo, 
+            arena, 
+            info_json, 
+            .{}
+        ) catch |err| {
+            log.err("Failed to parse INFO JSON: {}", .{err});
+            return;
+        };
+        
+        // Parse version string into components (like C implementation's _unpackSrvVersion)
+        self.server_info.parsed_version = ServerVersion.parse(self.server_info.version);
+        
+        log.debug("Parsed server info: id={?s}, version={?s} ({}.{}.{}), max_payload={}, headers={}", .{
+            self.server_info.server_id,
+            self.server_info.version,
+            self.server_info.parsed_version.major,
+            self.server_info.parsed_version.minor,
+            self.server_info.parsed_version.update,
+            self.server_info.max_payload,
+            self.server_info.headers
+        });
+        
+        // Add discovered servers to pool if any connect_urls were provided
+        if (self.server_info.connect_urls) |urls| {
+            log.debug("Discovered {} servers: {s}", .{ urls.len, urls });
+            self.addDiscoveredServers(urls) catch |err| {
+                log.warn("Failed to add discovered servers: {}", .{err});
+            };
+        }
     }
 
     pub fn processOK(self: *Self) !void {
@@ -960,6 +1054,22 @@ pub const Connection = struct {
             try writer.writeAll(buffer.items);
             
             log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
+        }
+    }
+
+    fn addDiscoveredServers(self: *Self, urls: [][]const u8) !void {
+        log.debug("Adding {} discovered servers to pool", .{urls.len});
+        
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        
+        for (urls) |url| {
+            // Add as implicit server (discovered, not explicitly configured)
+            self.server_pool.addServer(url, true) catch |err| {
+                log.warn("Failed to add discovered server {s}: {}", .{ url, err });
+                continue;
+            };
+            log.debug("Added discovered server: {s}", .{url});
         }
     }
 };
