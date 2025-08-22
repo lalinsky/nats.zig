@@ -47,7 +47,11 @@ pub const Message = struct {
         data: []const u8,
     ) !*Self {
         const msg = try allocator.create(Self);
+        errdefer allocator.destroy(msg);
+        
         msg.arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer msg.arena.deinit();
+        
         const arena_allocator = msg.arena.allocator();
         
         // Copy all data using arena - much simpler!
@@ -76,7 +80,11 @@ pub const Message = struct {
         raw_headers: ?[]const u8,
     ) !*Self {
         const msg = try allocator.create(Self);
+        errdefer allocator.destroy(msg);
+        
         msg.arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer msg.arena.deinit();
+        
         const arena_allocator = msg.arena.allocator();
         
         // Copy all data using arena
