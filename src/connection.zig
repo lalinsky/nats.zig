@@ -185,6 +185,10 @@ pub const Connection = struct {
     flusher_stop: bool = false,
     flusher_signaled: bool = false,
     flusher_condition: std.Thread.Condition = .{},
+    
+    // PONG waiting (protected by main mutex)
+    pending_pongs: u32 = 0,
+    pong_condition: std.Thread.Condition = .{},
 
     // Write buffer (protected by main mutex)
     write_buffer: std.ArrayListUnmanaged(u8) = .{},
@@ -474,12 +478,35 @@ pub const Connection = struct {
             self.flusher_signaled = true;
             self.flusher_condition.signal();
         }
+        
+        // Increment pending PONG counter before sending PING
+        self.pending_pongs += 1;
         self.mutex.unlock();
 
         // Send PING to ensure server acknowledges all previous messages
         try self.bufferWrite("PING\r\n");
 
-        log.debug("Sent PING for flush", .{});
+        log.debug("Sent PING for flush, waiting for PONG", .{});
+        
+        // Wait for PONG response with timeout
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        
+        const timeout_ns = self.options.timeout_ms * std.time.ns_per_ms;
+        const start_time = std.time.nanoTimestamp();
+        
+        while (self.pending_pongs > 0) {
+            const elapsed = std.time.nanoTimestamp() - start_time;
+            if (elapsed >= timeout_ns) {
+                log.warn("Flush timeout waiting for PONG", .{});
+                return ConnectionError.Timeout;
+            }
+            
+            const remaining_ns = @as(u64, @intCast(timeout_ns - elapsed));
+            self.pong_condition.timedWait(&self.mutex, remaining_ns) catch {};
+        }
+        
+        log.debug("Flush completed, received PONG", .{});
     }
     
     pub fn publishRequest(self: *Self, subject: []const u8, reply: []const u8, data: []const u8) !void {
@@ -805,8 +832,16 @@ pub const Connection = struct {
     }
 
     pub fn processPong(self: *Self) !void {
-        _ = self;
-        log.debug("Received PONG", .{});
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        
+        if (self.pending_pongs > 0) {
+            self.pending_pongs -= 1;
+            self.pong_condition.signal();
+            log.debug("Received PONG for flush, pending_pongs: {}", .{self.pending_pongs});
+        } else {
+            log.warn("Received PONG (no pending flush), ignoring", .{});
+        }
     }
 
     pub fn processPing(self: *Self) !void {
