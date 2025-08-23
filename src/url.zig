@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 
 pub const UrlError = error{
     InvalidUrl,
+    InvalidUrlScheme,
     OutOfMemory,
 };
 
@@ -110,6 +111,11 @@ pub const Url = struct {
         const components = parseComponents(url_str);
         if (components.scheme.len == 0) {
             return UrlError.InvalidUrl;
+        }
+        
+        // Only accept "nats" scheme
+        if (!std.mem.eql(u8, components.scheme, "nats")) {
+            return UrlError.InvalidUrlScheme;
         }
 
         // Build full URL
