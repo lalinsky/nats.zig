@@ -8,7 +8,7 @@ const default_api_prefix = "$JS.API.";
 const default_request_timeout_ms = 5000;
 
 const ErrorResponse = struct {
-    @"error": ?struct {
+    @"error": struct {
         /// HTTP like error code in the 300 to 500 range
         code: u16,
         /// A human friendly description of the error
@@ -103,7 +103,6 @@ pub const JetStreamOptions = struct {
 
 pub const Result = std.json.Parsed;
 
-
 pub const JetStream = struct {
     allocator: std.mem.Allocator,
     nc: *Connection,
@@ -131,17 +130,20 @@ pub const JetStream = struct {
     }
 
     /// Parse an error response from the server, if present.
-    fn maybeParseErrorResponse(self: *JetStream, msg: *Message) !void {
-        if (std.mem.indexOfPos(u8, msg.data, 0, "error") != null) {
-            // this should not allocate any memory, so we don't need to clean up
-            const response = std.json.parseFromSliceLeaky(ErrorResponse, self.allocator, msg.data, .{
-                .allocate = .alloc_if_needed,
-                .ignore_unknown_fields = true,
-            }) catch return;
-            log.err("JetStream error: {any}", .{response.@"error"});
-            // TODO: Handle specific error cases
-            return error.JetStreamError;
-        }
+    fn maybeParseErrorResponse(_: *JetStream, msg: *Message) !void {
+        var buf: [1024]u8 = undefined;
+        var allocator = std.heap.FixedBufferAllocator.init(&buf);
+
+        const response = std.json.parseFromSliceLeaky(ErrorResponse, allocator.allocator(), msg.data, .{
+            .allocate = .alloc_if_needed,
+            .ignore_unknown_fields = true,
+        }) catch return;
+
+        const info = response.@"error";
+        log.err("JetStream error: code={d} err_code={d} description={s}", .{ info.code, info.err_code, info.description });
+
+        // TODO: Handle specific error cases
+        return error.JetStreamError;
     }
 
     /// Parse a response from the server, handling errors if present.

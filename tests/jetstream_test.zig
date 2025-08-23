@@ -5,7 +5,6 @@ const utils = @import("utils.zig");
 
 const log = std.log.scoped(.jetstream_test);
 
-
 test "connect" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
@@ -117,7 +116,7 @@ test "list streams" {
 
     // Find our stream in the list and verify its configuration
     var found = false;
-    
+
     for (result.value) |info| {
         if (std.mem.eql(u8, info.config.name, "TEST_LIST_STREAMS")) {
             found = true;
@@ -127,8 +126,90 @@ test "list streams" {
             break;
         }
     }
-    
+
     try testing.expect(found);
+}
+
+test "update stream" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // First create a stream
+    const initial_config = nats.StreamConfig{
+        .name = "TEST_UPDATE_STREAM",
+        .subjects = &.{"test.update.*"},
+        .max_msgs = 100,
+    };
+
+    var initial_stream = try js.addStream(initial_config);
+    defer initial_stream.deinit();
+
+    // Verify initial configuration
+    try testing.expectEqualStrings("TEST_UPDATE_STREAM", initial_stream.value.config.name);
+    try testing.expect(initial_stream.value.config.max_msgs == 100);
+
+    // Update the stream configuration
+    const updated_config = nats.StreamConfig{
+        .name = "TEST_UPDATE_STREAM",
+        .subjects = &.{"test.update.*"},
+        .max_msgs = 200, // Double the limit
+    };
+
+    var updated_stream = try js.updateStream(updated_config);
+    defer updated_stream.deinit();
+
+    // Verify the update was applied
+    try testing.expectEqualStrings("TEST_UPDATE_STREAM", updated_stream.value.config.name);
+    try testing.expect(updated_stream.value.config.max_msgs == 200);
+}
+
+test "delete stream" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // First create a stream to delete
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_DELETE_STREAM",
+        .subjects = &.{"test.delete.*"},
+    };
+
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Verify stream exists by listing streams
+    var streams_before = try js.listStreamNames();
+    defer streams_before.deinit();
+    
+    var found_before = false;
+    for (streams_before.value) |name| {
+        if (std.mem.eql(u8, name, "TEST_DELETE_STREAM")) {
+            found_before = true;
+            break;
+        }
+    }
+    try testing.expect(found_before);
+
+    // Delete the stream
+    try js.deleteStream("TEST_DELETE_STREAM");
+
+    // Verify stream no longer exists
+    var streams_after = try js.listStreamNames();
+    defer streams_after.deinit();
+
+    var found_after = false;
+    for (streams_after.value) |name| {
+        if (std.mem.eql(u8, name, "TEST_DELETE_STREAM")) {
+            found_after = true;
+            break;
+        }
+    }
+    try testing.expect(!found_after);
 }
 
 // // Test stream management functionality

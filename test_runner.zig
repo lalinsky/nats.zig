@@ -128,6 +128,12 @@ pub fn main() !void {
         current_test = friendly_name;
         std.testing.allocator_instance = .{};
 
+        if (env.do_log_capture) {
+            // Clear log buffer and start capturing logs for this test
+            log_buffer.clearRetainingCapacity();
+            log_capture.startCapture(&log_buffer);
+        }
+
         // Run per-test setup functions
         for (builtin.test_functions) |setup_t| {
             if (isPerTestSetup(setup_t)) {
@@ -136,12 +142,6 @@ pub fn main() !void {
                     return err;
                 };
             }
-        }
-
-        if (env.do_log_capture) {
-            // Clear log buffer and start capturing logs for this test
-            log_buffer.clearRetainingCapacity();
-            log_capture.startCapture(&log_buffer);
         }
         const result = t.func();
         current_test = null;
