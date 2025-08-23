@@ -38,7 +38,7 @@ if (sub.nextMsg(5000)) |msg| {
 fn messageHandler(msg: *nats.Message, counter: *u32) void {
     defer msg.deinit();
     counter.* += 1;
-    std.log.info("Message #{d}: {s}", .{ counter.*, msg.data });
+    std.debug.print("Message #{d}: {s}\n", .{ counter.*, msg.data });
 }
 
 // Subscribe with callback handler
