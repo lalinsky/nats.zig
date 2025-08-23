@@ -46,14 +46,15 @@ pub fn build(b: *std.Build) void {
     // but does not run it.
     const lib_unit_tests = b.addTest(.{
         .root_module = lib_mod,
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
-    // Similar to creating the run step earlier, this exposes a `unit-tests` step to
+    // Similar to creating the run step earlier, this exposes a `test-unit` step to
     // the `zig build --help` menu, providing a way for the user to request
     // running the unit tests.
-    const unit_tests_step = b.step("unit-tests", "Run unit tests");
+    const unit_tests_step = b.step("test-unit", "Run unit tests");
     unit_tests_step.dependOn(&run_lib_unit_tests.step);
     
     // Integration tests (require Docker and NATS server)
@@ -68,7 +69,7 @@ pub fn build(b: *std.Build) void {
     const run_integration_tests = b.addRunArtifact(integration_tests);
     run_integration_tests.has_side_effects = true; // Allow repeated runs with Docker interactions
     
-    const e2e_tests_step = b.step("e2e-tests", "Run end-to-end tests (requires Docker)");
+    const e2e_tests_step = b.step("test-e2e", "Run end-to-end tests (requires Docker)");
     e2e_tests_step.dependOn(&run_integration_tests.step);
     
     // All tests - this is now the main test target
