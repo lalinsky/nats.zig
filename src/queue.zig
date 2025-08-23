@@ -31,18 +31,19 @@ pub fn Queue(comptime T: type) type {
                 return error.QueueClosed;
             }
 
-            // Ensure we have space
-            if (self.items.items.len >= self.items.capacity) {
-                const new_capacity = if (self.items.capacity == 0) 8 else self.items.capacity * 2;
-                try self.items.ensureTotalCapacity(self.allocator, new_capacity);
-                
-                // If we've wrapped around, reorganize to be linear
-                if (self.head > 0 and self.head < self.items.items.len) {
-                    const count = self.items.items.len;
-                    
-                    // Rotate the array so head becomes 0
-                    std.mem.rotate(T, self.items.items[0..count], self.head);
+            // Ensure we have space; prefer compaction before growth
+            if (self.items.items.len == self.items.capacity) {
+                if (self.head > 0) {
+                    const remaining = self.items.items.len - self.head;
+                    if (remaining > 0) {
+                        std.mem.copyForwards(T, self.items.items[0..remaining], self.items.items[self.head..]);
+                    }
+                    self.items.shrinkRetainingCapacity(remaining);
                     self.head = 0;
+                }
+                if (self.items.items.len == self.items.capacity) {
+                    const new_capacity = if (self.items.capacity == 0) 8 else self.items.capacity * 2;
+                    try self.items.ensureTotalCapacity(self.allocator, new_capacity);
                 }
             }
 
@@ -258,6 +259,32 @@ test "Queue compaction" {
     for (90..100) |i| {
         try testing.expectEqual(@as(?i32, @intCast(i)), queue.tryPop());
     }
+}
+
+test "Queue push compacts when head > 0 at capacity (no duplication)" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var q = Queue(i32).init(allocator);
+    defer q.deinit();
+
+    // Fill to initial capacity (8)
+    for (0..8) |i| try q.push(@intCast(i));
+
+    // Pop a few to advance head
+    try testing.expectEqual(@as(?i32, 0), q.tryPop());
+    try testing.expectEqual(@as(?i32, 1), q.tryPop());
+    try testing.expectEqual(@as(?i32, 2), q.tryPop());
+    try testing.expectEqual(@as(usize, 5), q.len());
+
+    // Push enough to require space; should compact, not rotate duplicates
+    for (8..12) |i| try q.push(@intCast(i));
+
+    // We should see the remaining original items [3..7], then [8..11]
+    for (3..12) |i| try testing.expectEqual(@as(?i32, @intCast(i)), q.tryPop());
+    try testing.expect(q.isEmpty());
 }
 
 test "Queue multithreaded producer/consumer" {
