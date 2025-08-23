@@ -150,6 +150,7 @@ pub const ConnectionOptions = struct {
     reconnect: ReconnectOptions = .{},
     callbacks: ConnectionCallbacks = .{},
     trace: bool = false,
+    no_responders: bool = false,
 };
 
 pub const Connection = struct {
@@ -653,11 +654,18 @@ pub const Connection = struct {
             return ConnectionError.ConnectionClosed;
         }
 
-        // Send CONNECT + PING (enable headers support)
-        const connect_msg = if (self.options.verbose)
-            "CONNECT {\"verbose\":true,\"pedantic\":false,\"headers\":true}\r\n"
-        else
-            "CONNECT {\"verbose\":false,\"pedantic\":false,\"headers\":true}\r\n";
+        // Build CONNECT message with all options
+        var buffer = ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+        
+        // Calculate effective no_responders: enable if server supports headers
+        const effective_no_responders = self.options.no_responders or self.server_info.headers;
+        
+        try buffer.writer().print(
+            "CONNECT {{\"verbose\":{},\"pedantic\":false,\"headers\":true,\"no_responders\":{}}}\r\n", 
+            .{ self.options.verbose, effective_no_responders }
+        );
+        const connect_msg = buffer.items;
 
         try stream.writeAll(connect_msg);
         try stream.writeAll("PING\r\n");
