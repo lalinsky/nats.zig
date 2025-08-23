@@ -67,14 +67,8 @@ zig build test
 # Run only unit tests
 zig build test-unit
 
-# Run only end-to-end tests (requires Docker)
+# Run only end-to-end tests
 zig build test-e2e
 ```
 
-### Prerequisites for E2E Tests
-
-End-to-end tests require Docker and NATS servers running on ports 14222-14225:
-
-```bash
-docker compose -f docker-compose.test.yml up -d
-```
+The end-to-end tests automatically start and stop the required NATS servers using Docker Compose.
