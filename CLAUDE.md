@@ -1,0 +1,3 @@
+- read README.md for overview of the project
+- read files in docs/reference/*.md if you need knowledge about the NATS protocol
+- run tests (`zig build test`) to confirm your changes are working
