@@ -96,7 +96,7 @@ pub const Message = struct {
     }
     
     // Lazy header parsing
-    fn ensureHeadersParsed(self: *Self) !void {
+    pub fn ensureHeadersParsed(self: *Self) !void {
         if (!self.needs_header_parsing) return;
         
         const raw = self.raw_headers orelse return;

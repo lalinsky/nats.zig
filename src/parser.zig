@@ -198,13 +198,11 @@ pub const Parser = struct {
                     const total_msg_size = @as(usize, @intCast(self.ma.size));
 
                     if (self.msg_buf) |msg_buf| {
-                        // Slow path: using accumulated buffer
+                        // Slow path: using accumulated buffer  
                         if (msg_buf.items.len >= total_msg_size) {
-                            // Process accumulated message
-                            const payload_start = if (self.hdr >= 0) @as(usize, @intCast(self.hdr)) else 0;
-                            const payload_len = if (self.hdr >= 0) total_msg_size - @as(usize, @intCast(self.hdr)) else total_msg_size;
-                            const payload = msg_buf.items[payload_start..payload_start + payload_len];
-                            try conn.processMsg(payload);
+                            // Pass full message buffer to processMsg (like C parser)
+                            const message_data = msg_buf.items[0..total_msg_size];
+                            try conn.processMsg(message_data);
                             done = true;
                         } else {
                             // Continue accumulating message bytes
@@ -218,12 +216,10 @@ pub const Parser = struct {
                             }
                         }
                     } else if (i - self.after_space >= total_msg_size) {
-                        // Fast path: process message directly from buffer
+                        // Fast path: process message directly from buffer (like C parser)
                         const msg_start = self.after_space;
-                        const payload_start = if (self.hdr >= 0) msg_start + @as(usize, @intCast(self.hdr)) else msg_start;
-                        const payload_len = if (self.hdr >= 0) total_msg_size - @as(usize, @intCast(self.hdr)) else total_msg_size;
-                        const payload = buf[payload_start..payload_start + payload_len];
-                        try conn.processMsg(payload);
+                        const message_data = buf[msg_start..msg_start + total_msg_size];
+                        try conn.processMsg(message_data);
                         done = true;
                     }
 
@@ -598,6 +594,7 @@ const MockConnection = struct {
         last_msg: []const u8 = "",
         last_err: []const u8 = "",
         last_info: []const u8 = "",
+        parser_ref: ?*Parser = null,
 
         const Self = @This();
 
@@ -609,9 +606,25 @@ const MockConnection = struct {
             self.pong_count += 1;
         }
 
-        pub fn processMsg(self: *Self, payload: []const u8) !void {
+        pub fn processMsg(self: *Self, message_buffer: []const u8) !void {
             self.msg_count += 1;
-            self.last_msg = try std.testing.allocator.dupe(u8, payload);
+            // Extract payload like the real processMsg would do
+            // For testing, assume we want just the payload part (like the test expects)
+            if (self.parser_ref) |parser| {
+                const msg_arg = parser.ma;
+                const payload = if (msg_arg.hdr >= 0) blk: {
+                    // HMSG: extract payload from full message buffer
+                    const hdr_len = @as(usize, @intCast(msg_arg.hdr));
+                    break :blk message_buffer[hdr_len..];
+                } else blk: {
+                    // MSG: full buffer is payload
+                    break :blk message_buffer;
+                };
+                self.last_msg = try std.testing.allocator.dupe(u8, payload);
+            } else {
+                // Fallback for tests that don't set parser_ref
+                self.last_msg = try std.testing.allocator.dupe(u8, message_buffer);
+            }
         }
 
         pub fn processOK(self: *Self) !void {
@@ -718,7 +731,7 @@ test "parser msg with reply" {
     var parser = Parser.init(testing.allocator);
     defer parser.deinit();
 
-    var mock_conn = MockConnection{};
+    var mock_conn = MockConnection{ .parser_ref = &parser };
     defer mock_conn.deinit();
 
     try parser.parse(&mock_conn, "MSG foo 1 reply.bar 5\r\nhello\r\n");
@@ -732,7 +745,7 @@ test "parser hmsg" {
     var parser = Parser.init(testing.allocator);
     defer parser.deinit();
 
-    var mock_conn = MockConnection{};
+    var mock_conn = MockConnection{ .parser_ref = &parser };
     defer mock_conn.deinit();
 
     try parser.parse(&mock_conn, "HMSG foo 1 22 27\r\nNATS/1.0\r\nFoo: Bar\r\n\r\nhello\r\n");
