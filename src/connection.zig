@@ -858,10 +858,10 @@ pub const Connection = struct {
                             return;
                         },
                         else => {
-                            // Allocation or unexpected push failure; drop but do not tear down the connection.
+                            // Allocation or unexpected push failure; log and tear down the connection.
                             log.err("Failed to enqueue message for sid {d}: {}", .{ msg_arg.sid, err });
                             message.deinit();
-                            return;
+                            return err;
                         },
                     }
                 };
