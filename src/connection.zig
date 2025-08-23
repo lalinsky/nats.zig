@@ -149,6 +149,7 @@ pub const ConnectionOptions = struct {
     send_asap: bool = false,
     reconnect: ReconnectOptions = .{},
     callbacks: ConnectionCallbacks = .{},
+    trace: bool = false,
 };
 
 pub const Connection = struct {
@@ -605,12 +606,8 @@ pub const Connection = struct {
     }
 
     pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !?*Message {
-        // Lock immediately like C library
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.status != .connected) {
-            return ConnectionError.ConnectionClosed;
+        if (self.options.trace) {
+            log.debug("Sending request to {s} with timeout {d}ms", .{ subject, timeout_ms });
         }
 
         // 1. Create unique inbox
@@ -1094,7 +1091,7 @@ pub const Connection = struct {
                 self.flusher_stop = false;
                 self.flusher_signaled = false;
                 self.mutex.unlock();
-                
+
                 self.flusher_thread = std.Thread.spawn(.{}, flusherLoop, .{self}) catch |err| {
                     log.err("Failed to restart flusher thread: {}", .{err});
                     self.triggerReconnect(err);
@@ -1213,13 +1210,9 @@ pub const Connection = struct {
             log.debug("Added discovered server: {s}", .{url});
         }
     }
-    
+
     // JetStream support
     pub fn jetstream(self: *Self, options: JetStreamOptions) JetStream {
-        return JetStream.init(self, self.allocator, options);
-    }
-    
-    pub fn jetstreamDefault(self: *Self) JetStream {
-        return self.jetstream(.{});
+        return JetStream.init(self.allocator, self, options);
     }
 };
