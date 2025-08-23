@@ -1,43 +1,22 @@
 version: '3.8'
 
 services:
-  # Single NATS server for basic tests
-  nats-test:
-    image: nats:2.10-alpine
-    container_name: nats-test-server
-    ports:
-      - "14222:4222"   # Client connections (different port to avoid conflicts)
-      - "18222:8222"   # HTTP monitoring
-    command: 
-      - "-p"
-      - "4222"
-      - "-m"
-      - "8222"
-      - "-js"         # Enable JetStream
-      - "-D"          # Debug mode
-      - "-V"          # Verbose logging
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "4222"]
-      interval: 1s
-      timeout: 3s
-      retries: 5
-      start_period: 2s
-
   # Cluster setup for reconnection tests
   nats-1:
     image: nats:2.10-alpine
-    container_name: nats-cluster-1
     ports:
-      - "14223:4222"
+      - "14222:4222"
     command:
-      - "-p"
-      - "4222"
-      - "-cluster"
+      - "--cluster_name"
+      - "NATS_TEST"
+      - "--cluster"
       - "nats://0.0.0.0:6222"
-      - "-routes"
+      - "--routes"
       - "nats://nats-2:6222,nats://nats-3:6222"
-      - "-js"
+      - "--js"
       - "-D"
+      - "--server_name"
+      - "nats-1"
     networks:
       - nats-cluster
     healthcheck:
@@ -48,18 +27,19 @@ services:
 
   nats-2:
     image: nats:2.10-alpine
-    container_name: nats-cluster-2
     ports:
-      - "14224:4222"
+      - "14223:4222"
     command:
-      - "-p"
-      - "4222"
-      - "-cluster"
+      - "--cluster_name"
+      - "NATS_TEST"
+      - "--cluster"
       - "nats://0.0.0.0:6222"
-      - "-routes"
+      - "--routes"
       - "nats://nats-1:6222,nats://nats-3:6222"
-      - "-js"
+      - "--js"
       - "-D"
+      - "--server_name"
+      - "nats-2"
     networks:
       - nats-cluster
     healthcheck:
@@ -70,18 +50,19 @@ services:
 
   nats-3:
     image: nats:2.10-alpine
-    container_name: nats-cluster-3
     ports:
-      - "14225:4222"
+      - "14224:4222"
     command:
-      - "-p"
-      - "4222"
-      - "-cluster"
+      - "--cluster_name"
+      - "NATS_TEST"
+      - "--cluster"
       - "nats://0.0.0.0:6222"
-      - "-routes"
+      - "--routes"
       - "nats://nats-1:6222,nats://nats-2:6222"
-      - "-js"
+      - "--js"
       - "-D"
+      - "--server_name"
+      - "nats-3"
     networks:
       - nats-cluster
     healthcheck:
