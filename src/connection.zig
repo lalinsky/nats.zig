@@ -151,7 +151,6 @@ pub const ConnectionOptions = struct {
     callbacks: ConnectionCallbacks = .{},
     trace: bool = false,
     no_responders: bool = false,
-    disable_no_responders: bool = false,
 };
 
 pub const Connection = struct {
@@ -659,11 +658,8 @@ pub const Connection = struct {
         var buffer = ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
         
-        // Calculate effective no_responders: enable if server supports headers, unless disabled by user
-        const effective_no_responders = if (self.options.disable_no_responders) 
-            self.options.no_responders 
-        else 
-            self.options.no_responders or self.server_info.headers;
+        // Calculate effective no_responders: enable if server supports headers
+        const effective_no_responders = self.options.no_responders or self.server_info.headers;
         
         try buffer.writer().print(
             "CONNECT {{\"verbose\":{},\"pedantic\":false,\"headers\":true,\"no_responders\":{}}}\r\n", 
