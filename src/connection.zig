@@ -249,10 +249,10 @@ pub const Connection = struct {
         return self.connectToServer();
     }
 
-    pub fn addServer(self: *Self, url: []const u8) !void {
+    pub fn addServer(self: *Self, url_str: []const u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        try self.server_pool.addServer(url, false); // Explicit server
+        try self.server_pool.addServer(url_str, false); // Explicit server
     }
 
     fn connectToServer(self: *Self) !void {
@@ -275,7 +275,7 @@ pub const Connection = struct {
         self.mutex.unlock();
 
         // Establish TCP connection (outside mutex like C library)
-        const stream = net.tcpConnectToHost(self.allocator, selected_server.host, selected_server.port) catch |err| {
+        const stream = net.tcpConnectToHost(self.allocator, selected_server.parsed_url.host, selected_server.parsed_url.port) catch |err| {
             self.mutex.lock();
             selected_server.last_error = err;
             self.status = .disconnected;
@@ -315,7 +315,7 @@ pub const Connection = struct {
         // Start flusher thread
         self.flusher_thread = try std.Thread.spawn(.{}, flusherLoop, .{self});
 
-        log.info("Connected successfully to {s}", .{selected_server.url});
+        log.info("Connected successfully to {s}", .{selected_server.parsed_url.full_url});
     }
 
     pub fn close(self: *Self) void {
@@ -1048,7 +1048,7 @@ pub const Connection = struct {
             self.mutex.unlock();
 
             // Establish TCP connection (outside mutex)
-            const stream = net.tcpConnectToHost(self.allocator, server.host, server.port) catch |err| {
+            const stream = net.tcpConnectToHost(self.allocator, server.parsed_url.host, server.parsed_url.port) catch |err| {
                 self.mutex.lock(); // Re-acquire for error handling
                 server.last_error = err;
                 log.debug("Reconnection attempt {} failed: {}", .{ total_attempts, err });
