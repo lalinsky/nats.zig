@@ -46,6 +46,40 @@ var counter: u32 = 0;
 const sub = try nc.subscribe("hello", messageHandler, .{&counter});
 ```
 
+### JetStream Stream Management
+
+```zig
+// Create JetStream context
+var js = nc.jetstream(.{});
+defer js.deinit();
+
+// Create a stream
+const stream_config = nats.StreamConfig{
+    .name = "ORDERS",
+    .subjects = &.{"orders.*"},
+    .retention = .limits,
+    .storage = .file,
+    .max_msgs = 1000,
+};
+
+var stream_info = try js.addStream(stream_config);
+defer stream_info.deinit();
+```
+
+### JetStream Consumer Management
+
+```zig
+// Create a durable consumer
+const consumer_config = nats.ConsumerConfig{
+    .durable_name = "order_processor", 
+    .ack_policy = .explicit,
+    .deliver_policy = .all,
+};
+
+var consumer_info = try js.addConsumer("ORDERS", consumer_config);
+defer consumer_info.deinit();
+```
+
 ## Building
 
 ```bash
