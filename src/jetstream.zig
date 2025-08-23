@@ -29,6 +29,41 @@ const AccountInfoResponse = struct {
     consumers: u32,
 };
 
+pub const StreamConfig = struct {
+    /// A unique name for the Stream
+    name: []const u8,
+    /// A short description of the purpose of this stream
+    description: ?[]const u8 = null,
+    /// A list of subjects to consume, supports wildcards
+    subjects: []const []const u8,
+    /// How messages are retained in the stream
+    retention: enum { limits, interest, workqueue } = .limits,
+    /// How many Consumers can be defined for a given Stream. -1 for unlimited.
+    max_consumers: i64 = -1,
+    /// How many messages may be in a Stream. -1 for unlimited.
+    max_msgs: i64 = -1,
+    /// For wildcard streams ensure that for every unique subject this many messages are kept - a per subject retention limit
+    max_msgs_per_subject: i64 = -1,
+    /// How big the Stream may be. -1 for unlimited.
+    max_bytes: i64 = -1,
+    /// Maximum age of any message in nanoseconds. 0 for unlimited.
+    max_age: u64 = 0,
+    /// The largest message that will be accepted. -1 for unlimited.
+    max_msg_size: i32 = -1,
+    /// The storage backend to use for the Stream
+    storage: enum { file, memory } = .file,
+    /// Optional compression algorithm used for the Stream
+    compression: enum { none, s2 } = .none,
+    /// How many replicas to keep for each message
+    num_replicas: u8 = 1,
+    /// Disables acknowledging messages that are received by the Stream
+    no_ack: bool = false,
+    /// When a Stream reaches its limits either old messages are deleted or new ones are denied
+    discard: enum { old, new } = .old,
+    /// The time window to track duplicate messages for, in nanoseconds. 0 for default
+    duplicate_window: u64 = 0,
+};
+
 /// Response from $JS.API.STREAM.NAMES
 const StreamNamesResponse = struct {
     total: u64,
@@ -37,12 +72,37 @@ const StreamNamesResponse = struct {
     streams: ?[]const []const u8,
 };
 
+/// Response from $JS.API.STREAM.LIST
+const StreamListResponse = struct {
+    total: u64,
+    offset: u64,
+    limit: u64,
+    streams: ?[]const StreamInfo,
+};
+
+const StreamState = struct {
+    messages: u64,
+    bytes: u64,
+    first_seq: u64,
+    first_ts: []const u8,
+    last_seq: u64,
+    last_ts: []const u8,
+    consumer_count: u32,
+};
+
+pub const StreamInfo = struct {
+    config: StreamConfig,
+    state: StreamState,
+    created: []const u8,
+};
+
 pub const JetStreamOptions = struct {
     request_timeout_ms: u64 = default_request_timeout_ms,
     // Add options here
 };
 
 pub const Result = std.json.Parsed;
+
 
 pub const JetStream = struct {
     allocator: std.mem.Allocator,
@@ -61,8 +121,11 @@ pub const JetStream = struct {
         _ = self;
     }
 
-    fn sendRequest(self: *JetStream, comptime method: []const u8, payload: []const u8) !*Message {
-        return try self.nc.request(default_api_prefix ++ method, payload, self.opts.request_timeout_ms) orelse {
+    fn sendRequest(self: *JetStream, subject: []const u8, payload: []const u8) !*Message {
+        const full_subject = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ default_api_prefix, subject });
+        defer self.allocator.free(full_subject);
+
+        return try self.nc.request(full_subject, payload, self.opts.request_timeout_ms) orelse {
             return error.NoResponse;
         };
     }
@@ -116,5 +179,69 @@ pub const JetStream = struct {
             .value = streams,
         };
         return result;
+    }
+
+    /// Retrieves a list of streams with full information.
+    pub fn listStreams(self: *JetStream) !Result([]const StreamInfo) {
+        const msg = try self.sendRequest("STREAM.LIST", "");
+        defer msg.deinit();
+
+        const page_result = try self.parseResponse(StreamListResponse, msg);
+        errdefer page_result.deinit();
+
+        // TODO: handle pagination
+        const streams = page_result.value.streams orelse &[_]StreamInfo{};
+        std.debug.assert(page_result.value.total == streams.len);
+
+        const result: Result([]const StreamInfo) = .{
+            .arena = page_result.arena,
+            .value = streams,
+        };
+        return result;
+    }
+
+    /// Creates a new stream with the provided configuration.
+    pub fn addStream(self: *JetStream, config: StreamConfig) !Result(StreamInfo) {
+        // Build the subject for the API call
+        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.CREATE.{s}", .{config.name});
+        defer self.allocator.free(subject);
+
+        // Serialize the config to JSON
+        const config_json = try std.json.stringifyAlloc(self.allocator, config, .{});
+        defer self.allocator.free(config_json);
+
+        const msg = try self.sendRequest(subject, config_json);
+        defer msg.deinit();
+
+        return try self.parseResponse(StreamInfo, msg);
+    }
+
+    /// Updates a stream with the provided configuration.
+    pub fn updateStream(self: *JetStream, config: StreamConfig) !Result(StreamInfo) {
+        // Build the subject for the API call
+        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.UPDATE.{s}", .{config.name});
+        defer self.allocator.free(subject);
+
+        // Serialize the config to JSON
+        const config_json = try std.json.stringifyAlloc(self.allocator, config, .{});
+        defer self.allocator.free(config_json);
+
+        const msg = try self.sendRequest(subject, config_json);
+        defer msg.deinit();
+
+        return try self.parseResponse(StreamInfo, msg);
+    }
+
+    /// Deletes a stream.
+    pub fn deleteStream(self: *JetStream, stream_name: []const u8) !void {
+        // Build the subject for the API call
+        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.DELETE.{s}", .{stream_name});
+        defer self.allocator.free(subject);
+
+        const msg = try self.sendRequest(subject, "");
+        defer msg.deinit();
+
+        // Just check for errors, don't need to parse the response
+        try self.maybeParseErrorResponse(msg);
     }
 };

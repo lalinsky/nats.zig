@@ -33,11 +33,101 @@ test "list stream names" {
     var js = conn.jetstream(.{});
     defer js.deinit();
 
+    // Create a test stream first
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_LIST_STREAM",
+        .subjects = &.{"test.list.*"},
+    };
+
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Now list stream names and verify our stream is included
     var result = try js.listStreamNames();
     defer result.deinit();
 
-    // TODO: test with some actual streams
-    try testing.expectEqualSlices([]const u8, &.{}, result.value);
+    // Should contain at least our test stream
+    try testing.expect(result.value.len >= 1);
+
+    // Find our stream in the list
+    var found = false;
+    for (result.value) |name| {
+        if (std.mem.eql(u8, name, "TEST_LIST_STREAM")) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "add stream" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_STREAM",
+        .subjects = &.{"test.stream.*"},
+        .retention = .limits,
+        .storage = .file,
+        .max_msgs = 1000,
+        .max_bytes = 1024 * 1024, // 1MB
+        .max_age = 0, // No age limit
+        .num_replicas = 1,
+    };
+
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Verify stream was created with correct configuration
+    try testing.expectEqualStrings("TEST_STREAM", stream_info.value.config.name);
+    try testing.expect(stream_info.value.config.subjects.len == 1);
+    try testing.expectEqualStrings("test.stream.*", stream_info.value.config.subjects[0]);
+    try testing.expect(stream_info.value.config.retention == .limits);
+    try testing.expect(stream_info.value.config.storage == .file);
+    try testing.expect(stream_info.value.config.max_msgs == 1000);
+}
+
+test "list streams" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // Create a test stream
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_LIST_STREAMS",
+        .subjects = &.{"test.list.*"},
+        .max_msgs = 500,
+    };
+
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Now list all streams and verify our stream is included
+    var result = try js.listStreams();
+    defer result.deinit();
+
+    // Should contain at least our test stream
+    try testing.expect(result.value.len >= 1);
+
+    // Find our stream in the list and verify its configuration
+    var found = false;
+    
+    for (result.value) |info| {
+        if (std.mem.eql(u8, info.config.name, "TEST_LIST_STREAMS")) {
+            found = true;
+            try testing.expect(info.config.subjects.len == 1);
+            try testing.expectEqualStrings("test.list.*", info.config.subjects[0]);
+            try testing.expect(info.config.max_msgs == 500);
+            break;
+        }
+    }
+    
+    try testing.expect(found);
 }
 
 // // Test stream management functionality
