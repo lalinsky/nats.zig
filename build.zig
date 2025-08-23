@@ -83,7 +83,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "sub", .file = "examples/sub.zig" },
         .{ .name = "requestor", .file = "examples/requestor.zig" },
         .{ .name = "replier", .file = "examples/replier.zig" },
-        .{ .name = "reconnection_test", .file = "examples/reconnection_test.zig" },
     };
 
     const examples_step = b.step("examples", "Build all examples");

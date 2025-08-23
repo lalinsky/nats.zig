@@ -25,7 +25,7 @@ pub fn main() !void {
     const max_attempts = 50; // 50 * 100ms = 5 seconds
     
     while (attempts < max_attempts) {
-        if (sub.nextMessage()) |msg| {
+        if (sub.nextMsg(100)) |msg| {
             defer msg.deinit();
             
             std.log.info("Received message: {s} - {s}", .{ msg.subject, msg.data });
