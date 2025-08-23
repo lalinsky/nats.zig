@@ -665,7 +665,7 @@ pub const Connection = struct {
 
         // Send CONNECT + PING (enable headers support and include client info)
         const client_version = build_options.client_version;
-        const client_name = self.options.name orelse build_options.client_name;
+        const client_name = self.options.name orelse "nats.zig";
         
         var connect_buffer = ArrayList(u8).init(self.allocator);
         defer connect_buffer.deinit();

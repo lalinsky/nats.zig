@@ -28,13 +28,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Add version and name information from build.zig.zon (parsed at build time)
+    // Add version information from build.zig.zon (parsed at build time)
     const build_options = b.addOptions();
     const build_zon_content = @embedFile("build.zig.zon");
     
-    // Define structure matching our build.zig.zon
+    // Define structure to extract only version from build.zig.zon
     const BuildZigZon = struct {
-        name: enum { nats_zig },
         version: []const u8,
     };
     
@@ -48,21 +47,16 @@ pub fn build(b: *std.Build) void {
         .ignore_unknown_fields = true,
     }) catch |err| {
         std.debug.print("Failed to parse build.zig.zon: {}\n", .{err});
-        // Fallback values
+        // Fallback version
         build_options.addOption([]const u8, "client_version", "0.0.0");
-        build_options.addOption([]const u8, "client_name", "nats.zig");
         lib_mod.addOptions("build_options", build_options);
         return;
     };
     defer std.zon.parse.free(allocator, parsed);
     
     const client_version = parsed.version;
-    const client_name = switch (parsed.name) {
-        .nats_zig => "nats.zig",
-    };
     
     build_options.addOption([]const u8, "client_version", client_version);
-    build_options.addOption([]const u8, "client_name", client_name);
     lib_mod.addOptions("build_options", build_options);
 
     // Now, we will create a static library based on the module we created above.
