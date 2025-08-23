@@ -1091,7 +1091,7 @@ pub const Connection = struct {
                 self.flusher_stop = false;
                 self.flusher_signaled = false;
                 self.mutex.unlock();
-                
+
                 self.flusher_thread = std.Thread.spawn(.{}, flusherLoop, .{self}) catch |err| {
                     log.err("Failed to restart flusher thread: {}", .{err});
                     self.triggerReconnect(err);
