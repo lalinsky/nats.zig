@@ -219,7 +219,7 @@ pub const Connection = struct {
         // Clean up subscriptions
         var iter = self.subscriptions.iterator();
         while (iter.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
+            entry.value_ptr.*.deinit();
         }
         self.subscriptions.deinit();
 
@@ -779,7 +779,7 @@ pub const Connection = struct {
         self.subs_mutex.unlock();
 
         if (sub) |s| {
-            defer s.release(self.allocator); // Release when done
+            defer s.release(); // Release when done
 
             if (s.handler) |handler| {
                 // Execute callback without holding locks
