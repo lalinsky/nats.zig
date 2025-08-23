@@ -1079,6 +1079,25 @@ pub const Connection = struct {
 
                 self.mutex.unlock(); // Release before operations that don't need mutex
 
+                // Restart reader thread for the new connection
+                self.reader_thread = std.Thread.spawn(.{}, readerLoop, .{self}) catch |err| {
+                    log.err("Failed to restart reader thread: {}", .{err});
+                    self.triggerReconnect(err);
+                    continue; // Try next server
+                };
+
+                // Restart flusher thread for the new connection
+                self.mutex.lock();
+                self.flusher_stop = false;
+                self.flusher_signaled = false;
+                self.mutex.unlock();
+                
+                self.flusher_thread = std.Thread.spawn(.{}, flusherLoop, .{self}) catch |err| {
+                    log.err("Failed to restart flusher thread: {}", .{err});
+                    self.triggerReconnect(err);
+                    continue; // Try next server
+                };
+
                 // Re-establish subscriptions (outside mutex like C library)
                 self.resendSubscriptions() catch |err| {
                     log.err("Failed to re-establish subscriptions: {}", .{err});
