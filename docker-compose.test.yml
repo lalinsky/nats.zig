@@ -1,79 +1,79 @@
-version: '3.8'
-
 services:
-  # Cluster setup for reconnection tests
+
   nats-1:
     image: nats:2.10-alpine
-    ports:
-      - "14222:4222"
+    network_mode: host
     command:
       - "--cluster_name"
       - "NATS_TEST"
       - "--cluster"
-      - "nats://0.0.0.0:6222"
+      - "nats://127.0.0.1:16222"
       - "--routes"
-      - "nats://nats-2:6222,nats://nats-3:6222"
+      - "nats://127.0.0.1:16223,nats://127.0.0.1:16224"
+      - "--addr"
+      - "127.0.0.1"
+      - "--port"
+      - "14222"
+      - "--http_port"
+      - "18222"
       - "--js"
       - "-D"
       - "--server_name"
       - "nats-1"
-    networks:
-      - nats-cluster
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "4222"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:18222/healthz"]
       interval: 1s
       timeout: 3s
       retries: 5
 
   nats-2:
     image: nats:2.10-alpine
-    ports:
-      - "14223:4222"
+    network_mode: host
     command:
       - "--cluster_name"
       - "NATS_TEST"
       - "--cluster"
-      - "nats://0.0.0.0:6222"
+      - "nats://127.0.0.1:16223"
       - "--routes"
-      - "nats://nats-1:6222,nats://nats-3:6222"
+      - "nats://127.0.0.1:16222,nats://127.0.0.1:16224"
+      - "--addr"
+      - "127.0.0.1"
+      - "--port"
+      - "14223"
+      - "--http_port"
+      - "18223"
       - "--js"
       - "-D"
       - "--server_name"
       - "nats-2"
-    networks:
-      - nats-cluster
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "4222"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:18223/healthz"]
       interval: 1s
       timeout: 3s
       retries: 5
 
   nats-3:
     image: nats:2.10-alpine
-    ports:
-      - "14224:4222"
+    network_mode: host
     command:
       - "--cluster_name"
       - "NATS_TEST"
       - "--cluster"
-      - "nats://0.0.0.0:6222"
+      - "nats://127.0.0.1:16224"
       - "--routes"
-      - "nats://nats-1:6222,nats://nats-2:6222"
+      - "nats://127.0.0.1:16222,nats://127.0.0.1:16223"
+      - "--addr"
+      - "127.0.0.1"
+      - "--port"
+      - "14224"
+      - "--http_port"
+      - "18224"
       - "--js"
       - "-D"
       - "--server_name"
       - "nats-3"
-    networks:
-      - nats-cluster
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "4222"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:18224/healthz"]
       interval: 1s
       timeout: 3s
       retries: 5
-
-networks:
-  nats-cluster:
-    driver: bridge
-
-volumes:
-  nats-test-data:
