@@ -185,7 +185,7 @@ test "delete stream" {
     // Verify stream exists by listing streams
     var streams_before = try js.listStreamNames();
     defer streams_before.deinit();
-    
+
     var found_before = false;
     for (streams_before.value) |name| {
         if (std.mem.eql(u8, name, "TEST_DELETE_STREAM")) {
@@ -205,6 +205,209 @@ test "delete stream" {
     var found_after = false;
     for (streams_after.value) |name| {
         if (std.mem.eql(u8, name, "TEST_DELETE_STREAM")) {
+            found_after = true;
+            break;
+        }
+    }
+    try testing.expect(!found_after);
+}
+
+test "add consumer" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // First create a stream for the consumer
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_CONSUMER_STREAM",
+        .subjects = &.{"test.consumer.*"},
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Create a consumer
+    const consumer_config = nats.ConsumerConfig{
+        .durable_name = "TEST_CONSUMER",
+        .ack_policy = .explicit,
+        .deliver_policy = .all,
+    };
+
+    var consumer_info = try js.addConsumer("TEST_CONSUMER_STREAM", consumer_config);
+    defer consumer_info.deinit();
+
+    // Verify consumer was created with correct configuration
+    try testing.expectEqualStrings("TEST_CONSUMER", consumer_info.value.name);
+    try testing.expectEqualStrings("TEST_CONSUMER_STREAM", consumer_info.value.stream_name);
+}
+
+test "list consumer names" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // First create a stream
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_LIST_CONSUMER_STREAM",
+        .subjects = &.{"test.listcons.*"},
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Create a consumer
+    const consumer_config = nats.ConsumerConfig{
+        .durable_name = "TEST_LIST_CONSUMER",
+        .ack_policy = .explicit,
+    };
+    var consumer_info = try js.addConsumer("TEST_LIST_CONSUMER_STREAM", consumer_config);
+    defer consumer_info.deinit();
+
+    // List consumer names and verify our consumer is included
+    var result = try js.listConsumerNames("TEST_LIST_CONSUMER_STREAM");
+    defer result.deinit();
+
+    // Should contain at least our test consumer
+    try testing.expect(result.value.len >= 1);
+
+    // Find our consumer in the list
+    var found = false;
+    for (result.value) |name| {
+        if (std.mem.eql(u8, name, "TEST_LIST_CONSUMER")) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "list consumers" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // First create a stream
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_LIST_CONSUMERS_STREAM",
+        .subjects = &.{"test.listconsumers.*"},
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Create a consumer
+    const consumer_config = nats.ConsumerConfig{
+        .durable_name = "TEST_LIST_CONSUMERS",
+        .ack_policy = .explicit,
+        .max_ack_pending = 100,
+    };
+    var consumer_info = try js.addConsumer("TEST_LIST_CONSUMERS_STREAM", consumer_config);
+    defer consumer_info.deinit();
+
+    // List consumers and verify our consumer is included
+    var result = try js.listConsumers("TEST_LIST_CONSUMERS_STREAM");
+    defer result.deinit();
+
+    // Should contain at least our test consumer
+    try testing.expect(result.value.len >= 1);
+
+    // Find our consumer in the list and verify its configuration
+    var found = false;
+    for (result.value) |info| {
+        if (std.mem.eql(u8, info.config.durable_name.?, "TEST_LIST_CONSUMERS")) {
+            found = true;
+            try testing.expect(info.config.ack_policy == .explicit);
+            try testing.expect(info.config.max_ack_pending == 100);
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "get consumer info" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // First create a stream
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_GET_CONSUMER_STREAM",
+        .subjects = &.{"test.getcons.*"},
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Create a consumer
+    const consumer_config = nats.ConsumerConfig{
+        .durable_name = "TEST_GET_CONSUMER",
+        .ack_policy = .explicit,
+        .max_deliver = 5,
+    };
+    var consumer_info = try js.addConsumer("TEST_GET_CONSUMER_STREAM", consumer_config);
+    defer consumer_info.deinit();
+
+    // Get consumer info
+    var retrieved_info = try js.getConsumerInfo("TEST_GET_CONSUMER_STREAM", "TEST_GET_CONSUMER");
+    defer retrieved_info.deinit();
+
+    // Verify the retrieved info matches what we created
+    // Note: stream_name is not included in consumer info responses
+    try testing.expectEqualStrings("TEST_GET_CONSUMER", retrieved_info.value.config.durable_name.?);
+    try testing.expect(retrieved_info.value.config.ack_policy == .explicit);
+    try testing.expect(retrieved_info.value.config.max_deliver == 5);
+}
+
+test "delete consumer" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // First create a stream
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_DELETE_CONSUMER_STREAM",
+        .subjects = &.{"test.delcons.*"},
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Create a consumer to delete
+    const consumer_config = nats.ConsumerConfig{
+        .durable_name = "TEST_DELETE_CONSUMER",
+        .ack_policy = .explicit,
+    };
+    var consumer_info = try js.addConsumer("TEST_DELETE_CONSUMER_STREAM", consumer_config);
+    defer consumer_info.deinit();
+
+    // Verify consumer exists
+    var consumers_before = try js.listConsumerNames("TEST_DELETE_CONSUMER_STREAM");
+    defer consumers_before.deinit();
+
+    var found_before = false;
+    for (consumers_before.value) |name| {
+        if (std.mem.eql(u8, name, "TEST_DELETE_CONSUMER")) {
+            found_before = true;
+            break;
+        }
+    }
+    try testing.expect(found_before);
+
+    // Delete the consumer
+    try js.deleteConsumer("TEST_DELETE_CONSUMER_STREAM", "TEST_DELETE_CONSUMER");
+
+    // Verify consumer no longer exists
+    var consumers_after = try js.listConsumerNames("TEST_DELETE_CONSUMER_STREAM");
+    defer consumers_after.deinit();
+
+    var found_after = false;
+    for (consumers_after.value) |name| {
+        if (std.mem.eql(u8, name, "TEST_DELETE_CONSUMER")) {
             found_after = true;
             break;
         }

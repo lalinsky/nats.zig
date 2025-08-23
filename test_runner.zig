@@ -19,15 +19,19 @@ const Allocator = std.mem.Allocator;
 // Log capture context
 const LogCapture = struct {
     captured_log_buffer: ?*std.ArrayList(u8) = null,
+    mutex: std.Thread.Mutex = .{},
 
     pub fn logFn(
-        self: *const @This(),
+        self: *@This(),
         comptime level: std.log.Level,
         comptime scope: @Type(.enum_literal),
         comptime format: []const u8,
         args: anytype,
     ) void {
         _ = level; // Suppress unused parameter warning
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         const scope_prefix = "(" ++ switch (scope) {
             std.log.default_log_scope => @tagName(scope),
@@ -36,11 +40,11 @@ const LogCapture = struct {
 
         if (self.captured_log_buffer) |buf| {
             // Capture to buffer during test execution
-            buf.writer().print(scope_prefix ++ format ++ "\n", args) catch return;
+            buf.writer().print(scope_prefix ++ format ++ "\n", args) catch unreachable;
         } else {
             // Normal logging to stderr when not capturing
             const stderr = std.io.getStdErr().writer();
-            stderr.print(scope_prefix ++ format ++ "\n", args) catch return;
+            stderr.print(scope_prefix ++ format ++ "\n", args) catch unreachable;
         }
     }
 
@@ -76,10 +80,10 @@ const BORDER = "=" ** 80;
 var current_test: ?[]const u8 = null;
 
 pub fn main() !void {
-    var mem: [8192]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&mem);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
 
-    const allocator = fba.allocator();
+    const allocator = gpa.allocator();
 
     const env = Env.init(allocator);
     defer env.deinit(allocator);

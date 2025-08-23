@@ -21,14 +21,14 @@ test "tests:beforeAll" {
 }
 
 test "tests:beforeEach" {
-    // Clean up all streams before each test - fail if cleanup fails
+    // Clean up all streams and consumers before each test - fail if cleanup fails
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
     defer js.deinit();
 
-    // Get all stream names and delete them
+    // Get all stream names and delete them (consumers are deleted automatically when stream is deleted)
     var stream_names = try js.listStreamNames();
     defer stream_names.deinit();
 

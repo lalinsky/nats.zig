@@ -80,6 +80,22 @@ const StreamListResponse = struct {
     streams: ?[]const StreamInfo,
 };
 
+/// Response from $JS.API.CONSUMER.NAMES
+const ConsumerNamesResponse = struct {
+    total: u64,
+    offset: u64,
+    limit: u64,
+    consumers: ?[]const []const u8,
+};
+
+/// Response from $JS.API.CONSUMER.LIST
+const ConsumerListResponse = struct {
+    total: u64,
+    offset: u64,
+    limit: u64,
+    consumers: ?[]const ConsumerInfo,
+};
+
 const StreamState = struct {
     messages: u64,
     bytes: u64,
@@ -93,6 +109,82 @@ const StreamState = struct {
 pub const StreamInfo = struct {
     config: StreamConfig,
     state: StreamState,
+    created: []const u8,
+};
+
+pub const ConsumerConfig = struct {
+    /// A unique name for a consumer
+    name: ?[]const u8 = null,
+    /// A unique name for a durable consumer (deprecated, use name)
+    durable_name: ?[]const u8 = null,
+    /// A short description of the purpose of this consumer
+    description: ?[]const u8 = null,
+    /// The point in the stream to receive messages from, either 'all', 'last', 'new', 'by_start_sequence', 'by_start_time', 'last_per_subject'
+    deliver_policy: enum { all, last, new, by_start_sequence, by_start_time, last_per_subject } = .all,
+    /// Used with deliver_policy 'by_start_sequence' to define the sequence to start at
+    opt_start_seq: ?u64 = null,
+    /// Used with deliver_policy 'by_start_time' to define the time to start at
+    opt_start_time: ?[]const u8 = null,
+    /// The subject to deliver messages to, omit for pull consumers
+    deliver_subject: ?[]const u8 = null,
+    /// How messages are acknowledged, either 'none', 'all', or 'explicit'
+    ack_policy: enum { none, all, explicit } = .explicit,
+    /// How long (in nanoseconds) to allow messages to remain un-acknowledged before attempting redelivery
+    ack_wait: u64 = 30_000_000_000, // 30 seconds
+    /// The number of times a message will be redelivered to consumers if not acknowledged in time
+    max_deliver: i64 = -1,
+    /// Filter the stream by a single subject
+    filter_subject: ?[]const u8 = null,
+    /// Filter the stream by multiple subjects
+    filter_subjects: ?[]const []const u8 = null,
+    /// How messages are sent, either 'instant' or 'original'
+    replay_policy: enum { instant, original } = .instant,
+    /// The rate at which messages will be delivered to clients, expressed in bit per second
+    rate_limit_bps: ?u64 = null,
+    /// The maximum number of messages without acknowledgement that can be outstanding
+    max_ack_pending: i64 = 1000,
+    /// If the Consumer is idle for more than this many nano seconds a empty message with Status header 100 will be sent
+    idle_heartbeat: ?u64 = null,
+    /// For push consumers this will regularly send an empty mess with Status header 100 and a reply subject
+    flow_control: ?bool = null,
+    /// The number of pulls that can be outstanding on a pull consumer
+    max_waiting: i64 = 512,
+    /// Delivers only the headers of messages in the stream and not the bodies
+    headers_only: ?bool = null,
+    /// The largest batch property that may be specified when doing a pull on a Pull Consumer
+    max_batch: ?i64 = null,
+    /// How long to allow pull requests to remain open
+    max_expires: ?u64 = null,
+    /// The number of replicas for this consumer's state
+    num_replicas: ?u8 = null,
+};
+
+pub const ConsumerInfo = struct {
+    /// The name of the consumer
+    name: []const u8,
+    /// The name of the stream this consumer belongs to
+    stream_name: []const u8,
+    /// The consumer configuration
+    config: ConsumerConfig,
+    /// The last delivered sequence for this consumer
+    delivered: struct {
+        consumer_seq: u64,
+        stream_seq: u64,
+    },
+    /// The last acknowledged message
+    ack_floor: struct {
+        consumer_seq: u64,
+        stream_seq: u64,
+    },
+    /// The number of pending messages for this consumer
+    num_ack_pending: u64,
+    /// The number of redelivered messages
+    num_redelivered: u64,
+    /// The number of waiting pull requests
+    num_waiting: u64,
+    /// The number of pending pull requests
+    num_pending: u64,
+    /// When this consumer was created
     created: []const u8,
 };
 
@@ -141,8 +233,10 @@ pub const JetStream = struct {
 
         const info = response.@"error";
         log.err("JetStream error: code={d} err_code={d} description={s}", .{ info.code, info.err_code, info.description });
+        log.debug("Full response: {s}", .{msg.data});
 
         // TODO: Handle specific error cases
+        std.debug.print("JetStream error: code={d} err_code={d} description={s}\n", .{ info.code, info.err_code, info.description });
         return error.JetStreamError;
     }
 
@@ -150,10 +244,14 @@ pub const JetStream = struct {
     fn parseResponse(self: *JetStream, comptime T: type, msg: *Message) !Result(T) {
         try self.maybeParseErrorResponse(msg);
 
-        return try std.json.parseFromSlice(T, self.allocator, msg.data, .{
+        return std.json.parseFromSlice(T, self.allocator, msg.data, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
-        });
+        }) catch |err| {
+            log.err("Failed to parse response: {}", .{err});
+            log.debug("Full response: {s}", .{msg.data});
+            return error.JetStreamParseError;
+        };
     }
 
     // Retrieves stats and limits for the connected user's account.
@@ -238,6 +336,98 @@ pub const JetStream = struct {
     pub fn deleteStream(self: *JetStream, stream_name: []const u8) !void {
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.DELETE.{s}", .{stream_name});
+        defer self.allocator.free(subject);
+
+        const msg = try self.sendRequest(subject, "");
+        defer msg.deinit();
+
+        // Just check for errors, don't need to parse the response
+        try self.maybeParseErrorResponse(msg);
+    }
+
+    /// Retrieves a list of consumer names for a stream.
+    pub fn listConsumerNames(self: *JetStream, stream_name: []const u8) !Result([]const []const u8) {
+        const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.NAMES.{s}", .{stream_name});
+        defer self.allocator.free(subject);
+
+        const msg = try self.sendRequest(subject, "");
+        defer msg.deinit();
+
+        const page_result = try self.parseResponse(ConsumerNamesResponse, msg);
+        errdefer page_result.deinit();
+
+        // TODO: handle pagination
+        const consumers = page_result.value.consumers orelse &[_][]const u8{};
+        std.debug.assert(page_result.value.total == consumers.len);
+
+        const result: Result([]const []const u8) = .{
+            .arena = page_result.arena,
+            .value = consumers,
+        };
+        return result;
+    }
+
+    /// Retrieves a list of consumers with full information for a stream.
+    pub fn listConsumers(self: *JetStream, stream_name: []const u8) !Result([]const ConsumerInfo) {
+        const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.LIST.{s}", .{stream_name});
+        defer self.allocator.free(subject);
+
+        const msg = try self.sendRequest(subject, "");
+        defer msg.deinit();
+
+        const page_result = try self.parseResponse(ConsumerListResponse, msg);
+        errdefer page_result.deinit();
+
+        // TODO: handle pagination
+        const consumers = page_result.value.consumers orelse &[_]ConsumerInfo{};
+        std.debug.assert(page_result.value.total == consumers.len);
+
+        const result: Result([]const ConsumerInfo) = .{
+            .arena = page_result.arena,
+            .value = consumers,
+        };
+        return result;
+    }
+
+    /// Creates a new consumer with the provided configuration.
+    /// Uses DURABLE endpoint only if durable_name is provided, otherwise creates ephemeral consumer.
+    pub fn addConsumer(self: *JetStream, stream_name: []const u8, config: ConsumerConfig) !Result(ConsumerInfo) {
+        log.info("adding consumer", .{});
+        const subject = if (config.durable_name) |durable_name|
+            try std.fmt.allocPrint(self.allocator, "CONSUMER.DURABLE.CREATE.{s}.{s}", .{ stream_name, durable_name })
+        else
+            try std.fmt.allocPrint(self.allocator, "CONSUMER.CREATE.{s}", .{stream_name});
+        defer self.allocator.free(subject);
+
+        // Create request payload
+        const request_payload = struct {
+            stream_name: []const u8,
+            config: ConsumerConfig,
+        }{ .stream_name = stream_name, .config = config };
+
+        const config_json = try std.json.stringifyAlloc(self.allocator, request_payload, .{});
+        defer self.allocator.free(config_json);
+
+        const msg = try self.sendRequest(subject, config_json);
+        defer msg.deinit();
+
+        return try self.parseResponse(ConsumerInfo, msg);
+    }
+
+    /// Gets information about a specific consumer.
+    pub fn getConsumerInfo(self: *JetStream, stream_name: []const u8, consumer_name: []const u8) !Result(ConsumerInfo) {
+        const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.INFO.{s}.{s}", .{ stream_name, consumer_name });
+        defer self.allocator.free(subject);
+
+        const msg = try self.sendRequest(subject, "");
+        defer msg.deinit();
+
+        return try self.parseResponse(ConsumerInfo, msg);
+    }
+
+    /// Deletes a consumer.
+    pub fn deleteConsumer(self: *JetStream, stream_name: []const u8, consumer_name: []const u8) !void {
+        const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.DELETE.{s}.{s}", .{ stream_name, consumer_name });
         defer self.allocator.free(subject);
 
         const msg = try self.sendRequest(subject, "");
