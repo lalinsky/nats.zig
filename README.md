@@ -64,13 +64,6 @@ const stream_config = nats.StreamConfig{
 
 var stream_info = try js.addStream(stream_config);
 defer stream_info.deinit();
-
-// List all streams
-var streams = try js.listStreamNames();
-defer streams.deinit();
-for (streams.value) |name| {
-    std.debug.print("Stream: {s}\n", .{name});
-}
 ```
 
 ### JetStream Consumer Management
@@ -85,25 +78,6 @@ const consumer_config = nats.ConsumerConfig{
 
 var consumer_info = try js.addConsumer("ORDERS", consumer_config);
 defer consumer_info.deinit();
-
-// List consumers for a stream
-var consumers = try js.listConsumerNames("ORDERS");
-defer consumers.deinit();
-for (consumers.value) |name| {
-    std.debug.print("Consumer: {s}\n", .{name});
-}
-```
-
-### JetStream Account Information
-
-```zig
-// Get account information
-var account_info = try js.getAccountInfo();
-defer account_info.deinit();
-
-std.debug.print("Streams: {d}\n", .{account_info.value.streams});
-std.debug.print("Consumers: {d}\n", .{account_info.value.consumers});
-std.debug.print("Storage: {d} bytes\n", .{account_info.value.storage});
 ```
 
 ## Building
