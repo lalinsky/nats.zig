@@ -49,10 +49,16 @@ const LogCapture = struct {
     }
 
     pub fn startCapture(self: *@This(), buffer: *std.ArrayList(u8)) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         self.captured_log_buffer = buffer;
     }
 
     pub fn stopCapture(self: *@This()) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         self.captured_log_buffer = null;
     }
 };
