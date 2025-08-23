@@ -15,6 +15,7 @@ const net_utils = @import("net_utils.zig");
 const jetstream_mod = @import("jetstream.zig");
 const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
+const build_options = @import("build_options");
 
 const log = std.log.scoped(.connection);
 
@@ -661,10 +662,23 @@ pub const Connection = struct {
         // Calculate effective no_responders: enable if server supports headers
         const effective_no_responders = self.options.no_responders or self.server_info.headers;
         
-        try buffer.writer().print(
-            "CONNECT {{\"verbose\":{},\"pedantic\":false,\"headers\":true,\"no_responders\":{}}}\r\n", 
-            .{ self.options.verbose, effective_no_responders }
-        );
+        // Get client name from options or use default
+        const client_name = self.options.name orelse build_options.name;
+        
+        // Create CONNECT JSON object
+        const connect_obj = .{
+            .verbose = self.options.verbose,
+            .pedantic = false,
+            .headers = true,
+            .no_responders = effective_no_responders,
+            .name = client_name,
+            .lang = build_options.lang,
+            .version = build_options.version,
+        };
+        
+        try buffer.writer().writeAll("CONNECT ");
+        try std.json.stringify(connect_obj, .{}, buffer.writer());
+        try buffer.writer().writeAll("\r\n");
         const connect_msg = buffer.items;
 
         try stream.writeAll(connect_msg);

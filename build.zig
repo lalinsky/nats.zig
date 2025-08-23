@@ -15,6 +15,31 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    // Parse build.zig.zon to extract version information
+    const zon_content = @embedFile("build.zig.zon");
+    const BuildZon = struct {
+        version: []const u8,
+        name: ?[]const u8 = null,
+    };
+    
+    // Parse the ZON content at compile time, or use fallback values if parsing fails
+    var parsed_zon: BuildZon = undefined;
+    var should_free = false;
+    if (std.zon.parse.fromSlice(BuildZon, b.allocator, zon_content, null, .{})) |result| {
+        parsed_zon = result;
+        should_free = true;
+    } else |_| {
+        // Fallback values if parsing fails
+        parsed_zon = BuildZon{ .version = "0.0.0", .name = "nats.zig" };
+    }
+    defer if (should_free) std.zon.parse.free(b.allocator, parsed_zon);
+    
+    // Create build options
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", parsed_zon.version);
+    options.addOption([]const u8, "name", parsed_zon.name orelse "nats.zig");
+    options.addOption([]const u8, "lang", "zig");
+
     // This creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Every executable or library we compile will be based on one or more modules.
@@ -27,6 +52,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    
+    // Add build options to the module
+    lib_mod.addOptions("build_options", options);
 
     // Now, we will create a static library based on the module we created above.
     // This creates a `std.Build.Step.Compile`, which is the build step responsible
