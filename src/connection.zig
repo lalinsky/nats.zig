@@ -403,6 +403,57 @@ pub const Connection = struct {
         log.debug("Published to {s}: {s}", .{ subject, data });
     }
 
+    pub fn publishMsg(self: *Self, msg: *Message) !void {
+        // Lock immediately like other publish methods
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.status != .connected) {
+            return ConnectionError.ConnectionClosed;
+        }
+
+        // Check if message has headers
+        try msg.ensureHeadersParsed();
+        const has_headers = msg.headers.count() > 0;
+
+        var buffer = ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+
+        if (has_headers) {
+            // Format headers
+            var headers_buffer = ArrayList(u8).init(self.allocator);
+            defer headers_buffer.deinit();
+            try msg.encodeHeaders(headers_buffer.writer());
+            
+            const headers_len = headers_buffer.items.len;
+            const total_len = headers_len + msg.data.len;
+
+            // HPUB format: HPUB <subject> [reply] <headers_len> <total_len>\r\n<headers><data>\r\n
+            if (msg.reply) |reply| {
+                try buffer.writer().print("HPUB {s} {s} {d} {d}\r\n", .{ msg.subject, reply, headers_len, total_len });
+            } else {
+                try buffer.writer().print("HPUB {s} {d} {d}\r\n", .{ msg.subject, headers_len, total_len });
+            }
+            try buffer.appendSlice(headers_buffer.items);
+            try buffer.appendSlice(msg.data);
+            try buffer.appendSlice("\r\n");
+        } else {
+            // Regular PUB format: PUB <subject> [reply] <size>\r\n<data>\r\n
+            if (msg.reply) |reply| {
+                try buffer.writer().print("PUB {s} {s} {d}\r\n", .{ msg.subject, reply, msg.data.len });
+            } else {
+                try buffer.writer().print("PUB {s} {d}\r\n", .{ msg.subject, msg.data.len });
+            }
+            try buffer.appendSlice(msg.data);
+            try buffer.appendSlice("\r\n");
+        }
+
+        // Send via buffer
+        try self.bufferWrite(buffer.items);
+
+        log.debug("Published message to {s}: has_headers={}, data_len={d}", .{ msg.subject, has_headers, msg.data.len });
+    }
+
     pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
         // Lock immediately like C library
         self.mutex.lock();
@@ -601,11 +652,11 @@ pub const Connection = struct {
             return ConnectionError.ConnectionClosed;
         }
 
-        // Send CONNECT + PING
+        // Send CONNECT + PING (enable headers support)
         const connect_msg = if (self.options.verbose)
-            "CONNECT {\"verbose\":true,\"pedantic\":false}\r\n"
+            "CONNECT {\"verbose\":true,\"pedantic\":false,\"headers\":true}\r\n"
         else
-            "CONNECT {\"verbose\":false,\"pedantic\":false}\r\n";
+            "CONNECT {\"verbose\":false,\"pedantic\":false,\"headers\":true}\r\n";
 
         try stream.writeAll(connect_msg);
         try stream.writeAll("PING\r\n");
@@ -761,14 +812,22 @@ pub const Connection = struct {
     }
 
     // Parser callback methods
-    pub fn processMsg(self: *Self, payload: []const u8) !void {
+    pub fn processMsg(self: *Self, message_buffer: []const u8) !void {
         const msg_arg = self.parser.ma;
 
-        // Create message copying data from parser buffers (like C implementation)
-        // This is necessary because parser buffers get reused on next read
-        const message = try Message.init(self.allocator, msg_arg.subject, msg_arg.reply, payload);
+        // Handle full message buffer like C parser (splits headers internally)
+        const message = if (msg_arg.hdr >= 0) blk: {
+            // HMSG - message_buffer contains headers + payload
+            const hdr_len = @as(usize, @intCast(msg_arg.hdr));
+            const headers_data = message_buffer[0..hdr_len];
+            const msg_data = message_buffer[hdr_len..];
+            break :blk try Message.initWithHeaders(self.allocator, msg_arg.subject, msg_arg.reply, msg_data, headers_data);
+        } else blk: {
+            // Regular MSG - message_buffer is just payload
+            break :blk try Message.init(self.allocator, msg_arg.subject, msg_arg.reply, message_buffer);
+        };
+        
         message.sid = msg_arg.sid;
-        // TODO: handle headers when parser supports them
 
         // Retain subscription while holding lock, then release lock
         self.subs_mutex.lock();
@@ -781,6 +840,9 @@ pub const Connection = struct {
         if (sub) |s| {
             defer s.release(); // Release when done
 
+            // Log before consuming message (to avoid use-after-free)
+            log.debug("Delivering message to subscription {d}: {s}", .{ msg_arg.sid, message.data });
+
             if (s.handler) |handler| {
                 // Execute callback without holding locks
                 handler.call(message);
@@ -790,8 +852,6 @@ pub const Connection = struct {
                 defer s.mutex.unlock();
                 try s.messages.writeItem(message);
             }
-
-            log.debug("Delivered message to subscription {d}: {s}", .{ msg_arg.sid, payload });
         } else {
             // No subscription found, clean up message
             message.deinit();

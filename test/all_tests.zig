@@ -2,6 +2,9 @@ const std = @import("std");
 
 // Import all test modules
 pub const minimal_tests = @import("minimal_test.zig");
+pub const headers_tests = @import("headers_test.zig");
+pub const hpub_format_tests = @import("hpub_format_test.zig");
+pub const debug_hpub_tests = @import("debug_hpub.zig");
 //pub const basic_tests = @import("basic_test.zig");
 // pub const pubsub_tests = @import("pubsub_test.zig");
 
