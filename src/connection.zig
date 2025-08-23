@@ -12,6 +12,9 @@ const server_pool_mod = @import("server_pool.zig");
 const ServerPool = server_pool_mod.ServerPool;
 const Server = server_pool_mod.Server;
 const net_utils = @import("net_utils.zig");
+const jetstream_mod = @import("jetstream.zig");
+const JetStream = jetstream_mod.JetStream;
+const JetStreamOptions = jetstream_mod.JetStreamOptions;
 
 const log = std.log.scoped(.connection);
 
@@ -146,6 +149,7 @@ pub const ConnectionOptions = struct {
     send_asap: bool = false,
     reconnect: ReconnectOptions = .{},
     callbacks: ConnectionCallbacks = .{},
+    trace: bool = false,
 };
 
 pub const Connection = struct {
@@ -602,12 +606,8 @@ pub const Connection = struct {
     }
 
     pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !?*Message {
-        // Lock immediately like C library
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.status != .connected) {
-            return ConnectionError.ConnectionClosed;
+        if (self.options.trace) {
+            log.debug("Sending request to {s} with timeout {d}ms", .{ subject, timeout_ms });
         }
 
         // 1. Create unique inbox
@@ -1222,5 +1222,10 @@ pub const Connection = struct {
             };
             log.debug("Added discovered server: {s}", .{url});
         }
+    }
+
+    // JetStream support
+    pub fn jetstream(self: *Self, options: JetStreamOptions) JetStream {
+        return JetStream.init(self.allocator, self, options);
     }
 };
