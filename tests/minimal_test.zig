@@ -1,32 +1,19 @@
 const std = @import("std");
 const nats = @import("nats");
+const utils = @import("utils.zig");
 
 const log = std.log.scoped(.testing);
 
-fn createConnection() !*nats.Connection {
-    const default_url = "nats://localhost:4222";
-    const url = std.process.getEnvVarOwned(std.testing.allocator, "TEST_NATS_URL") catch default_url;
-    defer if (url.ptr != default_url.ptr) std.testing.allocator.free(url);
-
-    var conn = try std.testing.allocator.create(nats.Connection);
-    conn.* = nats.Connection.init(std.testing.allocator, .{});
-    try conn.connect(url);
-    return conn;
-}
-
-fn closeConnection(conn: *nats.Connection) void {
-    conn.deinit();
-    std.testing.allocator.destroy(conn);
-}
-
 test "connect" {
-    const conn = try createConnection();
-    defer closeConnection(conn);
+    const conn = try utils.createConnection();
+    defer utils.closeConnection(conn);
+    // Connection successful if we got here without error
+    try std.testing.expect(true);
 }
 
 test "basic publish and subscribe" {
-    var conn = try createConnection();
-    defer closeConnection(conn);
+    var conn = try utils.createConnection();
+    defer utils.closeConnection(conn);
 
     // Create a subscription
     const sub = try conn.subscribeSync("test.minimal");
@@ -48,8 +35,8 @@ test "basic publish and subscribe" {
 }
 
 test "async subscribe" {
-    var conn = try createConnection();
-    defer closeConnection(conn);
+    var conn = try utils.createConnection();
+    defer utils.closeConnection(conn);
 
     // Message handler function
     const Handler = struct {
