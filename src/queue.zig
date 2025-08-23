@@ -23,6 +23,19 @@ pub fn Queue(comptime T: type) type {
             self.items.deinit(self.allocator);
         }
 
+        /// Compact the queue by moving remaining items to the front
+        /// and shrinking the array. Must be called with mutex held.
+        fn compact(self: *Self) void {
+            if (self.head > 0) {
+                const remaining = self.items.items.len - self.head;
+                if (remaining > 0) {
+                    std.mem.copyForwards(T, self.items.items[0..remaining], self.items.items[self.head..]);
+                }
+                self.items.shrinkRetainingCapacity(remaining);
+                self.head = 0;
+            }
+        }
+
         pub fn push(self: *Self, item: T) !void {
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -33,14 +46,7 @@ pub fn Queue(comptime T: type) type {
 
             // Ensure we have space; prefer compaction before growth
             if (self.items.items.len == self.items.capacity) {
-                if (self.head > 0) {
-                    const remaining = self.items.items.len - self.head;
-                    if (remaining > 0) {
-                        std.mem.copyForwards(T, self.items.items[0..remaining], self.items.items[self.head..]);
-                    }
-                    self.items.shrinkRetainingCapacity(remaining);
-                    self.head = 0;
-                }
+                self.compact();
                 if (self.items.items.len == self.items.capacity) {
                     const new_capacity = if (self.items.capacity == 0) 8 else self.items.capacity * 2;
                     try self.items.ensureTotalCapacity(self.allocator, new_capacity);
@@ -65,12 +71,7 @@ pub fn Queue(comptime T: type) type {
 
             // Clean up when we've consumed most items
             if (self.head * 2 >= self.items.items.len and self.items.items.len > 16) {
-                const remaining = self.items.items.len - self.head;
-                if (remaining > 0) {
-                    std.mem.copyForwards(T, self.items.items[0..remaining], self.items.items[self.head..]);
-                }
-                self.items.shrinkRetainingCapacity(remaining);
-                self.head = 0;
+                self.compact();
             }
 
             return item;
@@ -94,12 +95,7 @@ pub fn Queue(comptime T: type) type {
 
                     // Clean up when we've consumed most items
                     if (self.head * 2 >= self.items.items.len and self.items.items.len > 16) {
-                        const remaining = self.items.items.len - self.head;
-                        if (remaining > 0) {
-                            std.mem.copyForwards(T, self.items.items[0..remaining], self.items.items[self.head..]);
-                        }
-                        self.items.shrinkRetainingCapacity(remaining);
-                        self.head = 0;
+                        self.compact();
                     }
 
                     return item;
