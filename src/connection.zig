@@ -665,10 +665,20 @@ pub const Connection = struct {
         // Get client name from options or use default
         const client_name = self.options.name orelse build_options.name;
         
-        try buffer.writer().print(
-            "CONNECT {{\"verbose\":{},\"pedantic\":false,\"headers\":true,\"no_responders\":{},\"name\":\"{s}\",\"lang\":\"{s}\",\"version\":\"{s}\"}}\r\n", 
-            .{ self.options.verbose, effective_no_responders, client_name, build_options.lang, build_options.version }
-        );
+        // Create CONNECT JSON object
+        const connect_obj = .{
+            .verbose = self.options.verbose,
+            .pedantic = false,
+            .headers = true,
+            .no_responders = effective_no_responders,
+            .name = client_name,
+            .lang = build_options.lang,
+            .version = build_options.version,
+        };
+        
+        try buffer.writer().writeAll("CONNECT ");
+        try std.json.stringify(connect_obj, .{}, buffer.writer());
+        try buffer.writer().writeAll("\r\n");
         const connect_msg = buffer.items;
 
         try stream.writeAll(connect_msg);
