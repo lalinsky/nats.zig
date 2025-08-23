@@ -11,6 +11,7 @@ const MsgHandler = subscription_mod.MsgHandler;
 const server_pool_mod = @import("server_pool.zig");
 const ServerPool = server_pool_mod.ServerPool;
 const Server = server_pool_mod.Server;
+const net_utils = @import("net_utils.zig");
 
 const log = std.log.scoped(.connection);
 
@@ -330,7 +331,7 @@ pub const Connection = struct {
 
         // Shutdown socket to wake up reader thread (like C library)
         if (self.stream) |stream| {
-            std.posix.shutdown(stream.handle, .both) catch |shutdown_err| {
+            net_utils.shutdown(stream, .both) catch |shutdown_err| {
                 log.debug("Socket shutdown failed: {}", .{shutdown_err});
                 // Continue anyway, not critical
             };
@@ -892,7 +893,7 @@ pub const Connection = struct {
 
         // Shutdown socket to interrupt any ongoing reads (like C natsSock_Shutdown)
         if (self.stream) |stream| {
-            std.posix.shutdown(stream.handle, .both) catch |shutdown_err| {
+            net_utils.shutdown(stream, .both) catch |shutdown_err| {
                 log.debug("Socket shutdown failed: {}", .{shutdown_err});
                 // Continue anyway, not critical
             };
