@@ -849,9 +849,7 @@ pub const Connection = struct {
                 handler.call(message);
             } else {
                 // Sync subscription - queue message
-                s.mutex.lock();
-                defer s.mutex.unlock();
-                try s.messages.writeItem(message);
+                try s.messages.push(message);
             }
         } else {
             // No subscription found, clean up message
