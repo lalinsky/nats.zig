@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const RefCounter = @import("ref_counter.zig").RefCounter;
+const Queue = @import("queue.zig").Queue;
 
 const log = std.log.scoped(.subscription);
 
@@ -23,8 +24,7 @@ pub const MsgHandler = struct {
 pub const Subscription = struct {
     sid: u64,
     subject: []const u8,
-    messages: std.fifo.LinearFifo(*Message, .Dynamic),
-    mutex: std.Thread.Mutex = .{},
+    messages: Queue(*Message),
     allocator: Allocator,
 
     // Reference counting for safe cleanup
@@ -38,7 +38,7 @@ pub const Subscription = struct {
         sub.* = Subscription{
             .sid = sid,
             .subject = try allocator.dupe(u8, subject),
-            .messages = std.fifo.LinearFifo(*Message, .Dynamic).init(allocator),
+            .messages = Queue(*Message).init(allocator),
             .allocator = allocator,
             .handler = null,
         };
@@ -50,7 +50,7 @@ pub const Subscription = struct {
         sub.* = Subscription{
             .sid = sid,
             .subject = try allocator.dupe(u8, subject),
-            .messages = std.fifo.LinearFifo(*Message, .Dynamic).init(allocator),
+            .messages = Queue(*Message).init(allocator),
             .allocator = allocator,
             .handler = handler,
         };
@@ -76,8 +76,9 @@ pub const Subscription = struct {
             handler.cleanup(self.allocator);
         }
 
-        // Clean up pending messages
-        while (self.messages.readItem()) |msg| {
+        // Close queue first to prevent new messages, then clean up pending messages
+        self.messages.close();
+        while (self.messages.tryPop()) |msg| {
             msg.deinit();
         }
         self.messages.deinit();
@@ -90,29 +91,7 @@ pub const Subscription = struct {
     }
 
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) ?*Message {
-        if (timeout_ms == 0) {
-            // Non-blocking mode
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            return self.messages.readItem();
-        }
-
-        // Blocking mode with timeout
-        const timeout_ns = timeout_ms * std.time.ns_per_ms;
-        const deadline = std.time.nanoTimestamp() + @as(i128, timeout_ns);
-
-        while (std.time.nanoTimestamp() < deadline) {
-            self.mutex.lock();
-            const msg = self.messages.readItem();
-            self.mutex.unlock();
-
-            if (msg) |m| {
-                return m;
-            }
-            // Sleep for 1ms before retrying
-            std.time.sleep(1_000_000);
-        }
-        return null;
+        return self.messages.pop(timeout_ms);
     }
 };
 

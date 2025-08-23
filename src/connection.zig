@@ -849,9 +849,22 @@ pub const Connection = struct {
                 handler.call(message);
             } else {
                 // Sync subscription - queue message
-                s.mutex.lock();
-                defer s.mutex.unlock();
-                try s.messages.writeItem(message);
+                s.messages.push(message) catch |err| {
+                    switch (err) {
+                        error.QueueClosed => {
+                            // Subscription is closing/closed; drop gracefully.
+                            log.debug("Queue closed for sid {d}; dropping message", .{ msg_arg.sid });
+                            message.deinit();
+                            return;
+                        },
+                        else => {
+                            // Allocation or unexpected push failure; log and tear down the connection.
+                            log.err("Failed to enqueue message for sid {d}: {}", .{ msg_arg.sid, err });
+                            message.deinit();
+                            return err;
+                        },
+                    }
+                };
             }
         } else {
             // No subscription found, clean up message
