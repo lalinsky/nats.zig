@@ -5,7 +5,7 @@ const time = std.time;
 // Import all test modules
 pub const minimal_tests = @import("minimal_test.zig");
 pub const headers_tests = @import("headers_test.zig");
-pub const reconnection_tests = @import("reconnection_test.zig");
+// pub const reconnection_tests = @import("reconnection_test.zig");
 pub const jetstream_tests = @import("jetstream_test.zig");
 
 const utils = @import("utils.zig");

@@ -13,7 +13,7 @@ test "connect" {
     defer js.deinit();
 }
 
-test "getAccountInfo" {
+test "get account info" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
@@ -26,7 +26,7 @@ test "getAccountInfo" {
     try testing.expect(result.value.streams == 0);
 }
 
-test "listStreamNames" {
+test "list stream names" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
