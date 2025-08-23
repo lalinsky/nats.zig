@@ -619,7 +619,7 @@ pub const Connection = struct {
             self.unsubscribe(sub) catch |err| {
                 log.warn("Failed to unsubscribe from inbox: {}", .{err});
             };
-            sub.deinit(self.allocator);
+            sub.deinit();
         }
 
         // 3. Publish with reply-to
