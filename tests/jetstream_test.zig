@@ -5,6 +5,7 @@ const utils = @import("utils.zig");
 
 const log = std.log.scoped(.jetstream_test);
 
+
 test "connect" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);

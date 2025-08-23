@@ -109,7 +109,7 @@ pub fn main() !void {
     }
 
     for (builtin.test_functions) |t| {
-        if (isSetup(t) or isTeardown(t)) {
+        if (isSetup(t) or isTeardown(t) or isPerTestSetup(t)) {
             continue;
         }
 
@@ -125,14 +125,24 @@ pub fn main() !void {
 
         const friendly_name = t.name;
 
+        current_test = friendly_name;
+        std.testing.allocator_instance = .{};
+
+        // Run per-test setup functions
+        for (builtin.test_functions) |setup_t| {
+            if (isPerTestSetup(setup_t)) {
+                setup_t.func() catch |err| {
+                    printer.status(.fail, "\nper-test setup \"{s}\" failed: {}\n", .{ setup_t.name, err });
+                    return err;
+                };
+            }
+        }
+
         if (env.do_log_capture) {
             // Clear log buffer and start capturing logs for this test
             log_buffer.clearRetainingCapacity();
             log_capture.startCapture(&log_buffer);
         }
-
-        current_test = friendly_name;
-        std.testing.allocator_instance = .{};
         const result = t.func();
         current_test = null;
 
@@ -380,4 +390,8 @@ fn isSetup(t: std.builtin.TestFn) bool {
 
 fn isTeardown(t: std.builtin.TestFn) bool {
     return std.mem.endsWith(u8, t.name, "tests:afterAll");
+}
+
+fn isPerTestSetup(t: std.builtin.TestFn) bool {
+    return std.mem.endsWith(u8, t.name, "tests:beforeEach");
 }

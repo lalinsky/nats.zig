@@ -1,6 +1,7 @@
 const std = @import("std");
 const net = std.net;
 const time = std.time;
+const nats = @import("nats");
 
 // Import all test modules
 pub const minimal_tests = @import("minimal_test.zig");
@@ -17,6 +18,23 @@ test "tests:beforeAll" {
 
     try utils.runDockerCompose(allocator, &.{ "up", "-d" });
     try utils.waitForHealthyServices(allocator, 10_000);
+}
+
+test "tests:beforeEach" {
+    // Clean up all streams before each test - fail if cleanup fails
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // Get all stream names and delete them
+    var stream_names = try js.listStreamNames();
+    defer stream_names.deinit();
+
+    for (stream_names.value) |stream_name| {
+        try js.deleteStream(stream_name);
+    }
 }
 
 test "tests:afterAll" {
