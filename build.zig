@@ -28,10 +28,46 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Add version information from build.zig.zon
+    // Add version and name information from build.zig.zon (parsed at build time)
     const build_options = b.addOptions();
     const build_zon_content = @embedFile("build.zig.zon");
-    build_options.addOption([]const u8, "build_zon", build_zon_content);
+    
+    // Parse version from build.zig.zon at build time
+    var client_version: []const u8 = "0.0.0";
+    var client_name: []const u8 = "nats.zig";
+    
+    // Extract version
+    var it = std.mem.splitSequence(u8, build_zon_content, "\n");
+    while (it.next()) |line_untrimmed| {
+        const line = std.mem.trim(u8, line_untrimmed, " \t\n\r");
+        if (std.mem.startsWith(u8, line, ".version")) {
+            // Find the quoted version string: .version = "x.y.z",
+            if (std.mem.indexOf(u8, line, "\"")) |first_quote| {
+                if (std.mem.lastIndexOf(u8, line, "\"")) |last_quote| {
+                    if (first_quote < last_quote) {
+                        client_version = line[first_quote + 1 .. last_quote];
+                    }
+                }
+            }
+        } else if (std.mem.startsWith(u8, line, ".name")) {
+            // Find the quoted name: .name = .nats_zig or .name = "nats.zig"
+            if (std.mem.indexOf(u8, line, "\"")) |first_quote| {
+                if (std.mem.lastIndexOf(u8, line, "\"")) |last_quote| {
+                    if (first_quote < last_quote) {
+                        client_name = line[first_quote + 1 .. last_quote];
+                    }
+                }
+            } else if (std.mem.indexOf(u8, line, ".")) |dot_pos| {
+                const after_dot = std.mem.trim(u8, line[dot_pos + 1..], " ,");
+                if (after_dot.len > 0) {
+                    client_name = after_dot;
+                }
+            }
+        }
+    }
+    
+    build_options.addOption([]const u8, "client_version", client_version);
+    build_options.addOption([]const u8, "client_name", client_name);
     lib_mod.addOptions("build_options", build_options);
 
     // Now, we will create a static library based on the module we created above.
