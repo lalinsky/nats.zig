@@ -5,14 +5,19 @@ const utils = @import("utils.zig");
 const log = std.log.scoped(.testing);
 
 test "connect" {
-    const conn = try utils.createConnection();
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
-    // Connection successful if we got here without error
-    try std.testing.expect(true);
+}
+
+test "connect wrong port" {
+    const conn = utils.createConnectionWrongPort() catch return;
+    defer utils.closeConnection(conn);
+
+    try std.testing.expect(false);
 }
 
 test "basic publish and subscribe" {
-    var conn = try utils.createConnection();
+    var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -35,7 +40,7 @@ test "basic publish and subscribe" {
 }
 
 test "async subscribe" {
-    var conn = try utils.createConnection();
+    var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     // Message handler function
