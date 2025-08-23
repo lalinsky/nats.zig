@@ -360,75 +360,354 @@ pub const JetStream = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
         
+        // Define JSON structures first
+        const JsonStreamConfig = struct {
+            name: []const u8,
+            subjects: ?[][]const u8 = null,
+            retention: ?[]const u8 = null,
+            max_consumers: ?i32 = null,
+            max_msgs: ?i64 = null,
+            max_bytes: ?i64 = null,
+            max_age: ?i64 = null,
+            max_msg_size: ?i32 = null,
+            storage: ?[]const u8 = null,
+            num_replicas: ?u32 = null,
+            duplicate_window: ?i64 = null,
+            sealed: ?bool = null,
+            deny_delete: ?bool = null,
+            deny_purge: ?bool = null,
+            allow_rollup_hdrs: ?bool = null,
+        };
+        
+        const JsonStreamState = struct {
+            messages: ?u64 = null,
+            bytes: ?u64 = null,
+            first_seq: ?u64 = null,
+            first_ts: ?[]const u8 = null,
+            last_seq: ?u64 = null,
+            last_ts: ?[]const u8 = null,
+            consumer_count: ?u32 = null,
+        };
+        
+        // Define JSON response structure to match NATS JetStream API
+        const JsonStreamInfoResponse = struct {
+            type: ?[]const u8 = null,
+            @"error": ?ApiError = null,
+            config: ?JsonStreamConfig = null,
+            state: ?JsonStreamState = null,
+            created: ?[]const u8 = null,
+            ts: ?[]const u8 = null,
+        };
+        
         // Parse the JSON response
-        _ = std.json.parseFromSlice(std.json.Value, arena.allocator(), response.data, .{}) catch |err| {
+        const parsed = std.json.parseFromSlice(JsonStreamInfoResponse, arena.allocator(), response.data, .{ .ignore_unknown_fields = true }) catch |err| {
             log.warn("Failed to parse stream info response: {}", .{err});
             return JetStreamError.InvalidResponse;
         };
+        defer parsed.deinit();
+        
+        // Check for API errors
+        if (parsed.value.@"error") |api_error| {
+            log.warn("JetStream API error {d}: {s}", .{ api_error.code, api_error.description });
+            return JetStreamError.ApiError;
+        }
+        
+        const json_config = parsed.value.config orelse return JetStreamError.InvalidResponse;
+        const json_state = parsed.value.state orelse return JetStreamError.InvalidResponse;
         
         const stream_info = try arena.allocator().create(StreamInfo);
         stream_info.arena = arena;
         
-        // Extract stream configuration and state from parsed JSON
-        // This is a simplified version - in reality you'd need proper JSON parsing
+        // Parse retention policy enum
+        const RetentionType = enum { limits, interest, workqueue };
+        const retention = if (json_config.retention) |ret_str| blk: {
+            if (std.mem.eql(u8, ret_str, "limits")) break :blk RetentionType.limits;
+            if (std.mem.eql(u8, ret_str, "interest")) break :blk RetentionType.interest;
+            if (std.mem.eql(u8, ret_str, "workqueue")) break :blk RetentionType.workqueue;
+            break :blk RetentionType.limits;
+        } else RetentionType.limits;
+        
+        // Parse storage type enum
+        const StorageType = enum { file, memory };
+        const storage = if (json_config.storage) |storage_str| blk: {
+            if (std.mem.eql(u8, storage_str, "memory")) break :blk StorageType.memory;
+            break :blk StorageType.file;
+        } else StorageType.file;
+        
+        // Copy subjects array
+        const subjects = if (json_config.subjects) |json_subjects| blk: {
+            const subjects_copy = try arena.allocator().alloc([]const u8, json_subjects.len);
+            for (json_subjects, 0..) |subject, i| {
+                subjects_copy[i] = try arena.allocator().dupe(u8, subject);
+            }
+            break :blk subjects_copy;
+        } else try arena.allocator().alloc([]const u8, 0);
+        
+        // Extract stream configuration
         stream_info.config = StreamConfig{
-            .name = try arena.allocator().dupe(u8, "test"), // TODO: Parse from JSON
-            .subjects = &[_][]const u8{}, // TODO: Parse from JSON
+            .name = try arena.allocator().dupe(u8, json_config.name),
+            .subjects = subjects,
+            .retention = switch (retention) {
+                RetentionType.limits => .limits,
+                RetentionType.interest => .interest,
+                RetentionType.workqueue => .workqueue,
+            },
+            .max_consumers = json_config.max_consumers orelse -1,
+            .max_msgs = json_config.max_msgs orelse -1,
+            .max_bytes = json_config.max_bytes orelse -1,
+            .max_age = json_config.max_age orelse 0,
+            .max_msg_size = json_config.max_msg_size orelse -1,
+            .storage = switch (storage) {
+                StorageType.file => .file,
+                StorageType.memory => .memory,
+            },
+            .num_replicas = json_config.num_replicas orelse 1,
+            .duplicate_window = json_config.duplicate_window orelse 0,
+            .sealed = json_config.sealed orelse false,
+            .deny_delete = json_config.deny_delete orelse false,
+            .deny_purge = json_config.deny_purge orelse false,
+            .allow_rollup_hdrs = json_config.allow_rollup_hdrs orelse false,
         };
         
+        // Parse timestamps (RFC3339 format to nanoseconds since epoch)
+        const parseTimestamp = struct {
+            fn parse(timestamp_str: ?[]const u8) i64 {
+                _ = timestamp_str;
+                // For now return current time - proper RFC3339 parsing would require additional logic
+                return @intCast(std.time.nanoTimestamp());
+            }
+        }.parse;
+        
+        // Extract stream state
         stream_info.state = StreamState{
-            .messages = 0, // TODO: Parse from JSON
-            .bytes = 0,
-            .first_seq = 1,
-            .first_ts = 0,
-            .last_seq = 0,
-            .last_ts = 0,
-            .consumer_count = 0,
+            .messages = json_state.messages orelse 0,
+            .bytes = json_state.bytes orelse 0,
+            .first_seq = json_state.first_seq orelse 0,
+            .first_ts = parseTimestamp(json_state.first_ts),
+            .last_seq = json_state.last_seq orelse 0,
+            .last_ts = parseTimestamp(json_state.last_ts),
+            .consumer_count = json_state.consumer_count orelse 0,
         };
         
-        stream_info.created = 0; // TODO: Parse from JSON
-        stream_info.ts = @intCast(std.time.nanoTimestamp());
+        stream_info.created = parseTimestamp(parsed.value.created);
+        stream_info.ts = parseTimestamp(parsed.value.ts);
         
         return stream_info;
     }
     
     fn parseAccountInfo(self: *Self, response: *Message) !*AccountInfo {
-        _ = response;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
+        
+        // Define JSON structures first
+        const JsonAccountLimits = struct {
+            max_memory: ?i64 = null,
+            max_storage: ?i64 = null,
+            max_streams: ?i32 = null,
+            max_consumers: ?i32 = null,
+            max_ack_pending: ?i32 = null,
+            memory_max_stream_bytes: ?i64 = null,
+            storage_max_stream_bytes: ?i64 = null,
+            max_bytes_required: ?bool = null,
+        };
+        
+        const JsonApiStats = struct {
+            total: ?u64 = null,
+            errors: ?u64 = null,
+        };
+        
+        // Define JSON response structure for account info
+        const JsonAccountInfoResponse = struct {
+            type: ?[]const u8 = null,
+            @"error": ?ApiError = null,
+            memory: ?u64 = null,
+            storage: ?u64 = null,
+            streams: ?u32 = null,
+            consumers: ?u32 = null,
+            limits: ?JsonAccountLimits = null,
+            api: ?JsonApiStats = null,
+        };
+        
+        // Parse the JSON response
+        const parsed = std.json.parseFromSlice(JsonAccountInfoResponse, arena.allocator(), response.data, .{ .ignore_unknown_fields = true }) catch |err| {
+            log.warn("Failed to parse account info response: {}", .{err});
+            return JetStreamError.InvalidResponse;
+        };
+        defer parsed.deinit();
+        
+        // Check for API errors
+        if (parsed.value.@"error") |api_error| {
+            log.warn("JetStream API error {d}: {s}", .{ api_error.code, api_error.description });
+            return JetStreamError.ApiError;
+        }
         
         const account_info = try arena.allocator().create(AccountInfo);
         account_info.arena = arena;
         
-        // TODO: Parse JSON response properly
-        account_info.memory = 0;
-        account_info.storage = 0;
-        account_info.streams = 0;
-        account_info.consumers = 0;
-        account_info.limits = AccountLimits{};
-        account_info.api = ApiStats{ .total = 0, .errors = 0 };
+        // Extract account information
+        account_info.memory = parsed.value.memory orelse 0;
+        account_info.storage = parsed.value.storage orelse 0;
+        account_info.streams = parsed.value.streams orelse 0;
+        account_info.consumers = parsed.value.consumers orelse 0;
+        
+        // Extract limits
+        if (parsed.value.limits) |json_limits| {
+            account_info.limits = AccountLimits{
+                .max_memory = json_limits.max_memory orelse -1,
+                .max_storage = json_limits.max_storage orelse -1,
+                .max_streams = json_limits.max_streams orelse -1,
+                .max_consumers = json_limits.max_consumers orelse -1,
+                .max_ack_pending = json_limits.max_ack_pending orelse -1,
+                .memory_max_stream_bytes = json_limits.memory_max_stream_bytes orelse -1,
+                .storage_max_stream_bytes = json_limits.storage_max_stream_bytes orelse -1,
+                .max_bytes_required = json_limits.max_bytes_required orelse false,
+            };
+        } else {
+            account_info.limits = AccountLimits{};
+        }
+        
+        // Extract API stats
+        if (parsed.value.api) |json_api| {
+            account_info.api = ApiStats{
+                .total = json_api.total orelse 0,
+                .errors = json_api.errors orelse 0,
+            };
+        } else {
+            account_info.api = ApiStats{ .total = 0, .errors = 0 };
+        }
         
         return account_info;
     }
     
     fn parseStreamList(self: *Self, response: *Message, allocator: Allocator) ![]StreamInfo {
-        // TODO: Parse JSON response properly and return list of streams
-        _ = self;
-        _ = response;
-        return try allocator.alloc(StreamInfo, 0);
+        // Define JSON response structure for stream list
+        const JsonStreamListResponse = struct {
+            type: ?[]const u8 = null,
+            @"error": ?ApiError = null,
+            total: ?u32 = null,
+            offset: ?u32 = null,
+            limit: ?u32 = null,
+            streams: ?[]std.json.Value = null,
+        };
+        
+        // Parse the JSON response
+        const parsed = std.json.parseFromSlice(JsonStreamListResponse, allocator, response.data, .{ .ignore_unknown_fields = true }) catch |err| {
+            log.warn("Failed to parse stream list response: {}", .{err});
+            return JetStreamError.InvalidResponse;
+        };
+        defer parsed.deinit();
+        
+        // Check for API errors
+        if (parsed.value.@"error") |api_error| {
+            log.warn("JetStream API error {d}: {s}", .{ api_error.code, api_error.description });
+            return JetStreamError.ApiError;
+        }
+        
+        const json_streams = parsed.value.streams orelse return try allocator.alloc(StreamInfo, 0);
+        
+        // Allocate array for StreamInfo results
+        var stream_list = try allocator.alloc(StreamInfo, json_streams.len);
+        errdefer allocator.free(stream_list);
+        
+        // Parse each stream info from the JSON array
+        for (json_streams, 0..) |json_stream, i| {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            
+            // Convert json_stream (Value) back to string for parsing as StreamInfo
+            var stream_json_str = ArrayList(u8).init(allocator);
+            defer stream_json_str.deinit();
+            
+            try std.json.stringify(json_stream, .{}, stream_json_str.writer());
+            
+            // Create a temporary message to reuse parseStreamInfo
+            // Create a temporary message for parsing
+            const temp_msg = try Message.init(allocator, "", null, try stream_json_str.toOwnedSlice());
+            defer temp_msg.deinit();
+            
+            // Parse individual stream info (this will handle the arena internally)
+            const stream_info_ptr = self.parseStreamInfo(temp_msg) catch |err| {
+                // Clean up already parsed streams on error
+                for (stream_list[0..i]) |*stream| {
+                    stream.deinit();
+                }
+                allocator.free(stream_list);
+                return err;
+            };
+            
+            // Move the parsed StreamInfo from heap to array (shallow copy)
+            stream_list[i] = stream_info_ptr.*;
+            // Don't call deinit on stream_info_ptr as we've moved its arena
+            allocator.destroy(stream_info_ptr);
+        }
+        
+        return stream_list;
     }
     
     fn waitForAck(self: *Self, subject: []const u8) !*PubAck {
-        // TODO: Implement proper acknowledgment waiting
-        // For now, return a dummy ack
+        // Create a temporary reply inbox for acknowledgment
+        const reply_inbox = try inbox.newInbox(self.allocator);
+        defer self.allocator.free(reply_inbox);
+        
+        // Subscribe to the reply inbox for acknowledgment
+        const subscription = try self.connection.subscribeSync(reply_inbox);
+        defer subscription.deinit();
+        
+        // Wait for acknowledgment message with timeout
+        const ack_msg = subscription.nextMsg(self.options.timeout_ns / 1_000_000) orelse {
+            return JetStreamError.ApiTimeout;
+        };
+        defer ack_msg.deinit();
+        
         var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        
+        // Define JSON structure for publish acknowledgment
+        const JsonPubAckResponse = struct {
+            type: ?[]const u8 = null,
+            @"error": ?ApiError = null,
+            stream: ?[]const u8 = null,
+            seq: ?u64 = null,
+            duplicate: ?bool = null,
+            domain: ?[]const u8 = null,
+        };
+        
+        // Parse the acknowledgment JSON response
+        const parsed = std.json.parseFromSlice(JsonPubAckResponse, arena.allocator(), ack_msg.data, .{ .ignore_unknown_fields = true }) catch |err| {
+            log.warn("Failed to parse publish ack response: {}", .{err});
+            return JetStreamError.InvalidResponse;
+        };
+        defer parsed.deinit();
+        
+        // Check for API errors
+        if (parsed.value.@"error") |api_error| {
+            log.warn("JetStream publish error {d}: {s}", .{ api_error.code, api_error.description });
+            
+            // Map specific error codes to appropriate JetStream errors
+            return switch (api_error.err_code orelse api_error.code) {
+                10014 => JetStreamError.MessageNotFound,
+                10058 => JetStreamError.StreamNotFound,
+                10059 => JetStreamError.StreamAlreadyExists,
+                10060 => JetStreamError.ConsumerNotFound,
+                10013 => JetStreamError.InsufficientResources,
+                else => JetStreamError.ApiError,
+            };
+        }
         
         const pub_ack = try arena.allocator().create(PubAck);
         pub_ack.arena = arena;
-        pub_ack.stream = try arena.allocator().dupe(u8, "UNKNOWN");
-        pub_ack.seq = 1;
-        pub_ack.duplicate = false;
-        pub_ack.domain = null;
+        
+        // Extract acknowledgment data
+        pub_ack.stream = if (parsed.value.stream) |stream_name| 
+            try arena.allocator().dupe(u8, stream_name) 
+        else 
+            try arena.allocator().dupe(u8, "UNKNOWN");
+        pub_ack.seq = parsed.value.seq orelse 0;
+        pub_ack.duplicate = parsed.value.duplicate orelse false;
+        pub_ack.domain = if (parsed.value.domain) |domain_name|
+            try arena.allocator().dupe(u8, domain_name)
+        else
+            null;
         
         _ = subject;
         
