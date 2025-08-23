@@ -7,6 +7,15 @@ pub const UrlError = error{
     OutOfMemory,
 };
 
+const ParsedComponents = struct {
+    scheme: []const u8 = "",
+    host: []const u8 = "",
+    port: u16 = 4222,
+    username: ?[]const u8 = null,
+    password: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+};
+
 pub const Url = struct {
     full_url: []const u8,  // Owned string
     scheme: []const u8,    // Slice into full_url or static string
@@ -17,150 +26,115 @@ pub const Url = struct {
     path: ?[]const u8,     // Slice into full_url if present
     allocator: Allocator,
 
-    pub fn parse(allocator: Allocator, url_str: []const u8) !Url {
+    fn parseComponents(url_str: []const u8) ParsedComponents {
         if (url_str.len == 0) {
-            return UrlError.InvalidUrl;
+            return ParsedComponents{};
         }
 
         // Trim whitespace
         const trimmed = std.mem.trim(u8, url_str, " \t\n\r");
-
-        var scheme: []const u8 = undefined;
-        var user: ?[]const u8 = null;
-        var pwd: ?[]const u8 = null;
-        var host: []const u8 = undefined;
-        var port: u16 = 4222;
-        var path: ?[]const u8 = null;
-
+        var components = ParsedComponents{};
         var ptr: []const u8 = trimmed;
 
         // Parse scheme (matching C library logic)
         if (std.mem.indexOf(u8, trimmed, "://")) |scheme_end| {
-            scheme = trimmed[0..scheme_end];
+            components.scheme = trimmed[0..scheme_end];
             ptr = trimmed[scheme_end + 3 ..];
         } else {
             // Default to "nats" scheme if none provided (matching C library)
-            scheme = "nats";
+            components.scheme = "nats";
             ptr = trimmed;
         }
 
         // Parse user info (user:password@)
         if (std.mem.lastIndexOf(u8, ptr, "@")) |at_pos| {
             const user_info = ptr[0..at_pos];
-            host = ptr[at_pos + 1 ..];
+            components.host = ptr[at_pos + 1 ..];
 
             if (user_info.len > 0) {
                 if (std.mem.indexOf(u8, user_info, ":")) |colon_pos| {
                     if (colon_pos > 0) {
-                        user = user_info[0..colon_pos];
+                        components.username = user_info[0..colon_pos];
                     }
                     if (colon_pos + 1 < user_info.len) {
-                        pwd = user_info[colon_pos + 1 ..];
+                        components.password = user_info[colon_pos + 1 ..];
                     }
                 } else {
-                    user = user_info;
+                    components.username = user_info;
                 }
             }
         } else {
-            host = ptr;
+            components.host = ptr;
         }
 
         // Parse host and port (handle IPv6 addresses)
-        var host_end = host.len;
+        var host_end = components.host.len;
         
         // Search for end of IPv6 address (if applicable)
         var search_start: usize = 0;
-        if (std.mem.lastIndexOf(u8, host, "]")) |ipv6_end| {
+        if (std.mem.lastIndexOf(u8, components.host, "]")) |ipv6_end| {
             search_start = ipv6_end;
         }
 
         // From that point, search for the last ':' character
-        if (std.mem.lastIndexOfScalar(u8, host[search_start..], ':')) |relative_pos| {
+        if (std.mem.lastIndexOfScalar(u8, components.host[search_start..], ':')) |relative_pos| {
             const port_start = search_start + relative_pos;
-            const port_str = host[port_start + 1 ..];
+            const port_str = components.host[port_start + 1 ..];
             
             // Check if there's a path after the port
             if (std.mem.indexOf(u8, port_str, "/")) |path_start| {
                 const port_only = port_str[0..path_start];
-                path = port_str[path_start + 1 ..];
-                port = std.fmt.parseInt(u16, port_only, 10) catch return UrlError.InvalidUrl;
+                components.path = port_str[path_start + 1 ..];
+                components.port = std.fmt.parseInt(u16, port_only, 10) catch 4222;
             } else {
-                port = std.fmt.parseInt(u16, port_str, 10) catch return UrlError.InvalidUrl;
+                components.port = std.fmt.parseInt(u16, port_str, 10) catch 4222;
             }
             host_end = port_start;
         } else {
             // Check for path without port
-            if (std.mem.indexOf(u8, host, "/")) |path_start| {
-                path = host[path_start + 1 ..];
+            if (std.mem.indexOf(u8, components.host, "/")) |path_start| {
+                components.path = components.host[path_start + 1 ..];
                 host_end = path_start;
             }
         }
 
-        host = host[0..host_end];
-        if (host.len == 0) {
-            host = "localhost";
+        components.host = components.host[0..host_end];
+        if (components.host.len == 0) {
+            components.host = "localhost";
         }
 
-        // Build full URL first
-        const userval = if (user) |u| u else "";
-        const usep = if (pwd != null) ":" else "";
-        const pwdval = if (pwd) |p| p else "";
-        const hsep = if (user != null) "@" else "";
-        const pathsep = if (path != null) "/" else "";
-        const pathval = if (path) |p| p else "";
+        return components;
+    }
+
+    pub fn parse(allocator: Allocator, url_str: []const u8) !Url {
+        const components = parseComponents(url_str);
+        if (components.scheme.len == 0) {
+            return UrlError.InvalidUrl;
+        }
+
+        // Build full URL
+        const userval = if (components.username) |u| u else "";
+        const usep = if (components.password != null) ":" else "";
+        const pwdval = if (components.password) |p| p else "";
+        const hsep = if (components.username != null) "@" else "";
+        const pathsep = if (components.path != null) "/" else "";
+        const pathval = if (components.path) |p| p else "";
 
         const full_url = try std.fmt.allocPrint(allocator, "{s}://{s}{s}{s}{s}{s}:{d}{s}{s}", .{
-            scheme, userval, usep, pwdval, hsep, host, port, pathsep, pathval,
+            components.scheme, userval, usep, pwdval, hsep, components.host, components.port, pathsep, pathval,
         });
 
-        // Now create slices into the full_url for the components
-        // Find scheme position (always starts at 0)
-        const scheme_final = full_url[0..scheme.len];
-        
-        // Find host position after "://" and optional user info
-        var host_start: usize = scheme.len + 3; // Skip "://"
-        if (user != null) {
-            // Skip user:pass@ part
-            while (host_start < full_url.len and full_url[host_start] != '@') {
-                host_start += 1;
-            }
-            if (host_start < full_url.len) host_start += 1; // Skip @
-        }
-        const host_final = full_url[host_start..host_start + host.len];
-        
-        // Find username/password slices if they exist
-        var username_final: ?[]const u8 = null;
-        var password_final: ?[]const u8 = null;
-        var path_final: ?[]const u8 = null;
-        
-        if (user != null) {
-            const user_start = scheme.len + 3; // After "://"
-            username_final = full_url[user_start..user_start + user.?.len];
-            
-            if (pwd != null) {
-                const pwd_start = user_start + user.?.len + 1; // After user and ":"
-                password_final = full_url[pwd_start..pwd_start + pwd.?.len];
-            }
-        }
-        
-        if (path != null) {
-            // Find path after port
-            const port_str = try std.fmt.allocPrint(allocator, ":{d}/", .{port});
-            defer allocator.free(port_str);
-            if (std.mem.indexOf(u8, full_url, port_str)) |path_start| {
-                const path_begin = path_start + port_str.len;
-                path_final = full_url[path_begin..path_begin + path.?.len];
-            }
-        }
+        // Parse the normalized URL to get slices into full_url
+        const normalized_components = parseComponents(full_url);
 
         return Url{
             .full_url = full_url,
-            .scheme = scheme_final,
-            .host = host_final,
-            .port = port,
-            .username = username_final,
-            .password = password_final,
-            .path = path_final,
+            .scheme = normalized_components.scheme,
+            .host = normalized_components.host,
+            .port = normalized_components.port,
+            .username = normalized_components.username,
+            .password = normalized_components.password,
+            .path = normalized_components.path,
             .allocator = allocator,
         };
     }
