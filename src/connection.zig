@@ -12,6 +12,9 @@ const server_pool_mod = @import("server_pool.zig");
 const ServerPool = server_pool_mod.ServerPool;
 const Server = server_pool_mod.Server;
 const net_utils = @import("net_utils.zig");
+const jetstream_mod = @import("jetstream.zig");
+const JetStream = jetstream_mod.JetStream;
+const JetStreamOptions = jetstream_mod.JetStreamOptions;
 
 const log = std.log.scoped(.connection);
 
@@ -1209,5 +1212,14 @@ pub const Connection = struct {
             };
             log.debug("Added discovered server: {s}", .{url});
         }
+    }
+    
+    // JetStream support
+    pub fn jetstream(self: *Self, options: JetStreamOptions) JetStream {
+        return JetStream.init(self, self.allocator, options);
+    }
+    
+    pub fn jetstreamDefault(self: *Self) JetStream {
+        return self.jetstream(.{});
     }
 };

@@ -12,6 +12,16 @@ pub const ServerPool = @import("server_pool.zig").ServerPool;
 pub const Server = @import("server_pool.zig").Server;
 pub const inbox = @import("inbox.zig");
 
+// JetStream types
+pub const JetStream = @import("jetstream.zig").JetStream;
+pub const JetStreamOptions = @import("jetstream.zig").JetStreamOptions;
+pub const StreamConfig = @import("jetstream.zig").StreamConfig;
+pub const StreamInfo = @import("jetstream.zig").StreamInfo;
+pub const Stream = @import("jetstream.zig").Stream;
+pub const PubAck = @import("jetstream.zig").PubAck;
+pub const AccountInfo = @import("jetstream.zig").AccountInfo;
+pub const JetStreamError = @import("jetstream.zig").JetStreamError;
+
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 
 // Test basic functionality
