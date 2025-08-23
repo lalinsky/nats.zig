@@ -15,6 +15,7 @@ const net_utils = @import("net_utils.zig");
 const jetstream_mod = @import("jetstream.zig");
 const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
+const build_options = @import("build_options");
 
 const log = std.log.scoped(.connection);
 
@@ -661,9 +662,12 @@ pub const Connection = struct {
         // Calculate effective no_responders: enable if server supports headers
         const effective_no_responders = self.options.no_responders or self.server_info.headers;
         
+        // Get client name from options or use default
+        const client_name = self.options.name orelse build_options.name;
+        
         try buffer.writer().print(
-            "CONNECT {{\"verbose\":{},\"pedantic\":false,\"headers\":true,\"no_responders\":{}}}\r\n", 
-            .{ self.options.verbose, effective_no_responders }
+            "CONNECT {{\"verbose\":{},\"pedantic\":false,\"headers\":true,\"no_responders\":{},\"name\":\"{s}\",\"lang\":\"{s}\",\"version\":\"{s}\"}}\r\n", 
+            .{ self.options.verbose, effective_no_responders, client_name, build_options.lang, build_options.version }
         );
         const connect_msg = buffer.items;
 
