@@ -1,93 +1,93 @@
 const std = @import("std");
 const nats = @import("nats");
 
-test "minimal connection test" {
-    const allocator = std.testing.allocator;
-    
-    // Just test that we can create a connection object
-    var conn = nats.Connection.init(allocator, .{});
-    defer conn.deinit();
-    
-    // Test initial state
-    try std.testing.expect(conn.getStatus() == .disconnected);
-    
-    std.debug.print("✓ Connection created successfully\n", .{});
+const log = std.log.scoped(.testing);
+
+fn createConnection() !*nats.Connection {
+    const default_url = "nats://localhost:4222";
+    const url = std.process.getEnvVarOwned(std.testing.allocator, "TEST_NATS_URL") catch default_url;
+    defer if (url.ptr != default_url.ptr) std.testing.allocator.free(url);
+
+    var conn = try std.testing.allocator.create(nats.Connection);
+    conn.* = nats.Connection.init(std.testing.allocator, .{});
+    try conn.connect(url);
+    return conn;
 }
 
-test "connect to docker compose nats server" {
-    const allocator = std.testing.allocator;
-    
-    // Connect to the test server from docker-compose.test.yml (port 14222)
-    var conn = nats.Connection.init(allocator, .{
-        .timeout_ms = 2000,
-        .reconnect = .{ .allow_reconnect = false },
-    });
-    defer conn.deinit();
-    
-    // Attempt connection - this will fail gracefully if server is not running
-    conn.connect("nats://127.0.0.1:14222") catch |err| {
-        std.debug.print("⚠️  Could not connect to NATS server on port 14222: {}\n", .{err});
-        std.debug.print("   Make sure to run: docker compose -f docker-compose.test.yml up -d nats-test\n", .{});
-        return; // Skip test if server not available
-    };
-    
-    // Verify connection
-    try std.testing.expect(conn.getStatus() == .connected);
-    
-    // Test basic server info
-    try std.testing.expect(conn.server_info.server_id != null);
-    try std.testing.expect(conn.server_info.max_payload > 0);
-    
-    std.debug.print("✓ Connected to NATS server successfully\n", .{});
-    std.debug.print("  Server ID: {s}\n", .{conn.server_info.server_id.?});
-    if (conn.server_info.version) |version| {
-        std.debug.print("  Version: {s}\n", .{version});
-    }
-    std.debug.print("  Max Payload: {d} bytes\n", .{conn.server_info.max_payload});
+fn closeConnection(conn: *nats.Connection) void {
+    conn.deinit();
+    std.testing.allocator.destroy(conn);
+}
+
+test "connect" {
+    const conn = try createConnection();
+    defer closeConnection(conn);
 }
 
 test "basic publish and subscribe" {
-    const allocator = std.testing.allocator;
-    
-    var conn = nats.Connection.init(allocator, .{
-        .timeout_ms = 2000,
-        .reconnect = .{ .allow_reconnect = false },
-    });
-    defer conn.deinit();
-    
-    // Connect to test server
-    conn.connect("nats://127.0.0.1:14222") catch |err| {
-        std.debug.print("⚠️  Could not connect to NATS server: {}\n", .{err});
-        return; // Skip test if server not available
-    };
-    
+    var conn = try createConnection();
+    defer closeConnection(conn);
+
     // Create a subscription
-    const sub = conn.subscribeSync("test.minimal") catch |err| {
-        std.debug.print("⚠️  Could not create subscription: {}\n", .{err});
-        return;
-    };
-    defer sub.deinit(allocator);
-    
+    const sub = try conn.subscribeSync("test.minimal");
+    defer sub.deinit();
+
     // Publish a message
-    conn.publish("test.minimal", "Hello from minimal test!") catch |err| {
-        std.debug.print("⚠️  Could not publish message: {}\n", .{err});
-        return;
-    };
-    
+    try conn.publish("test.minimal", "Hello from minimal test!");
     try conn.flush();
-    
+
     // Try to receive the message
-    if (sub.nextMsg(1000)) |msg| {
+    if (sub.nextMsg(100)) |msg| {
         defer msg.deinit();
-        
+
         try std.testing.expectEqualStrings("test.minimal", msg.subject);
         try std.testing.expectEqualStrings("Hello from minimal test!", msg.data);
-        
-        std.debug.print("✓ Basic pub/sub test passed\n", .{});
-        std.debug.print("  Subject: {s}\n", .{msg.subject});
-        std.debug.print("  Data: {s}\n", .{msg.data});
     } else {
-        std.debug.print("⚠️  No message received within timeout\n", .{});
-        return;
+        return error.NoMessageReceived;
     }
+}
+
+test "async subscribe" {
+    var conn = try createConnection();
+    defer closeConnection(conn);
+
+    // Message handler function
+    const Handler = struct {
+        count: u32 = 0,
+        data: []const u8 = "",
+        subject: []const u8 = "",
+        called: std.Thread.ResetEvent = .{},
+
+        fn handleMsg(msg: *nats.Message, self: *@This()) void {
+            defer self.called.set();
+            defer msg.deinit();
+            self.count += 1;
+            self.data = std.testing.allocator.dupe(u8, msg.data) catch unreachable;
+            self.subject = std.testing.allocator.dupe(u8, msg.subject) catch unreachable;
+        }
+
+        pub fn deinit(self: @This()) void {
+            std.testing.allocator.free(self.data);
+            std.testing.allocator.free(self.subject);
+        }
+    };
+
+    var handler: Handler = .{};
+    defer handler.deinit();
+
+    // Create async subscription
+    const sub = try conn.subscribe("test.async", Handler.handleMsg, .{&handler});
+    defer sub.deinit();
+
+    // Publish a message
+    try conn.publish("test.async", "Hello from async test!");
+    try conn.flush();
+
+    // Wait a bit for async processing
+    try handler.called.timedWait(100 * std.time.ns_per_ms);
+
+    // Check if message was received by handler
+    try std.testing.expect(handler.count == 1);
+    try std.testing.expectEqualStrings("test.async", handler.subject);
+    try std.testing.expectEqualStrings("Hello from async test!", handler.data);
 }
