@@ -15,8 +15,31 @@ const net_utils = @import("net_utils.zig");
 const jetstream_mod = @import("jetstream.zig");
 const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
+const build_options = @import("build_options");
 
 const log = std.log.scoped(.connection);
+
+fn extractVersionFromZon() []const u8 {
+    const build_zon = build_options.build_zon;
+    var it = std.mem.splitSequence(u8, build_zon, "\n");
+    while (it.next()) |line_untrimmed| {
+        const line = std.mem.trim(u8, line_untrimmed, " \t\n\r");
+        if (std.mem.startsWith(u8, line, ".version")) {
+            // Find the quoted version string: .version = "x.y.z",
+            const equals_pos = std.mem.indexOf(u8, line, "=") orelse continue;
+            const after_equals = std.mem.trim(u8, line[equals_pos + 1..], " \t");
+            
+            // Find first and last quote
+            const first_quote = std.mem.indexOf(u8, after_equals, "\"") orelse continue;
+            const second_quote = std.mem.lastIndexOf(u8, after_equals, "\"") orelse continue;
+            
+            if (first_quote < second_quote) {
+                return after_equals[first_quote + 1..second_quote];
+            }
+        }
+    }
+    return "0.0.0"; // Fallback version
+}
 
 pub const ServerVersion = struct {
     major: u32 = 0,
@@ -653,13 +676,21 @@ pub const Connection = struct {
             return ConnectionError.ConnectionClosed;
         }
 
-        // Send CONNECT + PING (enable headers support)
-        const connect_msg = if (self.options.verbose)
-            "CONNECT {\"verbose\":true,\"pedantic\":false,\"headers\":true}\r\n"
-        else
-            "CONNECT {\"verbose\":false,\"pedantic\":false,\"headers\":true}\r\n";
-
-        try stream.writeAll(connect_msg);
+        // Send CONNECT + PING (enable headers support and include client info)
+        const client_version = extractVersionFromZon();
+        const client_name = self.options.name orelse "nats.zig";
+        
+        var connect_buffer = ArrayList(u8).init(self.allocator);
+        defer connect_buffer.deinit();
+        
+        const writer = connect_buffer.writer();
+        try writer.print("CONNECT {{\"verbose\":{},\"pedantic\":false,\"headers\":true,\"name\":\"{s}\",\"lang\":\"zig\",\"version\":\"{s}\"}}\r\n", .{
+            self.options.verbose,
+            client_name,
+            client_version,
+        });
+        
+        try stream.writeAll(connect_buffer.items);
         try stream.writeAll("PING\r\n");
 
         // Wait for PONG (or +OK then PONG if verbose)

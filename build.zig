@@ -28,6 +28,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Add version information from build.zig.zon
+    const build_options = b.addOptions();
+    const build_zon_content = @embedFile("build.zig.zon");
+    build_options.addOption([]const u8, "build_zon", build_zon_content);
+    lib_mod.addOptions("build_options", build_options);
+
     // Now, we will create a static library based on the module we created above.
     // This creates a `std.Build.Step.Compile`, which is the build step responsible
     // for actually invoking the compiler.
