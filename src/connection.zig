@@ -275,6 +275,7 @@ pub const Connection = struct {
         self.mutex.unlock();
 
         // Establish TCP connection (outside mutex like C library)
+        log.debug("Connecting to server: {s}:{d}", .{ selected_server.parsed_url.host, selected_server.parsed_url.port });
         const stream = net.tcpConnectToHost(self.allocator, selected_server.parsed_url.host, selected_server.parsed_url.port) catch |err| {
             self.mutex.lock();
             selected_server.last_error = err;
@@ -424,7 +425,7 @@ pub const Connection = struct {
             var headers_buffer = ArrayList(u8).init(self.allocator);
             defer headers_buffer.deinit();
             try msg.encodeHeaders(headers_buffer.writer());
-            
+
             const headers_len = headers_buffer.items.len;
             const total_len = headers_len + msg.data.len;
 
@@ -826,7 +827,7 @@ pub const Connection = struct {
             // Regular MSG - message_buffer is just payload
             break :blk try Message.init(self.allocator, msg_arg.subject, msg_arg.reply, message_buffer);
         };
-        
+
         message.sid = msg_arg.sid;
 
         // Retain subscription while holding lock, then release lock
@@ -1048,6 +1049,7 @@ pub const Connection = struct {
             self.mutex.unlock();
 
             // Establish TCP connection (outside mutex)
+            log.debug("Connecting to server: {s}:{d} (reconnect attempt {})", .{ server.parsed_url.host, server.parsed_url.port, total_attempts });
             const stream = net.tcpConnectToHost(self.allocator, server.parsed_url.host, server.parsed_url.port) catch |err| {
                 self.mutex.lock(); // Re-acquire for error handling
                 server.last_error = err;
