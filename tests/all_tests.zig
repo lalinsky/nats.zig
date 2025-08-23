@@ -12,32 +12,30 @@ pub const jetstream_tests = @import("jetstream_test.zig");
 const utils = @import("utils.zig");
 
 test "tests:beforeAll" {
+    // Clean up any existing containers before starting
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    try utils.runDockerCompose(allocator, &.{"down"});
+}
+
+test "tests:beforeEach" {
+    // Start fresh NATS cluster before each test instead of just cleaning streams
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Stop any running containers first
+    _ = utils.runDockerCompose(allocator, &.{"down"}) catch {};
+    
+    // Start fresh cluster
     try utils.runDockerCompose(allocator, &.{ "up", "-d" });
     try utils.waitForHealthyServices(allocator, 10_000);
 }
 
-test "tests:beforeEach" {
-    // Clean up all streams and consumers before each test - fail if cleanup fails
-    const conn = try utils.createDefaultConnection();
-    defer utils.closeConnection(conn);
-
-    var js = conn.jetstream(.{});
-    defer js.deinit();
-
-    // Get all stream names and delete them (consumers are deleted automatically when stream is deleted)
-    var stream_names = try js.listStreamNames();
-    defer stream_names.deinit();
-
-    for (stream_names.value) |stream_name| {
-        try js.deleteStream(stream_name);
-    }
-}
-
 test "tests:afterAll" {
+    // Clean up containers
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
