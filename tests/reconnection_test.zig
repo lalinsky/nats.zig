@@ -17,7 +17,7 @@ test "basic reconnection when server stops" {
     try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
 
     // Verify connection works after reconnection
-    // log.debug("Trying to publish after reconnection", .{});
-    // try nc.publish("test.after", "hello after reconnection");
-    // try nc.flush();
+    log.debug("Trying to publish after reconnection", .{});
+    try nc.publish("test.after", "hello after reconnection");
+    try nc.flush();
 }
