@@ -19,36 +19,46 @@ const Allocator = std.mem.Allocator;
 // Log capture context
 const LogCapture = struct {
     captured_log_buffer: ?*std.ArrayList(u8) = null,
+    mutex: std.Thread.Mutex = .{},
 
     pub fn logFn(
-        self: *const @This(),
+        self: *@This(),
         comptime level: std.log.Level,
         comptime scope: @Type(.enum_literal),
         comptime format: []const u8,
         args: anytype,
     ) void {
         _ = level; // Suppress unused parameter warning
-        
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         const scope_prefix = "(" ++ switch (scope) {
             std.log.default_log_scope => @tagName(scope),
             else => @tagName(scope),
         } ++ "): ";
-        
+
         if (self.captured_log_buffer) |buf| {
             // Capture to buffer during test execution
-            buf.writer().print(scope_prefix ++ format ++ "\n", args) catch return;
+            buf.writer().print(scope_prefix ++ format ++ "\n", args) catch unreachable;
         } else {
             // Normal logging to stderr when not capturing
             const stderr = std.io.getStdErr().writer();
-            stderr.print(scope_prefix ++ format ++ "\n", args) catch return;
+            stderr.print(scope_prefix ++ format ++ "\n", args) catch unreachable;
         }
     }
-    
+
     pub fn startCapture(self: *@This(), buffer: *std.ArrayList(u8)) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         self.captured_log_buffer = buffer;
     }
-    
+
     pub fn stopCapture(self: *@This()) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         self.captured_log_buffer = null;
     }
 };
@@ -76,10 +86,10 @@ const BORDER = "=" ** 80;
 var current_test: ?[]const u8 = null;
 
 pub fn main() !void {
-    var mem: [8192]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&mem);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
 
-    const allocator = fba.allocator();
+    const allocator = gpa.allocator();
 
     const env = Env.init(allocator);
     defer env.deinit(allocator);
@@ -99,7 +109,6 @@ pub fn main() !void {
     var log_buffer = std.ArrayList(u8).init(allocator);
     defer log_buffer.deinit();
 
-
     for (builtin.test_functions) |t| {
         if (isSetup(t)) {
             t.func() catch |err| {
@@ -110,7 +119,7 @@ pub fn main() !void {
     }
 
     for (builtin.test_functions) |t| {
-        if (isSetup(t) or isTeardown(t)) {
+        if (isSetup(t) or isTeardown(t) or isPerTestSetup(t)) {
             continue;
         }
 
@@ -126,17 +135,31 @@ pub fn main() !void {
 
         const friendly_name = t.name;
 
-        // Clear log buffer and start capturing logs for this test
-        log_buffer.clearRetainingCapacity();
-        log_capture.startCapture(&log_buffer);
-        
         current_test = friendly_name;
         std.testing.allocator_instance = .{};
+
+        if (env.do_log_capture) {
+            // Clear log buffer and start capturing logs for this test
+            log_buffer.clearRetainingCapacity();
+            log_capture.startCapture(&log_buffer);
+        }
+
+        // Run per-test setup functions
+        for (builtin.test_functions) |setup_t| {
+            if (isPerTestSetup(setup_t)) {
+                setup_t.func() catch |err| {
+                    printer.status(.fail, "\nper-test setup \"{s}\" failed: {}\n", .{ setup_t.name, err });
+                    return err;
+                };
+            }
+        }
         const result = t.func();
         current_test = null;
-        
-        // Stop capturing logs
-        log_capture.stopCapture();
+
+        if (env.do_log_capture) {
+            // Stop capturing logs
+            log_capture.stopCapture();
+        }
 
         const ns_taken = slowest.endTiming(friendly_name);
 
@@ -156,14 +179,14 @@ pub fn main() !void {
             else => {
                 status = .fail;
                 fail += 1;
-                
+
                 printer.status(.fail, "\n{s}\n\"{s}\" - {s}\n", .{ BORDER, friendly_name, @errorName(err) });
-                
+
                 // Print captured logs for failed tests
                 if (log_buffer.items.len > 0) {
                     printer.fmt("Test output:\n{s}", .{log_buffer.items});
                 }
-                
+
                 printer.fmt("{s}\n", .{BORDER});
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpStackTrace(trace.*);
@@ -319,12 +342,14 @@ const Env = struct {
     verbose: bool,
     fail_first: bool,
     filter: ?[]const u8,
+    do_log_capture: bool,
 
     fn init(allocator: Allocator) Env {
         return .{
             .verbose = readEnvBool(allocator, "TEST_VERBOSE", true),
             .fail_first = readEnvBool(allocator, "TEST_FAIL_FIRST", false),
             .filter = readEnv(allocator, "TEST_FILTER"),
+            .do_log_capture = readEnvBool(allocator, "TEST_LOG_CAPTURE", true),
         };
     }
 
@@ -375,4 +400,8 @@ fn isSetup(t: std.builtin.TestFn) bool {
 
 fn isTeardown(t: std.builtin.TestFn) bool {
     return std.mem.endsWith(u8, t.name, "tests:afterAll");
+}
+
+fn isPerTestSetup(t: std.builtin.TestFn) bool {
+    return std.mem.endsWith(u8, t.name, "tests:beforeEach");
 }
