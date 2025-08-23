@@ -36,7 +36,7 @@ test "jetstream stream creation and management" {
     defer stream.deinit();
     
     // Verify stream was created successfully
-    try testing.expect(std.mem.eql(u8, stream.info.config.name, stream_name));
+    try testing.expect(std.mem.eql(u8, stream.info.config().name, stream_name));
     
     // Test getting stream info
     log.info("Getting stream info for: {s}", .{stream_name});
@@ -46,7 +46,7 @@ test "jetstream stream creation and management" {
     };
     defer retrieved_stream.deinit();
     
-    try testing.expect(std.mem.eql(u8, retrieved_stream.info.config.name, stream_name));
+    try testing.expect(std.mem.eql(u8, retrieved_stream.info.config().name, stream_name));
     
     // Test listing streams
     log.info("Listing all streams", .{});
@@ -54,12 +54,20 @@ test "jetstream stream creation and management" {
         log.err("Failed to list streams: {}", .{err});
         return err;
     };
-    defer testing.allocator.free(stream_list);
+    defer {
+        // Deinit each stream info and free the slice
+        for (stream_list) |stream_info| {
+            stream_info.deinit();
+            testing.allocator.destroy(stream_info);
+        }
+        testing.allocator.free(stream_list);
+    }
     
     // Verify our stream is in the list
     var found = false;
     for (stream_list) |info| {
-        if (std.mem.eql(u8, info.config.name, stream_name)) {
+        const config = info.config();
+        if (std.mem.eql(u8, config.name, stream_name)) {
             found = true;
             break;
         }
@@ -133,10 +141,11 @@ test "jetstream stream configuration options" {
         defer stream.deinit();
         
         // Verify configuration was applied correctly
-        try testing.expect(std.mem.eql(u8, stream.info.config.name, test_config.name));
-        try testing.expect(stream.info.config.storage == test_config.config.storage);
-        try testing.expect(stream.info.config.retention == test_config.config.retention);
-        try testing.expect(stream.info.config.max_msgs == test_config.config.max_msgs);
+        const config = stream.info.config();
+        try testing.expect(std.mem.eql(u8, config.name, test_config.name));
+        try testing.expect(config.storage == test_config.config.storage);
+        try testing.expect(config.retention == test_config.config.retention);
+        try testing.expect(config.max_msgs == test_config.config.max_msgs);
         
         // Cleanup
         js.deleteStream(test_config.name) catch |err| {
@@ -187,8 +196,8 @@ test "jetstream stream operations" {
         };
         defer pub_ack.deinit();
         
-        try testing.expect(pub_ack.seq > 0);
-        try testing.expect(std.mem.eql(u8, pub_ack.stream, stream_name));
+        try testing.expect(pub_ack.seq() > 0);
+        try testing.expect(std.mem.eql(u8, pub_ack.stream(), stream_name));
     }
     
     // Test getting stream info after publishing
@@ -199,8 +208,9 @@ test "jetstream stream operations" {
     defer updated_info.deinit();
     
     // Should have 3 messages now
-    try testing.expect(updated_info.state.messages == 3);
-    try testing.expect(updated_info.state.last_seq >= 3);
+    const state = updated_info.state();
+    try testing.expect(state.messages == 3);
+    try testing.expect(state.last_seq >= 3);
     
     // Test getting specific messages
     log.info("Testing message retrieval", .{});
@@ -265,7 +275,7 @@ test "jetstream stream update" {
     defer updated_stream.deinit();
     
     // Verify the update was applied
-    try testing.expect(updated_stream.info.config.max_msgs == 200);
+    try testing.expect(updated_stream.info.config().max_msgs == 200);
 }
 
 test "jetstream account info" {
@@ -284,10 +294,10 @@ test "jetstream account info" {
     defer account_info.deinit();
     
     // Basic validation - account info should have some reasonable values
-    try testing.expect(account_info.api.total >= 0);
-    try testing.expect(account_info.api.errors >= 0);
-    try testing.expect(account_info.streams >= 0);
-    try testing.expect(account_info.consumers >= 0);
+    try testing.expect(account_info.api().total >= 0);
+    try testing.expect(account_info.api().errors >= 0);
+    try testing.expect(account_info.streams() >= 0);
+    try testing.expect(account_info.consumers() >= 0);
 }
 
 test "jetstream error handling" {
@@ -359,7 +369,7 @@ test "jetstream concurrent stream operations" {
         defer pub_ack.deinit();
         
         published_count += 1;
-        try testing.expect(pub_ack.seq > 0);
+        try testing.expect(pub_ack.seq() > 0);
     }
     
     try testing.expect(published_count == num_messages);
@@ -371,5 +381,5 @@ test "jetstream concurrent stream operations" {
     };
     defer final_info.deinit();
     
-    try testing.expect(final_info.state.messages == num_messages);
+    try testing.expect(final_info.state().messages == num_messages);
 }
