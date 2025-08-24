@@ -85,11 +85,11 @@ test "server pool management" {
 
     // Test C library server selection algorithm
     const server1 = try conn.server_pool.getNextServer(-1, null); // Get first server for initial connection
-    try std.testing.expect(server1 != null);
+    // server1 is guaranteed to be non-null since getNextServer returns *Server on success
 
     // Test that server moved to end after selection (C library behavior)
     const server2 = try conn.server_pool.getNextServer(-1, server1);
-    try std.testing.expect(server2 != null);
+    // server2 is guaranteed to be non-null since getNextServer returns *Server on success
     try std.testing.expect(server2 != server1); // Should be different server
 
     // Test pool size remains the same (servers moved, not removed)

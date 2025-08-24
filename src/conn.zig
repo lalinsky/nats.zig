@@ -75,6 +75,7 @@ pub const Conn = struct {
     // change to any of these is controlled by the condition variable
     sock: ?Socket = null,
     reconnecting: bool = false,
+    reconnect_attempts: usize = 0,
     should_stop: bool = false,
     read_thread_stopped: bool = false,
 
@@ -109,6 +110,7 @@ pub const Conn = struct {
         defer sock.close();
 
         self.reconnecting = false;
+        self.reconnect_attempts = 0;
         self.sock = sock;
         self.status_changed.broadcast();
 
@@ -130,6 +132,11 @@ pub const Conn = struct {
                 return err;
             };
 
+            if (bytes_read == 0) {
+                log.info("Connection closed by peer", .{});
+                return error.ConnectionClosed;
+            }
+
             self.parser.parse(self, buffer[0..bytes_read]) catch |err| {
                 log.err("Parser error: {}", .{err});
                 return err;
@@ -146,8 +153,7 @@ pub const Conn = struct {
             self.status_changed.broadcast();
         }
 
-        const reconnect_base_delay_ms = 100;
-        var reconnect_attempts: usize = 0;
+        const reconnect_base_delay_ms: u64 = 100;
 
         while (!self.should_stop) {
             self.connectAndRun() catch |err| {
@@ -160,13 +166,13 @@ pub const Conn = struct {
                         log.err("Unexpected error in connection thread: {}", .{err});
 
                         self.reconnecting = true;
+                        self.reconnect_attempts += 1;
                         self.status_changed.broadcast();
 
                         self.mutex.unlock();
                         defer self.mutex.lock();
 
-                        const delay_ms = reconnect_base_delay_ms * (reconnect_attempts + 1);
-                        reconnect_attempts += 1;
+                        const delay_ms = reconnect_base_delay_ms * (@as(u64, 1) << @min(self.reconnect_attempts - 1, 11)); // Exponential backoff, cap at 2^11
 
                         log.info("Retrying connection in {}ms", .{delay_ms});
                         std.time.sleep(std.time.ns_per_ms * delay_ms);
