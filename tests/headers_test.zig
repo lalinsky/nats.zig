@@ -155,7 +155,7 @@ test "no responders header detection" {
     defer msg.deinit();
 
     // Test no responders detection
-    const is_no_responders = try msg.isNoResponders();
+    const is_no_responders = msg.isNoResponders();
     try std.testing.expect(is_no_responders);
 
     log.info("No responders detection test passed", .{});

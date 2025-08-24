@@ -2,6 +2,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 
+// Header constants (like C NATS library)
+const STATUS_HDR = "Status";
+const DESCRIPTION_HDR = "Description";
+const HDR_STATUS_NO_RESP_503 = "503";
+
 // Simple, idiomatic Zig message implementation using ArenaAllocator
 pub const Message = struct {
     // Core data - stored as slices
@@ -101,11 +106,49 @@ pub const Message = struct {
         
         const raw = self.raw_headers orelse return;
         
-        // Simple header parsing - split by lines
+        // Parse headers like Go NATS library
         var lines = std.mem.splitSequence(u8, raw, "\r\n");
-        _ = lines.next(); // Skip "NATS/1.0" line
+        const first_line = lines.next() orelse return;
         
         const arena_allocator = self.arena.allocator();
+        
+        // Check if we have an inlined status (like "NATS/1.0 503" or "NATS/1.0 503 No Responders")
+        const nats_prefix = "NATS/1.0";
+        if (std.mem.startsWith(u8, first_line, nats_prefix) and first_line.len > nats_prefix.len) {
+            const status_part = std.mem.trim(u8, first_line[nats_prefix.len..], " \t");
+            if (status_part.len > 0) {
+                // Extract status code (first 3 characters if available)
+                const status_len = 3; // Like Go's statusLen
+                var status: []const u8 = undefined;
+                var description: ?[]const u8 = null;
+                
+                if (status_part.len == status_len) {
+                    status = status_part;
+                } else if (status_part.len > status_len) {
+                    status = status_part[0..status_len];
+                    const desc_part = std.mem.trim(u8, status_part[status_len..], " \t");
+                    if (desc_part.len > 0) {
+                        description = desc_part;
+                    }
+                } else {
+                    status = status_part; // Less than 3 chars, use as-is
+                }
+                
+                // Add Status header directly to avoid circular dependency
+                const status_copy = try arena_allocator.dupe(u8, status);
+                var status_list = ArrayListUnmanaged([]const u8){};
+                try status_list.append(arena_allocator, status_copy);
+                try self.headers.put(arena_allocator, STATUS_HDR, status_list);
+                
+                // Add Description header if present
+                if (description) |desc| {
+                    const desc_copy = try arena_allocator.dupe(u8, desc);
+                    var desc_list = ArrayListUnmanaged([]const u8){};
+                    try desc_list.append(arena_allocator, desc_copy);
+                    try self.headers.put(arena_allocator, DESCRIPTION_HDR, desc_list);
+                }
+            }
+        }
         
         
         while (lines.next()) |line| {
@@ -181,12 +224,12 @@ pub const Message = struct {
         _ = self.headers.fetchRemove(key);
     }
     
-    // Check if message indicates "no responders"
-    pub fn isNoResponders(self: *Self) !bool {
+    // Check if message indicates "no responders" - matches Go NATS library logic
+    pub fn isNoResponders(self: *Self) bool {
         if (self.data.len != 0) return false;
         
-        const status = try self.headerGet("Status");
-        return status != null and std.mem.startsWith(u8, status.?, "503");
+        const status = self.headerGet(STATUS_HDR) catch return false;
+        return status != null and std.mem.eql(u8, status.?, HDR_STATUS_NO_RESP_503);
     }
     
     // Encode headers for transmission

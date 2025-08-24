@@ -118,6 +118,7 @@ pub const ConnectionError = error{
     AuthFailed,
     InvalidProtocol,
     OutOfMemory,
+    NoResponders,
 } || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
 
 pub const ConnectionStatus = enum {
@@ -208,7 +209,7 @@ pub const Connection = struct {
 
     // Message dispatching
     dispatcher_pool: ?*DispatcherPool = null,
-    
+
     // Response management (shared subscription for request/reply)
     response_manager: ResponseManager,
 
@@ -272,30 +273,34 @@ pub const Connection = struct {
 
         log.debug("Acquired global dispatcher pool", .{});
     }
-    
+
     /// Helper for ResponseManager - get next subscription ID
     fn getNextSubId(self: *Self) u64 {
         return self.next_sid.fetchAdd(1, .monotonic);
     }
-    
+
     /// Helper for ResponseManager - create internal subscription
     pub fn subscribeInternal(self: *Self, subject: []const u8, handler: MsgHandler) !*Subscription {
         // Must be called with mutex held
         const sid = self.getNextSubId();
         const sub = try Subscription.init(self.allocator, sid, subject, handler);
         errdefer sub.deinit();
-        
+
+        // Assign dispatcher for async subscription (round-robin like C library)
+        try self.ensureDispatcherPool();
+        sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
+
         // Add to subscriptions map
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
         try self.subscriptions.put(sid, sub);
-        
+
         // Send SUB command via buffer
         var buffer = ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
         try buffer.writer().print("SUB {s} {d}\r\n", .{ subject, sid });
         try self.bufferWrite(buffer.items);
-        
+
         log.debug("Created internal subscription to {s} with sid {d}", .{ subject, sid });
         return sub;
     }
@@ -681,7 +686,7 @@ pub const Connection = struct {
         self.mutex.lock();
         try self.response_manager.ensureInitialized(self);
         self.mutex.unlock();
-        
+
         // Create request
         self.mutex.lock();
         const request_info = try self.response_manager.createRequest(subject, data);
@@ -691,10 +696,10 @@ pub const Connection = struct {
             self.response_manager.cleanupRequest(request_info.token);
         }
         self.mutex.unlock();
-        
+
         // Send request (publishRequest will acquire its own mutex)
         try self.publishRequest(subject, request_info.reply_subject, data);
-        
+
         // Wait for response
         return request_info.response_info.wait(timeout_ms);
     }

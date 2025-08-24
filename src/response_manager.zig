@@ -4,6 +4,7 @@ const Message = @import("message.zig").Message;
 const Subscription = @import("subscription.zig").Subscription;
 const MsgHandler = @import("subscription.zig").MsgHandler;
 const inbox = @import("inbox.zig");
+const ConnectionError = @import("connection.zig").ConnectionError;
 
 const log = std.log.scoped(.response_manager);
 
@@ -15,7 +16,7 @@ pub const ResponseInfo = struct {
     error_status: ?anyerror = null,
     timeout_expired: bool = false,
     
-    pub fn wait(self: *ResponseInfo, timeout_ms: u64) ?*Message {
+    pub fn wait(self: *ResponseInfo, timeout_ms: u64) !?*Message {
         self.mutex.lock();
         defer self.mutex.unlock();
         
@@ -33,6 +34,11 @@ pub const ResponseInfo = struct {
                 self.timeout_expired = true;
                 break;
             };
+        }
+        
+        // Check if an error occurred
+        if (self.error_status) |err| {
+            return err;
         }
         
         return self.message;
@@ -121,7 +127,7 @@ pub const ResponseManager = struct {
         
         self.resp_mux = try connection.subscribeInternal(wildcard_subject, handler);
         
-        log.debug("Initialized response manager with prefix: {s}", .{self.resp_sub_prefix.?});
+        log.debug("Initialized response manager with prefix: {s}, wildcard: {s}", .{ self.resp_sub_prefix.?, wildcard_subject });
     }
     
     pub fn createRequest(self: *ResponseManager, subject: []const u8, _: []const u8) !struct { 
@@ -168,18 +174,32 @@ pub const ResponseManager = struct {
     fn responseHandler(ptr: *anyopaque, msg: *Message) void {
         const self: *ResponseManager = @ptrCast(@alignCast(ptr));
         
-        log.debug("Response handler received message on: {s}", .{msg.subject});
+        log.debug("Response handler received message on: {s} (prefix: {s})", .{ msg.subject, self.resp_sub_prefix.? });
         
         if (extractResponseToken(msg.subject, self.resp_sub_prefix.?)) |token| {
+            log.debug("Extracted token: '{s}'", .{token});
             if (self.resp_map.get(token)) |response_info| {
-                log.debug("Found response info for token: {s}", .{token});
-                response_info.complete(msg);
+                log.debug("Found response info for token: {s}, completing request", .{token});
+                
+                // Check if this is a "No Responders" error message
+                if (msg.isNoResponders()) {
+                    log.debug("Received No Responders error, completing with error", .{});
+                    msg.deinit(); // Clean up message since we're not passing it along
+                    response_info.completeWithError(ConnectionError.NoResponders);
+                } else {
+                    response_info.complete(msg);
+                }
                 return;
             } else {
-                log.debug("No response info found for token: {s}", .{token});
+                log.warn("No response info found for token: '{s}', map size: {}", .{ token, self.resp_map.count() });
+                // Debug: print all keys in map
+                var iterator = self.resp_map.iterator();
+                while (iterator.next()) |entry| {
+                    log.debug("Map contains key: '{s}'", .{entry.key_ptr.*});
+                }
             }
         } else {
-            log.debug("Could not extract token from subject: {s}", .{msg.subject});
+            log.warn("Could not extract token from subject: {s}, expected prefix: {s}", .{ msg.subject, self.resp_sub_prefix.? });
         }
         
         // No one waiting, clean up message
