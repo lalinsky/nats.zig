@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 
 const PopError = error{
     QueueEmpty,
+    QueueClosed,
 };
 
 const PushError = error{
@@ -275,7 +276,16 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             const timeout_ns = timeout_ms * std.time.ns_per_ms;
 
             while (self.items_available == 0) {
+                // Check if queue is closed first
+                if (self.is_closed) {
+                    return PopError.QueueClosed;
+                }
+                
                 self.data_cond.timedWait(&self.mutex, timeout_ns) catch {
+                    // Check again after timeout in case queue was closed
+                    if (self.is_closed) {
+                        return PopError.QueueClosed;
+                    }
                     return PopError.QueueEmpty;
                 };
             }
