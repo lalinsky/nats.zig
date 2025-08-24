@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const RefCounter = @import("ref_counter.zig").RefCounter;
 const ConcurrentQueue = @import("queue.zig").ConcurrentQueue;
+const Dispatcher = @import("dispatcher.zig").Dispatcher;
 
 const log = std.log.scoped(.subscription);
 
@@ -32,6 +33,9 @@ pub const Subscription = struct {
 
     // Callback support
     handler: ?MsgHandler = null,
+    
+    // Assigned dispatcher (for async subscriptions only)
+    dispatcher: ?*Dispatcher = null,
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 

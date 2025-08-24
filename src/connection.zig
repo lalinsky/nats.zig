@@ -528,6 +528,10 @@ pub const Connection = struct {
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.init(self.allocator, sid, subject, handler);
+        
+        // Assign dispatcher for async subscription (round-robin like C library)
+        try self.ensureDispatcherPool();
+        sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
 
         // Add to subscriptions map
         self.subs_mutex.lock();
@@ -911,19 +915,18 @@ pub const Connection = struct {
             log.debug("Delivering message to subscription {d}: {s}", .{ msg_arg.sid, message.data });
 
             if (s.handler) |_| {
-                // Async subscription - dispatch via thread pool
-                self.ensureDispatcherPool() catch |err| {
-                    log.err("Failed to initialize dispatcher pool: {}", .{err});
+                // Async subscription - dispatch to assigned dispatcher
+                if (s.dispatcher) |dispatcher| {
+                    dispatcher.enqueue(s, message) catch |err| {
+                        log.err("Failed to dispatch message for sid {d}: {}", .{msg_arg.sid, err});
+                        message.deinit();
+                        return;
+                    };
+                } else {
+                    log.err("Async subscription {} has no assigned dispatcher", .{msg_arg.sid});
                     message.deinit();
                     return;
-                };
-                
-                // Route message to dispatcher thread based on SID hash
-                self.dispatcher_pool.?.dispatch(s, message) catch |err| {
-                    log.err("Failed to dispatch message for sid {d}: {}", .{msg_arg.sid, err});
-                    message.deinit();
-                    return;
-                };
+                }
             } else {
                 // Sync subscription - queue message
                 s.messages.push(message) catch |err| {

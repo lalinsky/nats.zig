@@ -106,11 +106,13 @@ pub const Dispatcher = struct {
     }
 };
 
-/// Pool of dispatcher threads with SID-based hashing
+/// Pool of dispatcher threads with round-robin assignment
 pub const DispatcherPool = struct {
     allocator: Allocator,
     dispatchers: []Dispatcher,
     thread_count: usize,
+    use_next: usize = 0,
+    mutex: std.Thread.Mutex = .{},
     
     pub fn init(allocator: Allocator, thread_count: usize) !*DispatcherPool {
         const pool = try allocator.create(DispatcherPool);
@@ -163,16 +165,15 @@ pub const DispatcherPool = struct {
         }
     }
     
-    /// Get dispatcher for a subscription based on SID hash
-    pub fn getDispatcher(self: *DispatcherPool, sid: u64) *Dispatcher {
-        // Simple modulo for consistent distribution - SIDs are already well-distributed
-        const index = sid % self.thread_count;
-        return &self.dispatchers[index];
+    /// Assign dispatcher to subscription using round-robin (like C library)
+    pub fn assignDispatcher(self: *DispatcherPool) *Dispatcher {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        
+        const dispatcher = &self.dispatchers[self.use_next];
+        self.use_next = (self.use_next + 1) % self.thread_count;
+        
+        return dispatcher;
     }
     
-    /// Enqueue message for dispatch using SID-based routing
-    pub fn dispatch(self: *DispatcherPool, subscription: *Subscription, message: *Message) !void {
-        const dispatcher = self.getDispatcher(subscription.sid);
-        try dispatcher.enqueue(subscription, message);
-    }
 };
