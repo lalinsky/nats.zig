@@ -518,6 +518,42 @@ test "purge stream with sequence limit" {
     try testing.expect(purge_result.value.purged == 2);
 }
 
+test "purge stream with keep parameter" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // First create a stream
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_PURGE_KEEP_STREAM",
+        .subjects = &.{"test.keep.*"},
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Publish messages
+    try conn.publish("test.keep.msg", "Message 1");
+    try conn.publish("test.keep.msg", "Message 2");
+    try conn.publish("test.keep.msg", "Message 3");
+    try conn.publish("test.keep.msg", "Message 4");
+    try conn.publish("test.keep.msg", "Message 5");
+
+    // Allow messages to be processed
+    std.time.sleep(100 * std.time.ns_per_ms);
+
+    // Test purge with keep=2 (should keep the 2 most recent messages)
+    const purge_request = nats.StreamPurgeRequest{
+        .keep = 2,
+    };
+    var purge_result = try js.purgeStream("TEST_PURGE_KEEP_STREAM", purge_request);
+    defer purge_result.deinit();
+
+    try testing.expect(purge_result.value.success);
+    try testing.expect(purge_result.value.purged == 3);
+}
+
 // // Test stream management functionality
 // test "jetstream stream creation and management" {
 //     const conn = try utils.createDefaultConnection();
