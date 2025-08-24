@@ -1,357 +1,726 @@
 const std = @import("std");
+const Mutex = std.Thread.Mutex;
+const Condition = std.Thread.Condition;
 const Allocator = std.mem.Allocator;
 
-pub fn Queue(comptime T: type) type {
+const PopError = error{
+    QueueEmpty,
+};
+
+const PushError = error{
+    QueueClosed,
+    ChunkLimitExceeded,
+    OutOfMemory,
+};
+
+/// A single chunk in the linked list with inline data
+fn ChunkType(comptime T: type, comptime capacity: usize) type {
     return struct {
+        /// The data buffer for this chunk (inline)
+        data: [capacity]T,
+        /// Number of items written to this chunk (protected by mutex)
+        write_pos: usize,
+        /// Number of items read from this chunk (protected by mutex)
+        read_pos: usize,
+        /// Next chunk in the list (protected by mutex when modifying)
+        next: ?*Self,
+        /// Whether this chunk is full and sealed (protected by mutex)
+        is_sealed: bool,
+
         const Self = @This();
 
-        allocator: Allocator,
-        items: std.ArrayListUnmanaged(T) = .{},
-        head: usize = 0,
-        mutex: std.Thread.Mutex = .{},
-        condition: std.Thread.Condition = .{},
-        closed: bool = false,
+        fn init() Self {
+            return .{
+                .data = undefined,
+                .write_pos = 0,
+                .read_pos = 0,
+                .next = null,
+                .is_sealed = false,
+            };
+        }
 
-        pub fn init(allocator: Allocator) Self {
-            return Self{
+        fn reset(self: *Self) void {
+            self.write_pos = 0;
+            self.read_pos = 0;
+            self.next = null;
+            self.is_sealed = false;
+        }
+
+        fn availableToWrite(self: *const Self) usize {
+            return capacity - self.write_pos;
+        }
+
+        fn availableToRead(self: *const Self) usize {
+            return self.write_pos - self.read_pos;
+        }
+
+        fn isFullyConsumed(self: *const Self) bool {
+            return self.is_sealed and self.read_pos >= self.write_pos;
+        }
+
+        fn getWriteSlice(self: *Self) []T {
+            return self.data[self.write_pos..];
+        }
+
+        fn getReadSlice(self: *const Self) []const T {
+            return self.data[self.read_pos..self.write_pos];
+        }
+
+        /// Push a single item
+        fn pushItem(self: *Self, item: T) bool {
+            if (self.availableToWrite() == 0) return false;
+            self.data[self.write_pos] = item;
+            self.write_pos += 1;
+            return true;
+        }
+
+        /// Pop a single item
+        fn popItem(self: *Self) ?T {
+            if (self.availableToRead() == 0) return null;
+            const item = self.data[self.read_pos];
+            self.read_pos += 1;
+            return item;
+        }
+    };
+}
+
+/// A view into readable data that can be consumed
+pub fn ReadView(comptime T: type, comptime chunk_size: usize) type {
+    return struct {
+        /// The readable data slice
+        data: []const T,
+        /// Reference to the chunk
+        chunk: *Chunk,
+        /// Reference to the parent queue
+        queue: *ConcurrentQueue(T, chunk_size),
+
+        const Chunk = ChunkType(T, chunk_size);
+
+        /// Consume items after processing
+        pub fn consume(self: *@This(), items_consumed: usize) void {
+            if (items_consumed > self.data.len) {
+                std.debug.panic("Attempting to consume {} items but only {} available", .{items_consumed, self.data.len});
+            }
+            self.queue.consumeItems(self.chunk, items_consumed);
+        }
+    };
+}
+
+/// Pool of reusable chunks to reduce allocations
+fn ChunkPool(comptime T: type, comptime chunk_size: usize) type {
+    return struct {
+        chunks: std.ArrayList(*Chunk),
+        max_size: usize,
+
+        const Chunk = ChunkType(T, chunk_size);
+        const Self = @This();
+
+        fn init(allocator: Allocator, max_size: usize) Self {
+            return .{
+                .chunks = std.ArrayList(*Chunk).init(allocator),
+                .max_size = max_size,
+            };
+        }
+
+        fn deinit(self: *Self, allocator: Allocator) void {
+            for (self.chunks.items) |chunk| {
+                allocator.destroy(chunk);
+            }
+            self.chunks.deinit();
+        }
+
+        fn get(self: *Self) ?*Chunk {
+            if (self.chunks.items.len == 0) return null;
+            return self.chunks.pop();
+        }
+
+        fn put(self: *Self, chunk: *Chunk) bool {
+            if (self.chunks.items.len >= self.max_size) {
+                return false;
+            }
+            chunk.reset();
+            self.chunks.append(chunk) catch return false;
+            return true;
+        }
+    };
+}
+
+/// Concurrent queue using linked list of chunks
+pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
+    return struct {
+        allocator: Allocator,
+
+        /// Single mutex protecting all operations
+        mutex: Mutex,
+        /// Condition variable for waiting readers
+        data_cond: Condition,
+
+        /// Head of the linked list (oldest chunk, protected by mutex)
+        head: ?*Chunk,
+        /// Tail of the linked list (newest chunk, protected by mutex)
+        tail: ?*Chunk,
+
+        /// Counter for available items (protected by mutex)
+        items_available: usize,
+        /// Total number of chunks allocated
+        total_chunks: usize,
+        /// Maximum chunks allowed (0 = unlimited)
+        max_chunks: usize,
+
+        /// Pool of reusable chunks (protected by mutex)
+        chunk_pool: Pool,
+        /// Whether the queue is closed for writes (protected by mutex)
+        is_closed: bool,
+
+        const Self = @This();
+        const Chunk = ChunkType(T, chunk_size);
+        const Pool = ChunkPool(T, chunk_size);
+        pub const View = ReadView(T, chunk_size);
+
+        /// Configuration options
+        pub const Config = struct {
+            /// Maximum number of chunks to keep in reuse pool
+            max_pool_size: usize = 8,
+            /// Maximum total chunks allowed (0 = unlimited)
+            max_chunks: usize = 0,
+        };
+
+        pub fn init(allocator: Allocator, config: Config) Self {
+            return .{
                 .allocator = allocator,
+                .mutex = .{},
+                .data_cond = .{},
+                .head = null,
+                .tail = null,
+                .items_available = 0,
+                .total_chunks = 0,
+                .max_chunks = config.max_chunks,
+                .chunk_pool = Pool.init(allocator, config.max_pool_size),
+                .is_closed = false,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.close();
-            self.items.deinit(self.allocator);
-        }
-
-        /// Compact the queue by moving remaining items to the front
-        /// and shrinking the array. Must be called with mutex held.
-        fn compact(self: *Self) void {
-            if (self.head > 0) {
-                const remaining = self.items.items.len - self.head;
-                if (remaining > 0) {
-                    std.mem.copyForwards(T, self.items.items[0..remaining], self.items.items[self.head..]);
-                }
-                self.items.shrinkRetainingCapacity(remaining);
-                self.head = 0;
+            // Free all chunks in the linked list
+            var current = self.head;
+            while (current) |chunk| {
+                const next = chunk.next;
+                self.allocator.destroy(chunk);
+                current = next;
             }
+
+            // Free chunks in the pool
+            self.chunk_pool.deinit(self.allocator);
         }
 
-        pub fn push(self: *Self, item: T) !void {
+        /// Push a single item (thread-safe)
+        pub fn push(self: *Self, item: T) PushError!void {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            if (self.closed) {
-                return error.QueueClosed;
+            if (self.is_closed) {
+                return PushError.QueueClosed;
             }
 
-            // Ensure we have space; prefer compaction before growth
-            if (self.items.items.len == self.items.capacity) {
-                self.compact();
-                if (self.items.items.len == self.items.capacity) {
-                    const new_capacity = if (self.items.capacity == 0) 8 else self.items.capacity * 2;
-                    try self.items.ensureTotalCapacity(self.allocator, new_capacity);
-                }
+            const chunk = try self.ensureWritableChunk();
+            const success = chunk.pushItem(item);
+            std.debug.assert(success);
+
+            if (chunk.availableToWrite() == 0) {
+                chunk.is_sealed = true;
             }
 
-            // Add item at the end
-            try self.items.append(self.allocator, item);
-            self.condition.signal();
+            self.items_available += 1;
+            self.data_cond.signal();
         }
 
-        pub fn tryPop(self: *Self) ?T {
+        /// Push multiple items (thread-safe)
+        pub fn pushSlice(self: *Self, items: []const T) PushError!void {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            if (self.head >= self.items.items.len) {
-                return null;
+            if (self.is_closed) {
+                return PushError.QueueClosed;
             }
 
-            const item = self.items.items[self.head];
-            self.head += 1;
+            var remaining = items;
+            var total_written: usize = 0;
 
-            // Clean up when we've consumed most items
-            if (self.head * 2 >= self.items.items.len and self.items.items.len > 16) {
-                self.compact();
+            while (remaining.len > 0) {
+                const chunk = try self.ensureWritableChunk();
+
+                const available = chunk.availableToWrite();
+                const to_write = @min(available, remaining.len);
+
+                @memcpy(chunk.getWriteSlice()[0..to_write], remaining[0..to_write]);
+
+                chunk.write_pos += to_write;
+                remaining = remaining[to_write..];
+                total_written += to_write;
+
+                if (chunk.availableToWrite() == 0) {
+                    chunk.is_sealed = true;
+                }
+            }
+
+            self.items_available += total_written;
+            self.data_cond.signal();
+        }
+
+        /// Pop a single item with timeout (0 = non-blocking)
+        pub fn pop(self: *Self, timeout_ms: u64) PopError!T {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            const timeout_ns = timeout_ms * std.time.ns_per_ms;
+
+            while (self.items_available == 0) {
+                self.data_cond.timedWait(&self.mutex, timeout_ns) catch {
+                    return PopError.QueueEmpty;
+                };
+            }
+
+            // At this point we have data, pop it
+            const chunk = self.head orelse return PopError.QueueEmpty;
+            const item = chunk.popItem() orelse return PopError.QueueEmpty;
+
+            self.items_available -= 1;
+
+            // Check if chunk is fully consumed
+            if (chunk.isFullyConsumed()) {
+                self.head = chunk.next;
+
+                if (self.tail == chunk) {
+                    self.tail = null;
+                }
+
+                self.recycleChunk(chunk);
             }
 
             return item;
         }
 
-        pub fn pop(self: *Self, timeout_ms: u64) ?T {
-            if (timeout_ms == 0) {
-                return self.tryPop();
+        /// Try to pop a single item (non-blocking, returns null if empty)
+        pub fn tryPop(self: *Self) ?T {
+            return self.pop(0) catch null;
+        }
+
+        /// Wait for data and get next readable slice
+        pub fn waitAndGetSlice(self: *Self) !View {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // Wait for data to be available
+            while (self.items_available == 0) {
+                self.data_cond.wait(&self.mutex);
             }
 
-            const timeout_ns = timeout_ms * std.time.ns_per_ms;
-            var timer = std.time.Timer.start() catch unreachable;
+            const chunk = self.head orelse unreachable;
 
+            return View{
+                .data = chunk.getReadSlice(),
+                .chunk = chunk,
+                .queue = self,
+            };
+        }
+
+        /// Try to get readable slice without blocking
+        pub fn tryGetSlice(self: *Self) ?View {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            while (!self.closed) {
-                if (self.head < self.items.items.len) {
-                    const item = self.items.items[self.head];
-                    self.head += 1;
-
-                    // Clean up when we've consumed most items
-                    if (self.head * 2 >= self.items.items.len and self.items.items.len > 16) {
-                        self.compact();
-                    }
-
-                    return item;
-                }
-
-                const elapsed_ns = timer.read();
-                if (elapsed_ns >= timeout_ns) {
-                    return null;
-                }
-
-                const remaining_ns = timeout_ns - elapsed_ns;
-                self.condition.timedWait(&self.mutex, remaining_ns) catch {};
+            if (self.items_available == 0) {
+                return null;
             }
 
-            return null;
+            const chunk = self.head orelse return null;
+            const available = chunk.availableToRead();
+
+            if (available == 0) {
+                return null;
+            }
+
+            return View{
+                .data = chunk.getReadSlice(),
+                .chunk = chunk,
+                .queue = self,
+            };
         }
 
-        pub fn len(self: *Self) usize {
+        /// Consume items after processing
+        pub fn consumeItems(self: *Self, chunk: *Chunk, items_consumed: usize) void {
             self.mutex.lock();
             defer self.mutex.unlock();
-            return if (self.items.items.len >= self.head) self.items.items.len - self.head else 0;
+
+            chunk.read_pos += items_consumed;
+            self.items_available -= items_consumed;
+
+            // Check if we can advance head and recycle chunks
+            while (self.head) |head_chunk| {
+                if (!head_chunk.isFullyConsumed()) break;
+
+                self.head = head_chunk.next;
+
+                if (self.tail == head_chunk) {
+                    self.tail = null;
+                }
+
+                self.recycleChunk(head_chunk);
+            }
         }
 
-        pub fn isEmpty(self: *Self) bool {
+        /// Get total items available for reading
+        pub fn getItemsAvailable(self: *Self) usize {
             self.mutex.lock();
             defer self.mutex.unlock();
-            return self.head >= self.items.items.len;
+
+            return self.items_available;
         }
 
+        /// Check if queue has data without locking
+        pub fn hasData(self: *Self) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            return self.items_available > 0;
+        }
+
+        /// Close the queue to prevent further writes
         pub fn close(self: *Self) void {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            if (!self.closed) {
-                self.closed = true;
-                self.condition.broadcast();
-            }
+            self.is_closed = true;
+            self.data_cond.broadcast();
         }
 
+        /// Check if the queue is closed
         pub fn isClosed(self: *Self) bool {
             self.mutex.lock();
             defer self.mutex.unlock();
-            return self.closed;
+
+            return self.is_closed;
         }
-    };
-}
 
-pub const QueueError = error{
-    QueueClosed,
-} || Allocator.Error;
+        // Private helper functions
 
-test "Queue basic operations" {
-    const testing = std.testing;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var queue = Queue(i32).init(allocator);
-    defer queue.deinit();
-
-    // Test empty queue
-    try testing.expect(queue.isEmpty());
-    try testing.expectEqual(@as(usize, 0), queue.len());
-    try testing.expectEqual(@as(?i32, null), queue.tryPop());
-
-    // Test push and pop
-    try queue.push(42);
-    try testing.expect(!queue.isEmpty());
-    try testing.expectEqual(@as(usize, 1), queue.len());
-
-    const item = queue.tryPop();
-    try testing.expectEqual(@as(?i32, 42), item);
-    try testing.expect(queue.isEmpty());
-    try testing.expectEqual(@as(usize, 0), queue.len());
-}
-
-test "Queue FIFO ordering" {
-    const testing = std.testing;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var queue = Queue(i32).init(allocator);
-    defer queue.deinit();
-
-    // Push multiple items
-    try queue.push(1);
-    try queue.push(2);
-    try queue.push(3);
-
-    try testing.expectEqual(@as(usize, 3), queue.len());
-
-    // Pop in FIFO order
-    try testing.expectEqual(@as(?i32, 1), queue.tryPop());
-    try testing.expectEqual(@as(?i32, 2), queue.tryPop());
-    try testing.expectEqual(@as(?i32, 3), queue.tryPop());
-    try testing.expectEqual(@as(?i32, null), queue.tryPop());
-}
-
-test "Queue timeout behavior" {
-    const testing = std.testing;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var queue = Queue(i32).init(allocator);
-    defer queue.deinit();
-
-    // Test immediate timeout (0ms)
-    try testing.expectEqual(@as(?i32, null), queue.pop(0));
-
-    // Test short timeout on empty queue
-    var timer = std.time.Timer.start() catch unreachable;
-    const result = queue.pop(50);
-    const elapsed_ms = timer.read() / std.time.ns_per_ms;
-
-    try testing.expectEqual(@as(?i32, null), result);
-    try testing.expect(elapsed_ms >= 45); // Allow some tolerance
-}
-
-test "Queue close behavior" {
-    const testing = std.testing;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var queue = Queue(i32).init(allocator);
-    defer queue.deinit();
-
-    // Test push after close
-    queue.close();
-    try testing.expect(queue.isClosed());
-    try testing.expectError(error.QueueClosed, queue.push(42));
-}
-
-test "Queue compaction" {
-    const testing = std.testing;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var queue = Queue(i32).init(allocator);
-    defer queue.deinit();
-
-    // Push many items to trigger capacity growth
-    for (0..100) |i| {
-        try queue.push(@intCast(i));
-    }
-
-    // Pop most items to trigger compaction
-    for (0..90) |_| {
-        _ = queue.tryPop();
-    }
-
-    // Verify remaining items are still correct
-    try testing.expectEqual(@as(usize, 10), queue.len());
-    for (90..100) |i| {
-        try testing.expectEqual(@as(?i32, @intCast(i)), queue.tryPop());
-    }
-}
-
-test "Queue push compacts when head > 0 at capacity (no duplication)" {
-    const testing = std.testing;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var q = Queue(i32).init(allocator);
-    defer q.deinit();
-
-    // Fill to initial capacity (8)
-    for (0..8) |i| try q.push(@intCast(i));
-
-    // Pop a few to advance head
-    try testing.expectEqual(@as(?i32, 0), q.tryPop());
-    try testing.expectEqual(@as(?i32, 1), q.tryPop());
-    try testing.expectEqual(@as(?i32, 2), q.tryPop());
-    try testing.expectEqual(@as(usize, 5), q.len());
-
-    // Push enough to require space; should compact, not rotate duplicates
-    for (8..12) |i| try q.push(@intCast(i));
-
-    // We should see the remaining original items [3..7], then [8..11]
-    for (3..12) |i| try testing.expectEqual(@as(?i32, @intCast(i)), q.tryPop());
-    try testing.expect(q.isEmpty());
-}
-
-test "Queue multithreaded producer/consumer" {
-    const testing = std.testing;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var queue = Queue(i32).init(allocator);
-    defer queue.deinit();
-
-    const Context = struct {
-        queue: *Queue(i32),
-        values: []i32,
-        count: std.atomic.Value(usize),
-        done: std.atomic.Value(bool),
-    };
-
-    var consumed = [_]i32{0} ** 100;
-    var ctx = Context{
-        .queue = &queue,
-        .values = &consumed,
-        .count = std.atomic.Value(usize).init(0),
-        .done = std.atomic.Value(bool).init(false),
-    };
-
-    // Producer thread
-    const producer = try std.Thread.spawn(.{}, struct {
-        fn run(context: *Context) void {
-            for (0..100) |i| {
-                context.queue.push(@intCast(i)) catch unreachable;
+        fn ensureWritableChunk(self: *Self) PushError!*Chunk {
+            if (self.tail) |tail| {
+                if (!tail.is_sealed and tail.availableToWrite() > 0) {
+                    return tail;
+                }
             }
-            context.done.store(true, .release);
-        }
-    }.run, .{&ctx});
 
-    // Consumer thread
-    const consumer = try std.Thread.spawn(.{}, struct {
-        fn run(context: *Context) void {
-            while (context.count.load(.acquire) < 100) {
-                if (context.queue.pop(10)) |value| {
-                    const idx = context.count.fetchAdd(1, .acq_rel);
-                    if (idx < 100) {
-                        context.values[idx] = value;
+            const new_chunk = try self.allocateChunk();
+
+            if (self.tail) |tail| {
+                tail.next = new_chunk;
+            } else {
+                self.head = new_chunk;
+            }
+            self.tail = new_chunk;
+
+            return new_chunk;
+        }
+
+        fn allocateChunk(self: *Self) PushError!*Chunk {
+            if (self.max_chunks > 0 and self.total_chunks >= self.max_chunks) {
+                return PushError.ChunkLimitExceeded;
+            }
+
+            if (self.chunk_pool.get()) |chunk| {
+                return chunk;
+            }
+
+            const chunk = self.allocator.create(Chunk) catch return PushError.OutOfMemory;
+            chunk.* = Chunk.init();
+            self.total_chunks += 1;
+            return chunk;
+        }
+
+        fn recycleChunk(self: *Self, chunk: *Chunk) void {
+            if (!self.chunk_pool.put(chunk)) {
+                self.allocator.destroy(chunk);
+                self.total_chunks -= 1;
+            }
+        }
+    };
+}
+
+/// Specialized byte buffer using the generic queue
+pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
+    return struct {
+        queue: Queue,
+
+        const Self = @This();
+        const Queue = ConcurrentQueue(u8, chunk_size);
+        pub const Config = Queue.Config;
+
+        pub fn init(allocator: Allocator, config: Config) Self {
+            return .{
+                .queue = Queue.init(allocator, config),
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.queue.deinit();
+        }
+
+        /// Append bytes to the buffer
+        pub fn append(self: *Self, data: []const u8) PushError!void {
+            return self.queue.pushSlice(data);
+        }
+
+        /// Close the buffer to prevent further writes
+        pub fn close(self: *Self) void {
+            self.queue.close();
+        }
+
+        /// Check if the buffer is closed
+        pub fn isClosed(self: *Self) bool {
+            return self.queue.isClosed();
+        }
+
+        /// Get readable byte slice
+        pub fn tryGetSlice(self: *Self) ?Queue.View {
+            return self.queue.tryGetSlice();
+        }
+
+        /// Wait and get readable byte slice
+        pub fn waitAndGetSlice(self: *Self) !Queue.View {
+            return self.queue.waitAndGetSlice();
+        }
+
+        /// Get bytes available
+        pub fn getBytesAvailable(self: *Self) usize {
+            return self.queue.getItemsAvailable();
+        }
+
+        /// Check if has data
+        pub fn hasData(self: *Self) bool {
+            return self.queue.hasData();
+        }
+
+        /// Get multiple readable slices for vectored I/O
+        pub fn gatherReadVectors(self: *Self, iovecs: []std.posix.iovec_const) usize {
+            self.queue.mutex.lock();
+            defer self.queue.mutex.unlock();
+
+            var count: usize = 0;
+            var current = self.queue.head;
+
+            while (current) |chunk| {
+                if (count >= iovecs.len) break;
+
+                const slice = chunk.getReadSlice();
+                if (slice.len > 0) {
+                    iovecs[count] = .{
+                        .base = @constCast(slice.ptr),
+                        .len = slice.len,
+                    };
+                    count += 1;
+                }
+
+                if (!chunk.is_sealed and chunk.next != null) {
+                    break;
+                }
+
+                current = chunk.next;
+            }
+
+            return count;
+        }
+
+        /// Consume bytes after vectored write
+        pub fn consumeBytesMultiple(self: *Self, total_bytes: usize) void {
+            self.queue.mutex.lock();
+            defer self.queue.mutex.unlock();
+
+            // Validate that we're not consuming more than available
+            if (total_bytes > self.queue.items_available) {
+                std.debug.panic("Attempting to consume {} bytes but only {} available", .{total_bytes, self.queue.items_available});
+            }
+
+            var remaining = total_bytes;
+
+            self.queue.items_available -= total_bytes;
+
+            while (self.queue.head) |head_chunk| {
+                if (remaining == 0) break;
+
+                const available = head_chunk.availableToRead();
+                const to_consume = @min(available, remaining);
+
+                head_chunk.read_pos += to_consume;
+                remaining -= to_consume;
+
+                if (head_chunk.isFullyConsumed()) {
+                    self.queue.head = head_chunk.next;
+
+                    if (self.queue.tail == head_chunk) {
+                        self.queue.tail = null;
                     }
-                } else if (context.done.load(.acquire)) {
-                    // Producer finished, drain remaining
-                    while (context.count.load(.acquire) < 100) {
-                        if (context.queue.tryPop()) |value| {
-                            const idx = context.count.fetchAdd(1, .acq_rel);
-                            if (idx < 100) {
-                                context.values[idx] = value;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
+
+                    self.queue.recycleChunk(head_chunk);
+                }
+
+                if (to_consume < available) {
                     break;
                 }
             }
         }
-    }.run, .{&ctx});
+    };
+}
+
+// Tests
+test "generic queue with integers" {
+    const allocator = std.testing.allocator;
+
+    const IntQueue = ConcurrentQueue(i32, 4);
+    var queue = IntQueue.init(allocator, .{});
+    defer queue.deinit();
+
+    // Push individual items
+    try queue.push(42);
+    try queue.push(43);
+
+    // Pop them
+    try std.testing.expectEqual(@as(i32, 42), try queue.pop(1000));
+    try std.testing.expectEqual(@as(i32, 43), queue.tryPop().?);
+
+    // Should be empty
+    try std.testing.expect(queue.tryPop() == null);
+}
+
+test "generic queue with structs" {
+    const allocator = std.testing.allocator;
+
+    const Message = struct {
+        id: u32,
+        data: [8]u8,
+    };
+
+    const MsgQueue = ConcurrentQueue(Message, 16);
+    var queue = MsgQueue.init(allocator, .{});
+    defer queue.deinit();
+
+    // Push messages
+    const messages = [_]Message{
+        .{ .id = 1, .data = "hello   ".* },
+        .{ .id = 2, .data = "world   ".* },
+    };
+
+    try queue.pushSlice(&messages);
+
+    // Get slice view
+    var view_opt = queue.tryGetSlice();
+    if (view_opt) |*view| {
+        try std.testing.expectEqual(@as(usize, 2), view.data.len);
+        try std.testing.expectEqual(@as(u32, 1), view.data[0].id);
+        view.consume(2);
+    }
+}
+
+test "byte buffer specialization" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(64);
+    var buffer = Buffer.init(allocator, .{});
+    defer buffer.deinit();
+
+    try buffer.append("Hello, World!");
+
+    var view_opt = buffer.tryGetSlice();
+    if (view_opt) |*view| {
+        try std.testing.expectEqualStrings("Hello, World!", view.data);
+        view.consume(view.data.len);
+    }
+}
+
+test "concurrent push and pop" {
+    const allocator = std.testing.allocator;
+
+    const Queue = ConcurrentQueue(u64, 32);
+    var queue = Queue.init(allocator, .{});
+    defer queue.deinit();
+
+    const Producer = struct {
+        fn run(q: *Queue) !void {
+            for (0..100) |i| {
+                try q.push(i);
+            }
+        }
+    };
+
+    var sum: u64 = 0;
+
+    const Consumer = struct {
+        fn run(q: *Queue, s: *u64) !void {
+            for (0..100) |_| {
+                s.* += try q.pop(1000);
+            }
+        }
+    };
+
+    const producer = try std.Thread.spawn(.{}, Producer.run, .{&queue});
+    const consumer = try std.Thread.spawn(.{}, Consumer.run, .{ &queue, &sum });
 
     producer.join();
     consumer.join();
 
-    // Verify all values were consumed (order may not be guaranteed in this test)
-    var sum: i32 = 0;
-    for (consumed) |value| {
-        sum += value;
+    // Sum of 0..99 = 4950
+    try std.testing.expectEqual(4950, sum);
+}
+
+test "queue close functionality" {
+    const allocator = std.testing.allocator;
+
+    const Queue = ConcurrentQueue(i32, 4);
+    var queue = Queue.init(allocator, .{});
+    defer queue.deinit();
+
+    // Push some items before closing
+    try queue.push(1);
+    try queue.push(2);
+
+    // Close the queue
+    queue.close();
+
+    // Should not be able to push after closing
+    try std.testing.expectError(PushError.QueueClosed, queue.push(3));
+    try std.testing.expectError(PushError.QueueClosed, queue.pushSlice(&[_]i32{ 4, 5 }));
+
+    // Should still be able to read existing data
+    try std.testing.expectEqual(@as(i32, 1), try queue.pop(1000));
+    try std.testing.expectEqual(@as(i32, 2), queue.tryPop().?);
+
+    // Verify closed state
+    try std.testing.expect(queue.isClosed());
+}
+
+test "buffer close functionality" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(64);
+    var buffer = Buffer.init(allocator, .{});
+    defer buffer.deinit();
+
+    // Append some data before closing
+    try buffer.append("Hello");
+
+    // Close the buffer
+    buffer.close();
+
+    // Should not be able to append after closing
+    try std.testing.expectError(PushError.QueueClosed, buffer.append(" World"));
+
+    // Should still be able to read existing data
+    var view_opt = buffer.tryGetSlice();
+    if (view_opt) |*view| {
+        try std.testing.expectEqualStrings("Hello", view.data);
+        view.consume(view.data.len);
     }
-    const expected_sum: i32 = (99 * 100) / 2; // Sum of 0..99
-    try testing.expectEqual(expected_sum, sum);
+
+    // Verify closed state
+    try std.testing.expect(buffer.isClosed());
 }
