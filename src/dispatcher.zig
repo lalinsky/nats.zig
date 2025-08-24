@@ -29,7 +29,6 @@ pub const Dispatcher = struct {
     allocator: Allocator,
     thread: ?std.Thread = null,
     queue: DispatchQueue,
-    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     
     const DispatchQueue = ConcurrentQueue(DispatchMessage, 1024);
     
@@ -55,7 +54,6 @@ pub const Dispatcher = struct {
     pub fn start(self: *Dispatcher) !void {
         if (self.thread != null) return; // Already running
         
-        self.running.store(true, .monotonic);
         self.thread = try std.Thread.spawn(.{}, dispatcherLoop, .{self});
     }
     
@@ -63,8 +61,7 @@ pub const Dispatcher = struct {
     pub fn stop(self: *Dispatcher) void {
         if (self.thread == null) return; // Already stopped
         
-        self.running.store(false, .monotonic);
-        self.queue.close(); // Wake up thread
+        self.queue.close(); // Wake up thread and signal it to stop
         
         if (self.thread) |thread| {
             thread.join();
@@ -83,7 +80,7 @@ pub const Dispatcher = struct {
     fn dispatcherLoop(self: *Dispatcher) void {
         log.debug("Dispatcher thread started", .{});
         
-        while (self.running.load(.monotonic)) {
+        while (true) {
             // Wait for messages with timeout
             if (self.queue.pop(100)) |dispatch_msg| { // 100ms timeout
                 self.processMessage(dispatch_msg);
@@ -92,7 +89,7 @@ pub const Dispatcher = struct {
                     log.debug("Dispatcher queue closed, stopping", .{});
                     break;
                 }
-                // Timeout - continue loop to check running flag
+                // Timeout - continue loop until queue is closed
             }
         }
         
