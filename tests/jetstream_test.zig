@@ -415,6 +415,7 @@ test "delete consumer" {
     try testing.expect(!found_after);
 }
 
+
 // // Test stream management functionality
 // test "jetstream stream creation and management" {
 //     const conn = try utils.createDefaultConnection();
