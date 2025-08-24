@@ -27,8 +27,7 @@ test "purge stream" {
     try conn.flush();
 
     // Test basic purge (purge all messages)
-    const purge_request = nats.StreamPurgeRequest{};
-    var purge_result = try js.purgeStream("TEST_PURGE_STREAM", purge_request);
+    var purge_result = try js.purgeStream("TEST_PURGE_STREAM", .{});
     defer purge_result.deinit();
 
     // Verify purge was successful and messages were removed
@@ -60,10 +59,9 @@ test "purge stream with filter" {
     try conn.flush();
 
     // Test purge with filter (only purge messages with "purge" subject)
-    const purge_request = nats.StreamPurgeRequest{
+    var purge_result = try js.purgeStream("TEST_PURGE_FILTER_STREAM", .{
         .filter = "test.filter.purge",
-    };
-    var purge_result = try js.purgeStream("TEST_PURGE_FILTER_STREAM", purge_request);
+    });
     defer purge_result.deinit();
 
     // Should have purged 2 messages with the matching filter
@@ -96,10 +94,9 @@ test "purge stream with sequence limit" {
     try conn.flush();
 
     // Test purge up to sequence 3 (should purge messages 1 and 2)
-    const purge_request = nats.StreamPurgeRequest{
+    var purge_result = try js.purgeStream("TEST_PURGE_SEQ_STREAM", .{
         .seq = 3,
-    };
-    var purge_result = try js.purgeStream("TEST_PURGE_SEQ_STREAM", purge_request);
+    });
     defer purge_result.deinit();
 
     try testing.expect(purge_result.value.success);
@@ -132,10 +129,9 @@ test "purge stream with keep parameter" {
     try conn.flush();
 
     // Test purge with keep=2 (should keep the 2 most recent messages)
-    const purge_request = nats.StreamPurgeRequest{
+    var purge_result = try js.purgeStream("TEST_PURGE_KEEP_STREAM", .{
         .keep = 2,
-    };
-    var purge_result = try js.purgeStream("TEST_PURGE_KEEP_STREAM", purge_request);
+    });
     defer purge_result.deinit();
 
     try testing.expect(purge_result.value.success);
