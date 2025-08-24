@@ -1,4 +1,5 @@
 const std = @import("std");
+const nuid = @import("nuid.zig");
 
 /// Default inbox prefix used by NATS clients
 const INBOX_PREFIX = "_INBOX.";
@@ -6,24 +7,8 @@ const INBOX_PREFIX = "_INBOX.";
 /// Generate a unique inbox subject for request/reply pattern
 /// Format: _INBOX.<22-char-nuid>
 pub fn newInbox(allocator: std.mem.Allocator) ![]u8 {
-    const nuid = generateNuid();
-    return try std.fmt.allocPrint(allocator, "{s}{s}", .{ INBOX_PREFIX, nuid });
-}
-
-/// Generate a 22-character NUID (NATS Unique Identifier)
-/// Uses base62 encoding with crypto random for uniqueness
-fn generateNuid() [22]u8 {
-    const base62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    var nuid: [22]u8 = undefined;
-    var random_bytes: [16]u8 = undefined;
-    
-    std.crypto.random.bytes(&random_bytes);
-    
-    for (0..22) |i| {
-        nuid[i] = base62[random_bytes[i % 16] % 62];
-    }
-    
-    return nuid;
+    const nuid_bytes = nuid.next();
+    return try std.fmt.allocPrint(allocator, "{s}{s}", .{ INBOX_PREFIX, nuid_bytes });
 }
 
 test "inbox generation" {
@@ -49,8 +34,8 @@ test "inbox generation" {
 }
 
 test "nuid generation" {
-    const nuid1 = generateNuid();
-    const nuid2 = generateNuid();
+    const nuid1 = nuid.next();
+    const nuid2 = nuid.next();
     
     // Should be 22 characters
     try std.testing.expectEqual(@as(usize, 22), nuid1.len);
