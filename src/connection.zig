@@ -215,7 +215,7 @@ pub const Connection = struct {
             .server_pool = ServerPool.init(allocator),
             .server_info_arena = std.heap.ArenaAllocator.init(allocator),
             .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
-            .write_buffer = ConcurrentWriteBuffer(1024).initValue(allocator, .{}) catch unreachable,
+            .write_buffer = ConcurrentWriteBuffer(1024).init(allocator, .{}),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .parser = Parser.init(allocator),
         };
@@ -232,7 +232,7 @@ pub const Connection = struct {
         self.subscriptions.deinit();
 
         // Clean up write buffer
-        self.write_buffer.deinitValue();
+        self.write_buffer.deinit();
 
         // Clean up server pool and pending buffer
         self.server_pool.deinit();

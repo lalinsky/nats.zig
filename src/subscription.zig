@@ -41,7 +41,7 @@ pub const Subscription = struct {
         sub.* = Subscription{
             .sid = sid,
             .subject = subject_copy,
-            .messages = ConcurrentQueue(*Message, 64).initValue(allocator, .{}),
+            .messages = ConcurrentQueue(*Message, 64).init(allocator, .{}),
             .allocator = allocator,
             .handler = null,
         };
@@ -56,7 +56,7 @@ pub const Subscription = struct {
         sub.* = Subscription{
             .sid = sid,
             .subject = subject_copy,
-            .messages = ConcurrentQueue(*Message, 64).initValue(allocator, .{}),
+            .messages = ConcurrentQueue(*Message, 64).init(allocator, .{}),
             .allocator = allocator,
             .handler = handler,
         };
@@ -86,7 +86,7 @@ pub const Subscription = struct {
         while (self.messages.tryPop()) |msg| {
             msg.deinit();
         }
-        self.messages.deinitValue();
+        self.messages.deinit();
         self.allocator.destroy(self);
     }
 
@@ -96,7 +96,7 @@ pub const Subscription = struct {
     }
 
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) ?*Message {
-        return self.messages.popTimeout(timeout_ms);
+        return self.messages.pop(timeout_ms) catch null;
     }
 };
 
