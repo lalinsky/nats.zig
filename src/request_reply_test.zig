@@ -11,7 +11,7 @@ test "request reply basic functionality" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    var conn = Connection.init(allocator, .{});
+    var conn = try Connection.init(allocator, .{});
     defer conn.deinit();
     
     // Test that request fails when disconnected
@@ -66,7 +66,7 @@ test "publish request format" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    var conn = Connection.init(allocator, .{});
+    var conn = try Connection.init(allocator, .{});
     defer conn.deinit();
     
     // Test that publishRequest fails when disconnected
@@ -79,7 +79,7 @@ test "unsubscribe functionality" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    var conn = Connection.init(allocator, .{});
+    var conn = try Connection.init(allocator, .{});
     defer conn.deinit();
     
     // Create a subscription (but we're not connected, so this should work in memory)

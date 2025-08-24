@@ -10,7 +10,7 @@ pub fn main() !void {
     std.log.info("Listening for message on subject 'foo'", .{});
     
     // Connect to NATS server  
-    var conn = nats.Connection.init(allocator, .{});
+    var conn = try nats.Connection.init(allocator, .{});
     defer conn.deinit();
     
     try conn.connect("nats://localhost:4222");

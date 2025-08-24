@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const RefCounter = @import("ref_counter.zig").RefCounter;
-const Queue = @import("queue.zig").Queue;
+const ConcurrentQueue = @import("queue2.zig").ConcurrentQueue;
 
 const log = std.log.scoped(.subscription);
 
@@ -24,7 +24,7 @@ pub const MsgHandler = struct {
 pub const Subscription = struct {
     sid: u64,
     subject: []const u8,
-    messages: Queue(*Message),
+    messages: *ConcurrentQueue(*Message, 64),
     allocator: Allocator,
 
     // Reference counting for safe cleanup
@@ -38,7 +38,7 @@ pub const Subscription = struct {
         sub.* = Subscription{
             .sid = sid,
             .subject = try allocator.dupe(u8, subject),
-            .messages = Queue(*Message).init(allocator),
+            .messages = try ConcurrentQueue(*Message, 64).init(allocator, .{}),
             .allocator = allocator,
             .handler = null,
         };
@@ -50,7 +50,7 @@ pub const Subscription = struct {
         sub.* = Subscription{
             .sid = sid,
             .subject = try allocator.dupe(u8, subject),
-            .messages = Queue(*Message).init(allocator),
+            .messages = try ConcurrentQueue(*Message, 64).init(allocator, .{}),
             .allocator = allocator,
             .handler = handler,
         };
@@ -76,8 +76,7 @@ pub const Subscription = struct {
             handler.cleanup(self.allocator);
         }
 
-        // Close queue first to prevent new messages, then clean up pending messages
-        self.messages.close();
+        // Clean up pending messages
         while (self.messages.tryPop()) |msg| {
             msg.deinit();
         }
@@ -91,7 +90,22 @@ pub const Subscription = struct {
     }
 
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) ?*Message {
-        return self.messages.pop(timeout_ms);
+        if (timeout_ms == 0) {
+            return self.messages.tryPop();
+        }
+        
+        const timeout_ns = timeout_ms * std.time.ns_per_ms;
+        var timer = std.time.Timer.start() catch return null;
+        
+        while (timer.read() < timeout_ns) {
+            if (self.messages.tryPop()) |msg| {
+                return msg;
+            }
+            // Small sleep to avoid busy waiting
+            std.time.sleep(1_000_000); // 1ms
+        }
+        
+        return null;
     }
 };
 

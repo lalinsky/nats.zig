@@ -9,7 +9,7 @@ pub fn main() !void {
     std.debug.print("Publishes a message on subject 'help'\n", .{});
 
     // Creates a connection to the default NATS URL
-    var conn = nats.Connection.init(allocator, .{});
+    var conn = try nats.Connection.init(allocator, .{});
     defer conn.deinit();
 
     conn.connect("nats://localhost:4222") catch |err| {

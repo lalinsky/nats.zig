@@ -18,7 +18,7 @@ pub fn createConnection(node: Node) !*nats.Connection {
     var conn = try std.testing.allocator.create(nats.Connection);
     errdefer std.testing.allocator.destroy(conn);
 
-    conn.* = nats.Connection.init(std.testing.allocator, .{
+    conn.* = try nats.Connection.init(std.testing.allocator, .{
         .trace = true,
     });
     errdefer conn.deinit();

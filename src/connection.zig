@@ -16,6 +16,7 @@ const jetstream_mod = @import("jetstream.zig");
 const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
 const build_options = @import("build_options");
+const ConcurrentWriteBuffer = @import("queue2.zig").ConcurrentWriteBuffer;
 
 const log = std.log.scoped(.connection);
 
@@ -194,8 +195,8 @@ pub const Connection = struct {
     pending_pongs: u32 = 0,
     pong_condition: std.Thread.Condition = .{},
 
-    // Write buffer (protected by main mutex)
-    write_buffer: std.ArrayListUnmanaged(u8) = .{},
+    // Write buffer (thread-safe)
+    write_buffer: *ConcurrentWriteBuffer(1024),
 
     // Subscriptions
     next_sid: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
@@ -207,13 +208,14 @@ pub const Connection = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: Allocator, options: ConnectionOptions) Self {
+    pub fn init(allocator: Allocator, options: ConnectionOptions) !Self {
         return Self{
             .allocator = allocator,
             .options = options,
             .server_pool = ServerPool.init(allocator),
             .server_info_arena = std.heap.ArenaAllocator.init(allocator),
             .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
+            .write_buffer = try ConcurrentWriteBuffer(1024).init(allocator, .{}),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .parser = Parser.init(allocator),
         };
@@ -230,7 +232,7 @@ pub const Connection = struct {
         self.subscriptions.deinit();
 
         // Clean up write buffer
-        self.write_buffer.deinit(self.allocator);
+        self.write_buffer.deinit();
 
         // Clean up server pool and pending buffer
         self.server_pool.deinit();
@@ -551,7 +553,7 @@ pub const Connection = struct {
         }
 
         // Force flush any pending writes (mutex already held)
-        const has_pending = self.write_buffer.items.len > 0;
+        const has_pending = self.write_buffer.hasData();
         if (has_pending) {
             self.flusher_signaled = true;
             self.flusher_condition.signal();
@@ -792,7 +794,7 @@ pub const Connection = struct {
             self.flusher_signaled = false;
 
             // Check if we should flush
-            if (self.status != .connected or self.write_buffer.items.len == 0) {
+            if (self.status != .connected or !self.write_buffer.hasData()) {
                 // No need to flush if not connected or no data to flush
                 continue;
             }
@@ -803,14 +805,30 @@ pub const Connection = struct {
             self.mutex.unlock();
             defer self.mutex.lock(); // Re-lock at end of iteration
 
-            // Write all buffered data
-            if (stream.writeAll(self.write_buffer.items)) {
-                log.debug("Flushed {} bytes", .{self.write_buffer.items.len});
-                self.write_buffer.clearRetainingCapacity();
-            } else |err| {
-                log.err("Flush error: {}", .{err});
-                self.triggerReconnect(err);
-                break;
+            // Write all buffered data using vectored I/O
+            var iovecs: [16]std.posix.iovec = undefined;
+            const iovec_count = self.write_buffer.gatherReadVectors(&iovecs);
+            
+            if (iovec_count > 0) {
+                var total_written: usize = 0;
+                for (iovecs[0..iovec_count]) |iov| {
+                    total_written += iov.len;
+                }
+                
+                // Convert iovec to iovec_const for writevAll
+                var const_iovecs: [16]std.posix.iovec_const = undefined;
+                for (iovecs[0..iovec_count], 0..) |iov, i| {
+                    const_iovecs[i] = .{ .base = iov.base, .len = iov.len };
+                }
+                
+                if (stream.writevAll(const_iovecs[0..iovec_count])) {
+                    log.debug("Flushed {} bytes", .{total_written});
+                    self.write_buffer.consumeBytesMultiple(total_written);
+                } else |err| {
+                    log.err("Flush error: {}", .{err});
+                    self.triggerReconnect(err);
+                    break;
+                }
             }
         }
 
@@ -826,7 +844,7 @@ pub const Connection = struct {
         }
 
         // Buffer and signal flusher (mutex already held)
-        try self.write_buffer.appendSlice(self.allocator, data);
+        try self.write_buffer.append(data);
 
         if (!self.flusher_signaled) {
             self.flusher_signaled = true;
@@ -873,9 +891,9 @@ pub const Connection = struct {
                 // Sync subscription - queue message
                 s.messages.push(message) catch |err| {
                     switch (err) {
-                        error.QueueClosed => {
-                            // Subscription is closing/closed; drop gracefully.
-                            log.debug("Queue closed for sid {d}; dropping message", .{ msg_arg.sid });
+                        error.ChunkLimitExceeded => {
+                            // Queue limit exceeded; drop gracefully.
+                            log.debug("Queue limit exceeded for sid {d}; dropping message", .{ msg_arg.sid });
                             message.deinit();
                             return;
                         },
