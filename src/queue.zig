@@ -450,7 +450,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         }
 
         /// Get multiple readable slices for vectored I/O
-        pub fn gatherReadVectors(self: *Self, iovecs: []std.posix.iovec) usize {
+        pub fn gatherReadVectors(self: *Self, iovecs: []std.posix.iovec_const) usize {
             self.queue.mutex.lock();
             defer self.queue.mutex.unlock();
 

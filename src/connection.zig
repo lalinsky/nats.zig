@@ -795,9 +795,8 @@ pub const Connection = struct {
 
             self.flusher_signaled = false;
 
-            // Check if we should flush
-            if (self.status != .connected or !self.write_buffer.hasData()) {
-                // No need to flush if not connected or no data to flush
+            if (self.status != .connected) {
+                // No need to flush if not connected
                 continue;
             }
 
@@ -808,29 +807,32 @@ pub const Connection = struct {
             defer self.mutex.lock(); // Re-lock at end of iteration
 
             // Write all buffered data using vectored I/O
-            var iovecs: [16]std.posix.iovec = undefined;
+
+            var iovecs: [16]std.posix.iovec_const = undefined;
             const iovec_count = self.write_buffer.gatherReadVectors(&iovecs);
+            if (iovec_count == 0) {
+                // No data to write
+                continue;
+            }
 
-            if (iovec_count > 0) {
-                var total_written: usize = 0;
-                for (iovecs[0..iovec_count]) |iov| {
-                    total_written += iov.len;
-                }
+            var total_size: usize = 0;
+            for (iovecs[0..iovec_count]) |iov| {
+                total_size += iov.len;
+            }
 
-                // Convert iovec to iovec_const for writevAll
-                var const_iovecs: [16]std.posix.iovec_const = undefined;
-                for (iovecs[0..iovec_count], 0..) |iov, i| {
-                    const_iovecs[i] = .{ .base = iov.base, .len = iov.len };
+            if (stream.writev(iovecs[0..iovec_count])) |total_written| {
+                log.debug("Flushed {} bytes", .{total_written});
+                self.write_buffer.consumeBytesMultiple(total_written);
+                if (total_written < total_size) {
+                    self.mutex.lock();
+                    self.flusher_signaled = true;
+                    // don't need to signal, since we're already in the flusher loop
+                    self.mutex.unlock();
                 }
-
-                if (stream.writevAll(const_iovecs[0..iovec_count])) {
-                    log.debug("Flushed {} bytes", .{total_written});
-                    self.write_buffer.consumeBytesMultiple(total_written);
-                } else |err| {
-                    log.err("Flush error: {}", .{err});
-                    self.triggerReconnect(err);
-                    break;
-                }
+            } else |err| {
+                log.err("Flush error: {}", .{err});
+                self.triggerReconnect(err);
+                break;
             }
         }
 
