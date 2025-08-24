@@ -351,12 +351,18 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         }
 
         /// Get total items available for reading
-        pub fn getItemsAvailable(self: *const Self) usize {
+        pub fn getItemsAvailable(self: *Self) usize {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
             return self.items_available;
         }
 
         /// Check if queue has data without locking
-        pub fn hasData(self: *const Self) bool {
+        pub fn hasData(self: *Self) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
             return self.items_available > 0;
         }
 
@@ -440,12 +446,12 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         }
 
         /// Get bytes available
-        pub fn getBytesAvailable(self: *const Self) usize {
+        pub fn getBytesAvailable(self: *Self) usize {
             return self.queue.getItemsAvailable();
         }
 
         /// Check if has data
-        pub fn hasData(self: *const Self) bool {
+        pub fn hasData(self: *Self) bool {
             return self.queue.hasData();
         }
 
