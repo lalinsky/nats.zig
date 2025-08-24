@@ -1,6 +1,8 @@
 const std = @import("std");
 const Message = @import("message.zig").Message;
 const Connection = @import("connection.zig").Connection;
+const Subscription = @import("subscription.zig").Subscription;
+const subscription_mod = @import("subscription.zig");
 
 const log = std.log.scoped(.jetstream);
 
@@ -145,8 +147,8 @@ pub const ConsumerConfig = struct {
     max_ack_pending: i64 = 1000,
     /// If the Consumer is idle for more than this many nano seconds a empty message with Status header 100 will be sent
     idle_heartbeat: ?u64 = null,
-    /// For push consumers this will regularly send an empty mess with Status header 100 and a reply subject
-    flow_control: ?bool = null,
+    /// For push consumers this will regularly send an empty mess with Status header 100 and a reply subject  
+    /// (This field was moved to the end to avoid duplication)
     /// The number of pulls that can be outstanding on a pull consumer
     max_waiting: i64 = 512,
     /// Delivers only the headers of messages in the stream and not the bodies
@@ -157,6 +159,10 @@ pub const ConsumerConfig = struct {
     max_expires: ?u64 = null,
     /// The number of replicas for this consumer's state
     num_replicas: ?u8 = null,
+    /// Queue group for push consumers (load balancing)
+    deliver_group: ?[]const u8 = null,
+    /// Enable flow control protocol for push consumers
+    flow_control: ?bool = null,
 };
 
 pub const ConsumerInfo = struct {
@@ -206,12 +212,125 @@ const StreamPurgeResponse = struct {
     purged: u64,
 };
 
+/// JetStream message acknowledgment types
+pub const AckType = enum {
+    ack,     // +ACK - Acknowledge message 
+    nak,     // -NAK - Negative acknowledge (retry)
+    term,    // +TERM - Terminate delivery (don't retry)
+    progress, // +WPI - Work in progress (extend ack wait)
+};
+
+/// Enhanced message wrapper for JetStream push subscriptions
+pub const JetStreamMessage = struct {
+    /// Underlying NATS message
+    msg: *Message,
+    /// JetStream context for acknowledgments
+    js: *JetStream,
+    
+    /// JetStream metadata (parsed from headers)
+    stream: ?[]const u8 = null,
+    sequence: ?u64 = null,
+    subject: ?[]const u8 = null,
+    timestamp: ?[]const u8 = null,
+    reply: ?[]const u8 = null,
+    
+    pub fn deinit(self: *JetStreamMessage) void {
+        self.msg.deinit();
+    }
+    
+    /// Acknowledge successful processing
+    pub fn ack(self: *JetStreamMessage) !void {
+        try self.sendAck(.ack);
+    }
+    
+    /// Negative acknowledge - request redelivery
+    pub fn nak(self: *JetStreamMessage) !void {
+        try self.sendAck(.nak);
+    }
+    
+    /// Terminate delivery - don't redeliver this message
+    pub fn term(self: *JetStreamMessage) !void {
+        try self.sendAck(.term);
+    }
+    
+    /// Indicate work in progress - extend ack wait timer
+    pub fn inProgress(self: *JetStreamMessage) !void {
+        try self.sendAck(.progress);
+    }
+    
+    /// Send acknowledgment to JetStream
+    fn sendAck(self: *JetStreamMessage, ack_type: AckType) !void {
+        if (self.reply) |reply_subject| {
+            const ack_payload = switch (ack_type) {
+                .ack => "+ACK",
+                .nak => "-NAK", 
+                .term => "+TERM",
+                .progress => "+WPI",
+            };
+            try self.js.nc.publish(reply_subject, ack_payload);
+        }
+    }
+};
+
+/// JetStream push subscription
+pub const JetStreamSubscription = struct {
+    /// Underlying NATS subscription
+    subscription: *Subscription,
+    /// JetStream context
+    js: *JetStream,
+    /// Consumer information (Result wrapper)
+    consumer_info: Result(ConsumerInfo),
+    /// JS context for cleanup (stored as anyopaque to avoid type issues)
+    js_context: *anyopaque,
+    
+    pub fn deinit(self: *JetStreamSubscription) void {
+        self.consumer_info.deinit();
+        // Note: js_context cleanup is handled by the subscription's handler cleanup
+        self.js.allocator.destroy(self);
+    }
+    
+    /// Unsubscribe from the delivery subject
+    pub fn unsubscribe(self: *JetStreamSubscription) !void {
+        try self.js.nc.unsubscribe(self.subscription);
+    }
+};
+
 pub const JetStreamOptions = struct {
     request_timeout_ms: u64 = default_request_timeout_ms,
     // Add options here
 };
 
 pub const Result = std.json.Parsed;
+
+/// Parse JetStream headers from a message and create JetStreamMessage wrapper
+fn createJetStreamMessage(js: *JetStream, msg: *Message) !*JetStreamMessage {
+    const js_msg = try js.allocator.create(JetStreamMessage);
+    js_msg.* = JetStreamMessage{
+        .msg = msg,
+        .js = js,
+        .reply = msg.reply,
+    };
+    
+    // Parse JetStream headers if present
+    if (msg.headers.get("Nats-Stream")) |stream_values| {
+        if (stream_values.items.len > 0) js_msg.stream = stream_values.items[0];
+    }
+    if (msg.headers.get("Nats-Subject")) |subject_values| {
+        if (subject_values.items.len > 0) js_msg.subject = subject_values.items[0];
+    }
+    if (msg.headers.get("Nats-Time-Stamp")) |timestamp_values| {
+        if (timestamp_values.items.len > 0) js_msg.timestamp = timestamp_values.items[0];
+    }
+    
+    // Parse sequence number
+    if (msg.headers.get("Nats-Sequence")) |seq_values| {
+        if (seq_values.items.len > 0) {
+            js_msg.sequence = std.fmt.parseInt(u64, seq_values.items[0], 10) catch null;
+        }
+    }
+    
+    return js_msg;
+}
 
 pub const JetStream = struct {
     allocator: std.mem.Allocator,
@@ -479,5 +598,73 @@ pub const JetStream = struct {
         defer msg.deinit();
 
         return try self.parseResponse(StreamPurgeResponse, msg);
+    }
+
+    /// Subscribe to a JetStream push consumer with callback handler
+    pub fn subscribe(
+        self: *JetStream,
+        stream_name: []const u8,
+        consumer_config: ConsumerConfig,
+        comptime handlerFn: anytype,
+        args: anytype
+    ) !*JetStreamSubscription {
+        // Validate that this is a push consumer configuration
+        if (consumer_config.deliver_subject == null) {
+            return error.MissingDeliverSubject;
+        }
+
+        // Create push consumer config by removing pull-only fields
+        var push_config = consumer_config;
+        push_config.max_waiting = 0;  // Push consumers don't support max_waiting
+        push_config.max_batch = null; // Push consumers don't support max_batch
+        push_config.max_expires = null; // Push consumers don't support max_expires
+
+        // Create the push consumer first
+        var consumer_info = try self.addConsumer(stream_name, push_config);
+        errdefer consumer_info.deinit();
+
+        const deliver_subject = consumer_config.deliver_subject.?;
+
+        // Define context struct
+        const JSContext = struct {
+            js: *JetStream,
+            user_args: @TypeOf(args),
+        };
+
+        // Create a handler that wraps NATS messages as JetStream messages
+        const JSWrapper = struct {
+            fn wrappedHandler(msg: *Message, ctx_ptr: *anyopaque) void {
+                const ctx: *JSContext = @ptrCast(@alignCast(ctx_ptr));
+                // Create JetStream message wrapper
+                const js_msg = createJetStreamMessage(ctx.js, msg) catch {
+                    msg.deinit(); // Clean up on error
+                    return;
+                };
+                defer ctx.js.allocator.destroy(js_msg);
+
+                // Call user handler with JetStream message
+                @call(.auto, handlerFn, .{js_msg} ++ ctx.user_args);
+            }
+        };
+
+        const js_context = try self.allocator.create(JSContext);
+        js_context.* = JSContext{
+            .js = self,
+            .user_args = args,
+        };
+
+        // Subscribe to the delivery subject using connection.subscribe
+        const subscription = try self.nc.subscribe(deliver_subject, JSWrapper.wrappedHandler, .{js_context});
+
+        // Create JetStream subscription wrapper
+        const js_sub = try self.allocator.create(JetStreamSubscription);
+        js_sub.* = JetStreamSubscription{
+            .subscription = subscription,
+            .js = self,
+            .consumer_info = consumer_info,
+            .js_context = js_context,
+        };
+
+        return js_sub;
     }
 };
