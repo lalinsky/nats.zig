@@ -47,15 +47,14 @@ pub const Server = struct {
 
 // Server pool matching C library's natsSrvPool
 pub const ServerPool = struct {
-    servers: StringArrayHashMapUnmanaged(*Server), // Combined hash map with insertion order (host:port -> *Server)
+    servers: StringArrayHashMapUnmanaged(*Server) = .{}, // Combined hash map with insertion order (host:port -> *Server)
     randomize: bool = false, // Whether to randomize order
     default_user: ?[]const u8 = null, // Default username from first explicit URL
     default_pwd: ?[]const u8 = null, // Default password from first explicit URL
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) ServerPool {
-        return ServerPool{
-            .servers = StringArrayHashMapUnmanaged(*Server){},
+        return .{
             .allocator = allocator,
         };
     }
@@ -105,7 +104,7 @@ pub const ServerPool = struct {
     }
 
     // Core server selection algorithm matching C library's natsSrvPool_GetNextServer
-    pub fn getNextServer(self: *ServerPool, max_reconnect: i32, current_server: ?*const Server) !?*Server {
+    pub fn getNextServer(self: *ServerPool, max_reconnect: i32, current_server: ?*const Server) !*Server {
         if (current_server == null) {
             // Initial connection case - C library would return pool->srvrs[0] directly
             return self.getFirstServer();
@@ -118,7 +117,7 @@ pub const ServerPool = struct {
             // Remove current server and move it to back (like C library)
             // Remove using the stored key and get the mutable server back
             const removed_server = self.servers.fetchSwapRemove(current_srv.key).?;
-            
+
             // Add current server back at the end - capacity guaranteed since we just removed
             self.servers.putAssumeCapacity(removed_server.key, removed_server.value);
         } else {
@@ -136,9 +135,9 @@ pub const ServerPool = struct {
         return self.servers.count();
     }
 
-    pub fn getFirstServer(self: *ServerPool) ?*Server {
+    pub fn getFirstServer(self: *ServerPool) !*Server {
         const values = self.servers.values();
-        return if (values.len > 0) values[0] else null;
+        return if (values.len > 0) values[0] else error.NoServerAvailable;
     }
 
     // Shuffle servers in pool (like C library's _shufflePool)
@@ -154,7 +153,7 @@ pub const ServerPool = struct {
             const j = offset + random.uintLessThan(usize, i + 1 - offset);
             self.servers.entries.swap(i, j);
         }
-        
+
         // Rebuild the hash index
         self.servers.reIndex(self.allocator);
     }
@@ -177,10 +176,7 @@ test "server pool basic operations" {
 
     // Test initial server selection
     const server1 = try pool.getNextServer(-1, null);
-    try std.testing.expect(server1 != null);
-
     const server2 = try pool.getNextServer(-1, server1);
-    try std.testing.expect(server2 != null);
     try std.testing.expect(server2 != server1);
 
     // Pool size should remain the same (server moved, not removed)
@@ -226,10 +222,9 @@ test "server removal on max reconnects" {
     try pool.addServer("nats://localhost:4223", false);
 
     const server1 = try pool.getNextServer(-1, null);
-    try std.testing.expect(server1 != null);
 
     // Set server to max reconnects
-    server1.?.reconnects = 5;
+    server1.reconnects = 5;
 
     // This should remove the server
     _ = try pool.getNextServer(5, server1);

@@ -266,7 +266,7 @@ pub const Connection = struct {
         self.status = .connecting;
 
         // Get server using C library's GetNextServer algorithm
-        const selected_server = try self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) orelse {
+        const selected_server = self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) catch {
             self.status = .disconnected;
             self.mutex.unlock();
             return ConnectionError.ConnectionFailed;
@@ -853,7 +853,7 @@ pub const Connection = struct {
                     switch (err) {
                         error.QueueClosed => {
                             // Subscription is closing/closed; drop gracefully.
-                            log.debug("Queue closed for sid {d}; dropping message", .{ msg_arg.sid });
+                            log.debug("Queue closed for sid {d}; dropping message", .{msg_arg.sid});
                             message.deinit();
                             return;
                         },
@@ -1043,10 +1043,9 @@ pub const Connection = struct {
 
             // Get next server using C library algorithm (under mutex)
             const server = self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) catch |err| {
-                log.err("Server pool error: {}", .{err});
-                break;
-            } orelse {
-                log.err("No servers available for reconnection", .{});
+                if (err == error.NoServersAvailable) {
+                    log.err("No servers available for reconnection", .{});
+                }
                 break;
             };
 

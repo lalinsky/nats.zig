@@ -83,3 +83,14 @@ test "async subscribe" {
     try std.testing.expectEqualStrings("test.async", handler.subject);
     try std.testing.expectEqualStrings("Hello from async test!", handler.data);
 }
+
+test "new conn" {
+    const Conn = @import("nats").Conn;
+
+    var conn = Conn.init(std.testing.allocator);
+    defer conn.deinit();
+
+    defer conn.stop();
+
+    try conn.start();
+}
