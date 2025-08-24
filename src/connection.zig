@@ -895,9 +895,9 @@ pub const Connection = struct {
                 // Sync subscription - queue message
                 s.messages.push(message) catch |err| {
                     switch (err) {
-                        error.ChunkLimitExceeded => {
-                            // Queue limit exceeded; drop gracefully.
-                            log.debug("Queue limit exceeded for sid {d}; dropping message", .{msg_arg.sid});
+                        error.QueueClosed => {
+                            // Queue is closed; drop gracefully.
+                            log.debug("Queue closed for sid {d}; dropping message", .{msg_arg.sid});
                             message.deinit();
                             return;
                         },

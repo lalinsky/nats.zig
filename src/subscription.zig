@@ -69,7 +69,8 @@ pub const Subscription = struct {
             handler.cleanup(self.allocator);
         }
 
-        // Clean up pending messages
+        // Close the queue to prevent new messages and clean up pending messages
+        self.messages.close();
         while (self.messages.tryPop()) |msg| {
             msg.deinit();
         }

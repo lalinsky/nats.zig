@@ -7,6 +7,12 @@ const PopError = error{
     QueueEmpty,
 };
 
+const PushError = error{
+    QueueClosed,
+    ChunkLimitExceeded,
+    OutOfMemory,
+};
+
 /// A single chunk in the linked list with inline data
 fn ChunkType(comptime T: type, comptime capacity: usize) type {
     return struct {
@@ -161,6 +167,8 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
         /// Pool of reusable chunks (protected by mutex)
         chunk_pool: Pool,
+        /// Whether the queue is closed for writes (protected by mutex)
+        is_closed: bool,
 
         const Self = @This();
         const Chunk = ChunkType(T, chunk_size);
@@ -186,6 +194,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 .total_chunks = 0,
                 .max_chunks = config.max_chunks,
                 .chunk_pool = Pool.init(allocator, config.max_pool_size),
+                .is_closed = false,
             };
         }
 
@@ -203,9 +212,13 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         }
 
         /// Push a single item (thread-safe)
-        pub fn push(self: *Self, item: T) !void {
+        pub fn push(self: *Self, item: T) PushError!void {
             self.mutex.lock();
             defer self.mutex.unlock();
+
+            if (self.is_closed) {
+                return PushError.QueueClosed;
+            }
 
             const chunk = try self.ensureWritableChunk();
             const success = chunk.pushItem(item);
@@ -220,9 +233,13 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         }
 
         /// Push multiple items (thread-safe)
-        pub fn pushSlice(self: *Self, items: []const T) !void {
+        pub fn pushSlice(self: *Self, items: []const T) PushError!void {
             self.mutex.lock();
             defer self.mutex.unlock();
+
+            if (self.is_closed) {
+                return PushError.QueueClosed;
+            }
 
             var remaining = items;
             var total_written: usize = 0;
@@ -366,9 +383,26 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             return self.items_available > 0;
         }
 
+        /// Close the queue to prevent further writes
+        pub fn close(self: *Self) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            self.is_closed = true;
+            self.data_cond.broadcast();
+        }
+
+        /// Check if the queue is closed
+        pub fn isClosed(self: *Self) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            return self.is_closed;
+        }
+
         // Private helper functions
 
-        fn ensureWritableChunk(self: *Self) !*Chunk {
+        fn ensureWritableChunk(self: *Self) PushError!*Chunk {
             if (self.tail) |tail| {
                 if (!tail.is_sealed and tail.availableToWrite() > 0) {
                     return tail;
@@ -387,16 +421,16 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             return new_chunk;
         }
 
-        fn allocateChunk(self: *Self) !*Chunk {
+        fn allocateChunk(self: *Self) PushError!*Chunk {
             if (self.max_chunks > 0 and self.total_chunks >= self.max_chunks) {
-                return error.ChunkLimitExceeded;
+                return PushError.ChunkLimitExceeded;
             }
 
             if (self.chunk_pool.get()) |chunk| {
                 return chunk;
             }
 
-            const chunk = try self.allocator.create(Chunk);
+            const chunk = self.allocator.create(Chunk) catch return PushError.OutOfMemory;
             chunk.* = Chunk.init();
             self.total_chunks += 1;
             return chunk;
@@ -431,8 +465,18 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         }
 
         /// Append bytes to the buffer
-        pub fn append(self: *Self, data: []const u8) !void {
+        pub fn append(self: *Self, data: []const u8) PushError!void {
             return self.queue.pushSlice(data);
+        }
+
+        /// Close the buffer to prevent further writes
+        pub fn close(self: *Self) void {
+            self.queue.close();
+        }
+
+        /// Check if the buffer is closed
+        pub fn isClosed(self: *Self) bool {
+            return self.queue.isClosed();
         }
 
         /// Get readable byte slice
@@ -619,4 +663,57 @@ test "concurrent push and pop" {
 
     // Sum of 0..99 = 4950
     try std.testing.expectEqual(4950, sum);
+}
+
+test "queue close functionality" {
+    const allocator = std.testing.allocator;
+
+    const Queue = ConcurrentQueue(i32, 4);
+    var queue = Queue.init(allocator, .{});
+    defer queue.deinit();
+
+    // Push some items before closing
+    try queue.push(1);
+    try queue.push(2);
+
+    // Close the queue
+    queue.close();
+
+    // Should not be able to push after closing
+    try std.testing.expectError(PushError.QueueClosed, queue.push(3));
+    try std.testing.expectError(PushError.QueueClosed, queue.pushSlice(&[_]i32{ 4, 5 }));
+
+    // Should still be able to read existing data
+    try std.testing.expectEqual(@as(i32, 1), try queue.pop(1000));
+    try std.testing.expectEqual(@as(i32, 2), queue.tryPop().?);
+
+    // Verify closed state
+    try std.testing.expect(queue.isClosed());
+}
+
+test "buffer close functionality" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(64);
+    var buffer = Buffer.init(allocator, .{});
+    defer buffer.deinit();
+
+    // Append some data before closing
+    try buffer.append("Hello");
+
+    // Close the buffer
+    buffer.close();
+
+    // Should not be able to append after closing
+    try std.testing.expectError(PushError.QueueClosed, buffer.append(" World"));
+
+    // Should still be able to read existing data
+    var view_opt = buffer.tryGetSlice();
+    if (view_opt) |*view| {
+        try std.testing.expectEqualStrings("Hello", view.data);
+        view.consume(view.data.len);
+    }
+
+    // Verify closed state
+    try std.testing.expect(buffer.isClosed());
 }
