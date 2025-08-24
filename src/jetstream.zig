@@ -601,6 +601,51 @@ pub const JetStream = struct {
     }
 
     /// Subscribe to a JetStream push consumer with callback handler
+    /// Handle JetStream status messages (heartbeats and flow control)
+    fn handleStatusMessage(msg: *Message, js: *JetStream) !void {
+        // Debug: Print all headers to understand the actual format
+        log.debug("Status message headers:", .{});
+        var header_iter = msg.headers.iterator();
+        while (header_iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const values = entry.value_ptr.*;
+            for (values.items) |value| {
+                log.debug("  {s}: {s}", .{ key, value });
+            }
+        }
+        
+        // Get the description header to distinguish between heartbeats and flow control
+        if (msg.headers.get("Description")) |desc_values| {
+            if (desc_values.items.len > 0) {
+                const description = desc_values.items[0];
+                
+                if (std.mem.eql(u8, description, "Idle Heartbeat")) {
+                    // This is an idle heartbeat - just log it (optional)
+                    log.debug("Received idle heartbeat from JetStream", .{});
+                    return;
+                } else if (std.mem.eql(u8, description, "FlowControl Request")) {
+                    // This is a flow control request - we need to respond
+                    log.debug("Received flow control request from JetStream", .{});
+                    
+                    if (msg.reply) |reply_subject| {
+                        // Respond with empty message to acknowledge flow control
+                        try js.nc.publish(reply_subject, "");
+                        log.debug("Sent flow control response to: {s}", .{reply_subject});
+                    } else {
+                        log.warn("Flow control request missing reply subject", .{});
+                    }
+                    return;
+                }
+                
+                // Unknown status message description
+                log.warn("Unknown status message description: {s}", .{description});
+            }
+        } else {
+            // Status message without description - treat as heartbeat
+            log.debug("Received status message without description (likely heartbeat)", .{});
+        }
+    }
+
     pub fn subscribe(
         self: *JetStream,
         stream_name: []const u8,
@@ -635,7 +680,23 @@ pub const JetStream = struct {
         const JSWrapper = struct {
             fn wrappedHandler(msg: *Message, ctx_ptr: *anyopaque) void {
                 const ctx: *JSContext = @ptrCast(@alignCast(ctx_ptr));
-                // Create JetStream message wrapper
+                
+                // Check for status messages (heartbeats and flow control) 
+                if (msg.headers.get("Status")) |status_values| {
+                    if (status_values.items.len > 0) {
+                        const status = status_values.items[0];
+                        if (std.mem.eql(u8, status, "100")) {
+                            // Handle status message internally, don't pass to user callback
+                            handleStatusMessage(msg, ctx.js) catch |err| {
+                                log.err("Failed to handle status message: {}", .{err});
+                            };
+                            msg.deinit(); // Clean up status message
+                            return;
+                        }
+                    }
+                }
+                
+                // Create JetStream message wrapper for regular messages
                 const js_msg = createJetStreamMessage(ctx.js, msg) catch {
                     msg.deinit(); // Clean up on error
                     return;
