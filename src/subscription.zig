@@ -37,6 +37,8 @@ pub const Subscription = struct {
 
     pub fn init(allocator: Allocator, sid: u64, subject: []const u8, handler: ?MsgHandler) !*Subscription {
         const sub = try allocator.create(Subscription);
+        errdefer allocator.destroy(sub);
+
         const subject_copy = try allocator.dupe(u8, subject);
         errdefer allocator.free(subject_copy);
 
