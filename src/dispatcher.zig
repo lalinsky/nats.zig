@@ -191,3 +191,65 @@ pub const DispatcherPool = struct {
     }
     
 };
+
+// Global dispatcher pool with reference counting
+var global_pool: ?*DispatcherPool = null;
+var global_pool_ref_count: u32 = 0;
+var global_pool_mutex: std.Thread.Mutex = .{};
+
+/// Get thread pool size from environment variable NATS_THREAD_POOL_MAX, defaulting to 1
+fn getThreadPoolSize(allocator: Allocator) usize {
+    if (std.process.getEnvVarOwned(allocator, "NATS_THREAD_POOL_MAX")) |env_value| {
+        defer allocator.free(env_value);
+        if (std.fmt.parseInt(usize, env_value, 10)) |size| {
+            if (size > 0) {
+                log.debug("Using NATS_THREAD_POOL_MAX={}", .{size});
+                return size;
+            } else {
+                log.warn("NATS_THREAD_POOL_MAX must be > 0, using default", .{});
+            }
+        } else |_| {
+            log.warn("Invalid NATS_THREAD_POOL_MAX value '{s}', using default", .{env_value});
+        }
+    } else |_| {
+        // Environment variable not set, use default
+    }
+    return 1; // Default size
+}
+
+/// Acquire the global dispatcher pool, creating it if necessary
+/// Call releaseGlobalPool() when done to ensure proper cleanup
+pub fn acquireGlobalPool(allocator: Allocator) !*DispatcherPool {
+    global_pool_mutex.lock();
+    defer global_pool_mutex.unlock();
+    
+    if (global_pool == null) {
+        const thread_count = getThreadPoolSize(allocator);
+        log.debug("Creating global dispatcher pool with {} threads", .{thread_count});
+        global_pool = try DispatcherPool.init(allocator, thread_count);
+        try global_pool.?.start();
+    }
+    
+    global_pool_ref_count += 1;
+    log.debug("Global dispatcher pool acquired, ref count: {}", .{global_pool_ref_count});
+    return global_pool.?;
+}
+
+/// Release the global dispatcher pool
+/// When the last reference is released, the pool is shutdown and cleaned up
+pub fn releaseGlobalPool() void {
+    global_pool_mutex.lock();
+    defer global_pool_mutex.unlock();
+    
+    global_pool_ref_count -= 1;
+    
+    if (global_pool_ref_count == 0) {
+        log.debug("Last reference released, shutting down global dispatcher pool", .{});
+        if (global_pool) |pool| {
+            pool.deinit();
+            global_pool = null;
+        }
+    } else {
+        log.debug("Global dispatcher pool released, ref count: {}", .{global_pool_ref_count});
+    }
+}

@@ -230,9 +230,9 @@ pub const Connection = struct {
     pub fn deinit(self: *Self) void {
         self.close();
 
-        // Clean up dispatcher pool
-        if (self.dispatcher_pool) |pool| {
-            pool.deinit();
+        // Release global dispatcher pool
+        if (self.dispatcher_pool != null) {
+            dispatcher_mod.releaseGlobalPool();
             self.dispatcher_pool = null;
         }
 
@@ -260,11 +260,9 @@ pub const Connection = struct {
     fn ensureDispatcherPool(self: *Self) !void {
         if (self.dispatcher_pool != null) return; // Already initialized
         
-        const thread_count = 1; // Default thread count - could be configurable later
-        self.dispatcher_pool = try DispatcherPool.init(self.allocator, thread_count);
-        try self.dispatcher_pool.?.start();
+        self.dispatcher_pool = try dispatcher_mod.acquireGlobalPool(self.allocator);
         
-        log.debug("Initialized dispatcher pool with {} threads", .{thread_count});
+        log.debug("Acquired global dispatcher pool", .{});
     }
 
     pub fn connect(self: *Self, url: []const u8) !void {
