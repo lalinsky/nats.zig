@@ -33,7 +33,7 @@ test "basic connection lifecycle" {
     const allocator = gpa.allocator();
     
     // Test connection creation
-    var conn = try Connection.init(allocator, .{});
+    var conn = Connection.init(allocator, .{});
     defer conn.deinit();
     
     // Test initial state
@@ -55,7 +55,7 @@ test "reconnection configuration" {
         },
     };
     
-    var conn = try Connection.init(allocator, options);
+    var conn = Connection.init(allocator, options);
     defer conn.deinit();
     
     // Test that options are set correctly
@@ -70,7 +70,7 @@ test "server pool management" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    var conn = try Connection.init(allocator, .{});
+    var conn = Connection.init(allocator, .{});
     defer conn.deinit();
     
     // Add multiple servers
@@ -121,7 +121,7 @@ test "reconnection thread management" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    var conn = try Connection.init(allocator, .{
+    var conn = Connection.init(allocator, .{
         .reconnect = .{ .allow_reconnect = true },
     });
     defer conn.deinit();

@@ -7,7 +7,7 @@ test "subscription basic setup" {
     const allocator = testing.allocator;
     
     // Test connection creation (basic state test)
-    var conn = try Connection.init(allocator, .{});
+    var conn = Connection.init(allocator, .{});
     defer conn.deinit();
     
     // Test initial state

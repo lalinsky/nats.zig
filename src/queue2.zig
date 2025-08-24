@@ -9,13 +9,13 @@ fn ChunkType(comptime T: type, comptime capacity: usize) type {
     return struct {
         /// The data buffer for this chunk (inline)
         data: [capacity]T,
-        /// Number of items written to this chunk (protected by write_mutex)
+        /// Number of items written to this chunk (protected by mutex)
         write_pos: usize,
-        /// Number of items read from this chunk (protected by read_mutex)
+        /// Number of items read from this chunk (protected by mutex)
         read_pos: usize,
-        /// Next chunk in the list (protected by write_mutex when modifying)
+        /// Next chunk in the list (protected by mutex when modifying)
         next: ?*Self,
-        /// Whether this chunk is full and sealed (protected by write_mutex)
+        /// Whether this chunk is full and sealed (protected by mutex)
         is_sealed: bool,
         
         const Self = @This();
@@ -139,16 +139,14 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
     return struct {
         allocator: Allocator,
         
-        /// Protects tail and all write operations
-        write_mutex: Mutex,
-        /// Protects head and read operations
-        read_mutex: Mutex,
+        /// Single mutex protecting all operations
+        mutex: Mutex,
         /// Condition variable for waiting readers
         data_cond: Condition,
         
-        /// Head of the linked list (oldest chunk, protected by read_mutex)
+        /// Head of the linked list (oldest chunk, protected by mutex)
         head: ?*Chunk,
-        /// Tail of the linked list (newest chunk, protected by write_mutex)
+        /// Tail of the linked list (newest chunk, protected by mutex)
         tail: ?*Chunk,
         
         /// Shared atomic counter for available items
@@ -158,7 +156,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         /// Maximum chunks allowed (0 = unlimited)
         max_chunks: usize,
         
-        /// Pool of reusable chunks (protected by write_mutex)
+        /// Pool of reusable chunks (protected by mutex)
         chunk_pool: Pool,
         
         const Self = @This();
@@ -178,8 +176,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             const self = try allocator.create(Self);
             self.* = .{
                 .allocator = allocator,
-                .write_mutex = .{},
-                .read_mutex = .{},
+                .mutex = .{},
                 .data_cond = .{},
                 .head = null,
                 .tail = null,
@@ -189,6 +186,21 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 .chunk_pool = Pool.init(allocator, config.max_pool_size),
             };
             return self;
+        }
+        
+        /// Initialize as a value (not pointer)
+        pub fn initValue(allocator: Allocator, config: Config) Self {
+            return .{
+                .allocator = allocator,
+                .mutex = .{},
+                .data_cond = .{},
+                .head = null,
+                .tail = null,
+                .items_available = atomic.Value(usize).init(0),
+                .total_chunks = 0,
+                .max_chunks = config.max_chunks,
+                .chunk_pool = Pool.init(allocator, config.max_pool_size),
+            };
         }
         
         pub fn deinit(self: *Self) void {
@@ -207,10 +219,24 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             self.allocator.destroy(self);
         }
         
+        /// Deinitialize as a value (not pointer)
+        pub fn deinitValue(self: *Self) void {
+            // Free all chunks in the linked list
+            var current = self.head;
+            while (current) |chunk| {
+                const next = chunk.next;
+                self.allocator.destroy(chunk);
+                current = next;
+            }
+            
+            // Free chunks in the pool
+            self.chunk_pool.deinit(self.allocator);
+        }
+        
         /// Push a single item (thread-safe)
         pub fn push(self: *Self, item: T) !void {
-            self.write_mutex.lock();
-            defer self.write_mutex.unlock();
+            self.mutex.lock();
+            defer self.mutex.unlock();
             
             const chunk = try self.ensureWritableChunk();
             const success = chunk.pushItem(item);
@@ -226,8 +252,8 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         
         /// Push multiple items (thread-safe)
         pub fn pushSlice(self: *Self, items: []const T) !void {
-            self.write_mutex.lock();
-            defer self.write_mutex.unlock();
+            self.mutex.lock();
+            defer self.mutex.unlock();
             
             var remaining = items;
             var total_written: usize = 0;
@@ -258,9 +284,10 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         
         /// Pop a single item (blocking)
         pub fn pop(self: *Self) !T {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            
             while (true) {
-                self.read_mutex.lock();
-                
                 if (self.head) |chunk| {
                     if (chunk.popItem()) |item| {
                         _ = self.items_available.fetchSub(1, .monotonic);
@@ -270,29 +297,66 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                             self.head = chunk.next;
                             
                             if (self.tail == chunk) {
-                                self.write_mutex.lock();
                                 self.tail = null;
-                                self.write_mutex.unlock();
                             }
                             
                             self.recycleChunk(chunk);
                         }
                         
-                        self.read_mutex.unlock();
                         return item;
                     }
                 }
                 
                 // No data available, wait for signal
-                self.data_cond.wait(&self.read_mutex);
-                self.read_mutex.unlock();
+                self.data_cond.wait(&self.mutex);
             }
+        }
+        
+        /// Pop a single item with timeout (blocking up to timeout)
+        pub fn popTimeout(self: *Self, timeout_ms: u64) ?T {
+            if (timeout_ms == 0) {
+                return self.tryPop();
+            }
+            
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            
+            const timeout_ns = timeout_ms * std.time.ns_per_ms;
+            var timer = std.time.Timer.start() catch return null;
+            
+            while (timer.read() < timeout_ns) {
+                if (self.head) |chunk| {
+                    if (chunk.popItem()) |item| {
+                        _ = self.items_available.fetchSub(1, .monotonic);
+                        
+                        // Check if chunk is fully consumed
+                        if (chunk.isFullyConsumed()) {
+                            self.head = chunk.next;
+                            
+                            if (self.tail == chunk) {
+                                self.tail = null;
+                            }
+                            
+                            self.recycleChunk(chunk);
+                        }
+                        
+                        return item;
+                    }
+                }
+                
+                // Wait with timeout - unlock mutex temporarily for waiting
+                self.mutex.unlock();
+                std.time.sleep(1_000_000); // 1ms
+                self.mutex.lock();
+            }
+            
+            return null;
         }
         
         /// Try to pop a single item (non-blocking)
         pub fn tryPop(self: *Self) ?T {
-            self.read_mutex.lock();
-            defer self.read_mutex.unlock();
+            self.mutex.lock();
+            defer self.mutex.unlock();
             
             if (self.items_available.load(.monotonic) == 0) {
                 return null;
@@ -308,9 +372,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 self.head = chunk.next;
                 
                 if (self.tail == chunk) {
-                    self.write_mutex.lock();
                     self.tail = null;
-                    self.write_mutex.unlock();
                 }
                 
                 self.recycleChunk(chunk);
@@ -321,12 +383,12 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         
         /// Wait for data and get next readable slice
         pub fn waitAndGetSlice(self: *Self) !View {
-            self.read_mutex.lock();
-            defer self.read_mutex.unlock();
+            self.mutex.lock();
+            defer self.mutex.unlock();
             
             // Wait for data to be available
             while (self.items_available.load(.monotonic) == 0) {
-                self.data_cond.wait(&self.read_mutex);
+                self.data_cond.wait(&self.mutex);
             }
             
             const chunk = self.head orelse unreachable;
@@ -340,8 +402,8 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         
         /// Try to get readable slice without blocking
         pub fn tryGetSlice(self: *Self) ?View {
-            self.read_mutex.lock();
-            defer self.read_mutex.unlock();
+            self.mutex.lock();
+            defer self.mutex.unlock();
             
             if (self.items_available.load(.monotonic) == 0) {
                 return null;
@@ -363,8 +425,8 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         
         /// Consume items after processing
         pub fn consumeItems(self: *Self, chunk: *Chunk, items_consumed: usize) void {
-            self.read_mutex.lock();
-            defer self.read_mutex.unlock();
+            self.mutex.lock();
+            defer self.mutex.unlock();
             
             chunk.read_pos += items_consumed;
             _ = self.items_available.fetchSub(items_consumed, .monotonic);
@@ -376,9 +438,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 self.head = head_chunk.next;
                 
                 if (self.tail == head_chunk) {
-                    self.write_mutex.lock();
                     self.tail = null;
-                    self.write_mutex.unlock();
                 }
                 
                 self.recycleChunk(head_chunk);
@@ -457,10 +517,22 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             return self;
         }
         
+        /// Initialize as a value (not pointer)
+        pub fn initValue(allocator: Allocator, config: Config) !Self {
+            return Self{
+                .queue = try Queue.init(allocator, config),
+            };
+        }
+        
         pub fn deinit(self: *Self) void {
             const allocator = self.queue.allocator;
             self.queue.deinit();
             allocator.destroy(self);
+        }
+        
+        /// Deinitialize as a value (not pointer)
+        pub fn deinitValue(self: *Self) void {
+            self.queue.deinit();
         }
         
         /// Append bytes to the buffer
@@ -490,8 +562,8 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         
         /// Get multiple readable slices for vectored I/O
         pub fn gatherReadVectors(self: *Self, iovecs: []std.posix.iovec) usize {
-            self.queue.read_mutex.lock();
-            defer self.queue.read_mutex.unlock();
+            self.queue.mutex.lock();
+            defer self.queue.mutex.unlock();
             
             var count: usize = 0;
             var current = self.queue.head;
@@ -520,8 +592,8 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         
         /// Consume bytes after vectored write
         pub fn consumeBytesMultiple(self: *Self, total_bytes: usize) void {
-            self.queue.read_mutex.lock();
-            defer self.queue.read_mutex.unlock();
+            self.queue.mutex.lock();
+            defer self.queue.mutex.unlock();
             
             var remaining = total_bytes;
             
@@ -540,9 +612,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
                     self.queue.head = head_chunk.next;
                     
                     if (self.queue.tail == head_chunk) {
-                        self.queue.write_mutex.lock();
                         self.queue.tail = null;
-                        self.queue.write_mutex.unlock();
                     }
                     
                     self.queue.recycleChunk(head_chunk);

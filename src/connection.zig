@@ -196,7 +196,7 @@ pub const Connection = struct {
     pong_condition: std.Thread.Condition = .{},
 
     // Write buffer (thread-safe)
-    write_buffer: *ConcurrentWriteBuffer(1024),
+    write_buffer: ConcurrentWriteBuffer(1024),
 
     // Subscriptions
     next_sid: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
@@ -208,14 +208,14 @@ pub const Connection = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: Allocator, options: ConnectionOptions) !Self {
+    pub fn init(allocator: Allocator, options: ConnectionOptions) Self {
         return Self{
             .allocator = allocator,
             .options = options,
             .server_pool = ServerPool.init(allocator),
             .server_info_arena = std.heap.ArenaAllocator.init(allocator),
             .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
-            .write_buffer = try ConcurrentWriteBuffer(1024).init(allocator, .{}),
+            .write_buffer = ConcurrentWriteBuffer(1024).initValue(allocator, .{}) catch unreachable,
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .parser = Parser.init(allocator),
         };
@@ -232,7 +232,7 @@ pub const Connection = struct {
         self.subscriptions.deinit();
 
         // Clean up write buffer
-        self.write_buffer.deinit();
+        self.write_buffer.deinitValue();
 
         // Clean up server pool and pending buffer
         self.server_pool.deinit();

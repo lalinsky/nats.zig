@@ -24,7 +24,7 @@ pub const MsgHandler = struct {
 pub const Subscription = struct {
     sid: u64,
     subject: []const u8,
-    messages: *ConcurrentQueue(*Message, 64),
+    messages: ConcurrentQueue(*Message, 64),
     allocator: Allocator,
 
     // Reference counting for safe cleanup
@@ -35,10 +35,13 @@ pub const Subscription = struct {
 
     pub fn initSync(allocator: Allocator, sid: u64, subject: []const u8) !*Subscription {
         const sub = try allocator.create(Subscription);
+        const subject_copy = try allocator.dupe(u8, subject);
+        errdefer allocator.free(subject_copy);
+        
         sub.* = Subscription{
             .sid = sid,
-            .subject = try allocator.dupe(u8, subject),
-            .messages = try ConcurrentQueue(*Message, 64).init(allocator, .{}),
+            .subject = subject_copy,
+            .messages = ConcurrentQueue(*Message, 64).initValue(allocator, .{}),
             .allocator = allocator,
             .handler = null,
         };
@@ -47,10 +50,13 @@ pub const Subscription = struct {
 
     pub fn initAsync(allocator: Allocator, sid: u64, subject: []const u8, handler: MsgHandler) !*Subscription {
         const sub = try allocator.create(Subscription);
+        const subject_copy = try allocator.dupe(u8, subject);
+        errdefer allocator.free(subject_copy);
+        
         sub.* = Subscription{
             .sid = sid,
-            .subject = try allocator.dupe(u8, subject),
-            .messages = try ConcurrentQueue(*Message, 64).init(allocator, .{}),
+            .subject = subject_copy,
+            .messages = ConcurrentQueue(*Message, 64).initValue(allocator, .{}),
             .allocator = allocator,
             .handler = handler,
         };
@@ -80,7 +86,7 @@ pub const Subscription = struct {
         while (self.messages.tryPop()) |msg| {
             msg.deinit();
         }
-        self.messages.deinit();
+        self.messages.deinitValue();
         self.allocator.destroy(self);
     }
 
@@ -90,22 +96,7 @@ pub const Subscription = struct {
     }
 
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) ?*Message {
-        if (timeout_ms == 0) {
-            return self.messages.tryPop();
-        }
-        
-        const timeout_ns = timeout_ms * std.time.ns_per_ms;
-        var timer = std.time.Timer.start() catch return null;
-        
-        while (timer.read() < timeout_ns) {
-            if (self.messages.tryPop()) |msg| {
-                return msg;
-            }
-            // Small sleep to avoid busy waiting
-            std.time.sleep(1_000_000); // 1ms
-        }
-        
-        return null;
+        return self.messages.popTimeout(timeout_ms);
     }
 };
 
