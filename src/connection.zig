@@ -204,7 +204,7 @@ pub const Connection = struct {
     next_sid: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
     subscriptions: std.AutoHashMap(u64, *Subscription),
     subs_mutex: std.Thread.Mutex = .{},
-    
+
     // Message dispatching
     dispatcher_pool: ?*DispatcherPool = null,
 
@@ -259,9 +259,9 @@ pub const Connection = struct {
     /// Ensure dispatcher pool is initialized (lazy initialization)
     fn ensureDispatcherPool(self: *Self) !void {
         if (self.dispatcher_pool != null) return; // Already initialized
-        
+
         self.dispatcher_pool = try dispatcher_mod.acquireGlobalPool(self.allocator);
-        
+
         log.debug("Acquired global dispatcher pool", .{});
     }
 
@@ -495,6 +495,7 @@ pub const Connection = struct {
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.init(self.allocator, sid, subject, null);
+        errdefer sub.deinit();
 
         // Add to subscriptions map
         self.subs_mutex.lock();
@@ -526,7 +527,8 @@ pub const Connection = struct {
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.init(self.allocator, sid, subject, handler);
-        
+        errdefer sub.deinit();
+
         // Assign dispatcher for async subscription (round-robin like C library)
         try self.ensureDispatcherPool();
         sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
@@ -916,7 +918,7 @@ pub const Connection = struct {
                 // Async subscription - dispatch to assigned dispatcher
                 if (s.dispatcher) |dispatcher| {
                     dispatcher.enqueue(s, message) catch |err| {
-                        log.err("Failed to dispatch message for sid {d}: {}", .{msg_arg.sid, err});
+                        log.err("Failed to dispatch message for sid {d}: {}", .{ msg_arg.sid, err });
                         message.deinit();
                         return;
                     };
