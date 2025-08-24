@@ -98,7 +98,9 @@ pub fn ReadView(comptime T: type, comptime chunk_size: usize) type {
 
         /// Consume items after processing
         pub fn consume(self: *@This(), items_consumed: usize) void {
-            std.debug.assert(items_consumed <= self.data.len);
+            if (items_consumed > self.data.len) {
+                std.debug.panic("Attempting to consume {} items but only {} available", .{items_consumed, self.data.len});
+            }
             self.queue.consumeItems(self.chunk, items_consumed);
         }
     };
@@ -533,6 +535,11 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         pub fn consumeBytesMultiple(self: *Self, total_bytes: usize) void {
             self.queue.mutex.lock();
             defer self.queue.mutex.unlock();
+
+            // Validate that we're not consuming more than available
+            if (total_bytes > self.queue.items_available) {
+                std.debug.panic("Attempting to consume {} bytes but only {} available", .{total_bytes, self.queue.items_available});
+            }
 
             var remaining = total_bytes;
 
