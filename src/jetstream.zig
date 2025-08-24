@@ -363,6 +363,18 @@ pub const JetStream = struct {
         try self.maybeParseErrorResponse(msg);
     }
 
+    /// Gets information about a specific stream.
+    pub fn getStreamInfo(self: *JetStream, stream_name: []const u8) !Result(StreamInfo) {
+        // Build the subject for the API call
+        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.INFO.{s}", .{stream_name});
+        defer self.allocator.free(subject);
+
+        const msg = try self.sendRequest(subject, "");
+        defer msg.deinit();
+
+        return try self.parseResponse(StreamInfo, msg);
+    }
+
     /// Retrieves a list of consumer names for a stream.
     pub fn listConsumerNames(self: *JetStream, stream_name: []const u8) !Result([]const []const u8) {
         const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.NAMES.{s}", .{stream_name});
