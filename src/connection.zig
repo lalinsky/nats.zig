@@ -8,6 +8,8 @@ const Message = @import("message.zig").Message;
 const subscription_mod = @import("subscription.zig");
 const Subscription = subscription_mod.Subscription;
 const MsgHandler = subscription_mod.MsgHandler;
+const dispatcher_mod = @import("dispatcher.zig");
+const DispatcherPool = dispatcher_mod.DispatcherPool;
 const server_pool_mod = @import("server_pool.zig");
 const ServerPool = server_pool_mod.ServerPool;
 const Server = server_pool_mod.Server;
@@ -202,6 +204,9 @@ pub const Connection = struct {
     next_sid: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
     subscriptions: std.AutoHashMap(u64, *Subscription),
     subs_mutex: std.Thread.Mutex = .{},
+    
+    // Message dispatching
+    dispatcher_pool: ?*DispatcherPool = null,
 
     // Parser
     parser: Parser,
@@ -225,6 +230,12 @@ pub const Connection = struct {
     pub fn deinit(self: *Self) void {
         self.close();
 
+        // Clean up dispatcher pool
+        if (self.dispatcher_pool) |pool| {
+            pool.deinit();
+            self.dispatcher_pool = null;
+        }
+
         // Clean up subscriptions
         var iter = self.subscriptions.iterator();
         while (iter.next()) |entry| {
@@ -243,6 +254,17 @@ pub const Connection = struct {
         self.server_info_arena.deinit();
 
         self.parser.deinit();
+    }
+
+    /// Ensure dispatcher pool is initialized (lazy initialization)
+    fn ensureDispatcherPool(self: *Self) !void {
+        if (self.dispatcher_pool != null) return; // Already initialized
+        
+        const thread_count = 4; // Default thread count - could be configurable later
+        self.dispatcher_pool = try DispatcherPool.init(self.allocator, thread_count);
+        try self.dispatcher_pool.?.start();
+        
+        log.debug("Initialized dispatcher pool with {} threads", .{thread_count});
     }
 
     pub fn connect(self: *Self, url: []const u8) !void {
@@ -888,9 +910,20 @@ pub const Connection = struct {
             // Log before consuming message (to avoid use-after-free)
             log.debug("Delivering message to subscription {d}: {s}", .{ msg_arg.sid, message.data });
 
-            if (s.handler) |handler| {
-                // Execute callback without holding locks
-                handler.call(message);
+            if (s.handler) |_| {
+                // Async subscription - dispatch via thread pool
+                self.ensureDispatcherPool() catch |err| {
+                    log.err("Failed to initialize dispatcher pool: {}", .{err});
+                    message.deinit();
+                    return;
+                };
+                
+                // Route message to dispatcher thread based on SID hash
+                self.dispatcher_pool.?.dispatch(s, message) catch |err| {
+                    log.err("Failed to dispatch message for sid {d}: {}", .{msg_arg.sid, err});
+                    message.deinit();
+                    return;
+                };
             } else {
                 // Sync subscription - queue message
                 s.messages.push(message) catch |err| {
