@@ -16,7 +16,7 @@ const jetstream_mod = @import("jetstream.zig");
 const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
 const build_options = @import("build_options");
-const ConcurrentWriteBuffer = @import("queue2.zig").ConcurrentWriteBuffer;
+const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
 
 const log = std.log.scoped(.connection);
 
@@ -195,8 +195,8 @@ pub const Connection = struct {
     pending_pongs: u32 = 0,
     pong_condition: std.Thread.Condition = .{},
 
-    // Write buffer (thread-safe)
-    write_buffer: ConcurrentWriteBuffer(1024),
+    // Write buffer (thread-safe, 64KB chunk size)
+    write_buffer: WriteBuffer,
 
     // Subscriptions
     next_sid: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
@@ -207,6 +207,7 @@ pub const Connection = struct {
     parser: Parser,
 
     const Self = @This();
+    const WriteBuffer = ConcurrentWriteBuffer(65536); // 64KB chunk size
 
     pub fn init(allocator: Allocator, options: ConnectionOptions) Self {
         return Self{
@@ -215,7 +216,7 @@ pub const Connection = struct {
             .server_pool = ServerPool.init(allocator),
             .server_info_arena = std.heap.ArenaAllocator.init(allocator),
             .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
-            .write_buffer = ConcurrentWriteBuffer(1024).init(allocator, .{}),
+            .write_buffer = WriteBuffer.init(allocator, .{}),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .parser = Parser.init(allocator),
         };
@@ -473,7 +474,7 @@ pub const Connection = struct {
         }
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.initSync(self.allocator, sid, subject);
+        const sub = try Subscription.init(self.allocator, sid, subject, null);
 
         // Add to subscriptions map
         self.subs_mutex.lock();
@@ -501,9 +502,10 @@ pub const Connection = struct {
 
         // Create type-erased message handler
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
+        errdefer handler.cleanup(self.allocator);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.initAsync(self.allocator, sid, subject, handler);
+        const sub = try Subscription.init(self.allocator, sid, subject, handler);
 
         // Add to subscriptions map
         self.subs_mutex.lock();
@@ -660,13 +662,13 @@ pub const Connection = struct {
         // Build CONNECT message with all options
         var buffer = ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
-        
+
         // Calculate effective no_responders: enable if server supports headers
         const effective_no_responders = self.options.no_responders or self.server_info.headers;
-        
+
         // Get client name from options or use default
         const client_name = self.options.name orelse build_options.name;
-        
+
         // Create CONNECT JSON object
         const connect_obj = .{
             .verbose = self.options.verbose,
@@ -677,7 +679,7 @@ pub const Connection = struct {
             .lang = build_options.lang,
             .version = build_options.version,
         };
-        
+
         try buffer.writer().writeAll("CONNECT ");
         try std.json.stringify(connect_obj, .{}, buffer.writer());
         try buffer.writer().writeAll("\r\n");
@@ -808,19 +810,19 @@ pub const Connection = struct {
             // Write all buffered data using vectored I/O
             var iovecs: [16]std.posix.iovec = undefined;
             const iovec_count = self.write_buffer.gatherReadVectors(&iovecs);
-            
+
             if (iovec_count > 0) {
                 var total_written: usize = 0;
                 for (iovecs[0..iovec_count]) |iov| {
                     total_written += iov.len;
                 }
-                
+
                 // Convert iovec to iovec_const for writevAll
                 var const_iovecs: [16]std.posix.iovec_const = undefined;
                 for (iovecs[0..iovec_count], 0..) |iov, i| {
                     const_iovecs[i] = .{ .base = iov.base, .len = iov.len };
                 }
-                
+
                 if (stream.writevAll(const_iovecs[0..iovec_count])) {
                     log.debug("Flushed {} bytes", .{total_written});
                     self.write_buffer.consumeBytesMultiple(total_written);
@@ -893,7 +895,7 @@ pub const Connection = struct {
                     switch (err) {
                         error.ChunkLimitExceeded => {
                             // Queue limit exceeded; drop gracefully.
-                            log.debug("Queue limit exceeded for sid {d}; dropping message", .{ msg_arg.sid });
+                            log.debug("Queue limit exceeded for sid {d}; dropping message", .{msg_arg.sid});
                             message.deinit();
                             return;
                         },

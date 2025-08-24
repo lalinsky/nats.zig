@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const RefCounter = @import("ref_counter.zig").RefCounter;
-const ConcurrentQueue = @import("queue2.zig").ConcurrentQueue;
+const ConcurrentQueue = @import("queue.zig").ConcurrentQueue;
 
 const log = std.log.scoped(.subscription);
 
@@ -24,7 +24,7 @@ pub const MsgHandler = struct {
 pub const Subscription = struct {
     sid: u64,
     subject: []const u8,
-    messages: ConcurrentQueue(*Message, 64),
+    messages: MessageQueue,
     allocator: Allocator,
 
     // Reference counting for safe cleanup
@@ -33,30 +33,17 @@ pub const Subscription = struct {
     // Callback support
     handler: ?MsgHandler = null,
 
-    pub fn initSync(allocator: Allocator, sid: u64, subject: []const u8) !*Subscription {
-        const sub = try allocator.create(Subscription);
-        const subject_copy = try allocator.dupe(u8, subject);
-        errdefer allocator.free(subject_copy);
-        
-        sub.* = Subscription{
-            .sid = sid,
-            .subject = subject_copy,
-            .messages = ConcurrentQueue(*Message, 64).init(allocator, .{}),
-            .allocator = allocator,
-            .handler = null,
-        };
-        return sub;
-    }
+    pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
-    pub fn initAsync(allocator: Allocator, sid: u64, subject: []const u8, handler: MsgHandler) !*Subscription {
+    pub fn init(allocator: Allocator, sid: u64, subject: []const u8, handler: ?MsgHandler) !*Subscription {
         const sub = try allocator.create(Subscription);
         const subject_copy = try allocator.dupe(u8, subject);
         errdefer allocator.free(subject_copy);
-        
+
         sub.* = Subscription{
             .sid = sid,
             .subject = subject_copy,
-            .messages = ConcurrentQueue(*Message, 64).init(allocator, .{}),
+            .messages = MessageQueue.init(allocator, .{}),
             .allocator = allocator,
             .handler = handler,
         };
