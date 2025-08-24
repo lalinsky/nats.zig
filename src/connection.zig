@@ -8,6 +8,8 @@ const Message = @import("message.zig").Message;
 const subscription_mod = @import("subscription.zig");
 const Subscription = subscription_mod.Subscription;
 const MsgHandler = subscription_mod.MsgHandler;
+const dispatcher_mod = @import("dispatcher.zig");
+const DispatcherPool = dispatcher_mod.DispatcherPool;
 const server_pool_mod = @import("server_pool.zig");
 const ServerPool = server_pool_mod.ServerPool;
 const Server = server_pool_mod.Server;
@@ -203,6 +205,9 @@ pub const Connection = struct {
     subscriptions: std.AutoHashMap(u64, *Subscription),
     subs_mutex: std.Thread.Mutex = .{},
 
+    // Message dispatching
+    dispatcher_pool: ?*DispatcherPool = null,
+
     // Parser
     parser: Parser,
 
@@ -225,6 +230,12 @@ pub const Connection = struct {
     pub fn deinit(self: *Self) void {
         self.close();
 
+        // Release global dispatcher pool
+        if (self.dispatcher_pool != null) {
+            dispatcher_mod.releaseGlobalPool();
+            self.dispatcher_pool = null;
+        }
+
         // Clean up subscriptions
         var iter = self.subscriptions.iterator();
         while (iter.next()) |entry| {
@@ -243,6 +254,15 @@ pub const Connection = struct {
         self.server_info_arena.deinit();
 
         self.parser.deinit();
+    }
+
+    /// Ensure dispatcher pool is initialized (lazy initialization)
+    fn ensureDispatcherPool(self: *Self) !void {
+        if (self.dispatcher_pool != null) return; // Already initialized
+
+        self.dispatcher_pool = try dispatcher_mod.acquireGlobalPool(self.allocator);
+
+        log.debug("Acquired global dispatcher pool", .{});
     }
 
     pub fn connect(self: *Self, url: []const u8) !void {
@@ -475,6 +495,7 @@ pub const Connection = struct {
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.init(self.allocator, sid, subject, null);
+        errdefer sub.deinit();
 
         // Add to subscriptions map
         self.subs_mutex.lock();
@@ -506,6 +527,11 @@ pub const Connection = struct {
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.init(self.allocator, sid, subject, handler);
+        errdefer sub.deinit();
+
+        // Assign dispatcher for async subscription (round-robin like C library)
+        try self.ensureDispatcherPool();
+        sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
 
         // Add to subscriptions map
         self.subs_mutex.lock();
@@ -888,9 +914,19 @@ pub const Connection = struct {
             // Log before consuming message (to avoid use-after-free)
             log.debug("Delivering message to subscription {d}: {s}", .{ msg_arg.sid, message.data });
 
-            if (s.handler) |handler| {
-                // Execute callback without holding locks
-                handler.call(message);
+            if (s.handler) |_| {
+                // Async subscription - dispatch to assigned dispatcher
+                if (s.dispatcher) |dispatcher| {
+                    dispatcher.enqueue(s, message) catch |err| {
+                        log.err("Failed to dispatch message for sid {d}: {}", .{ msg_arg.sid, err });
+                        message.deinit();
+                        return;
+                    };
+                } else {
+                    log.err("Async subscription {} has no assigned dispatcher", .{msg_arg.sid});
+                    message.deinit();
+                    return;
+                }
             } else {
                 // Sync subscription - queue message
                 s.messages.push(message) catch |err| {
