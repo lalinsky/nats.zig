@@ -19,6 +19,7 @@ const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
 const build_options = @import("build_options");
 const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
+const ResponseManager = @import("response_manager.zig").ResponseManager;
 
 const log = std.log.scoped(.connection);
 
@@ -207,6 +208,9 @@ pub const Connection = struct {
 
     // Message dispatching
     dispatcher_pool: ?*DispatcherPool = null,
+    
+    // Response management (shared subscription for request/reply)
+    response_manager: ResponseManager,
 
     // Parser
     parser: Parser,
@@ -223,6 +227,7 @@ pub const Connection = struct {
             .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
             .write_buffer = WriteBuffer.init(allocator, .{}),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
+            .response_manager = ResponseManager.init(allocator),
             .parser = Parser.init(allocator),
         };
     }
@@ -246,6 +251,9 @@ pub const Connection = struct {
         // Clean up write buffer
         self.write_buffer.deinit();
 
+        // Clean up response manager
+        self.response_manager.deinit();
+
         // Clean up server pool and pending buffer
         self.server_pool.deinit();
         self.pending_buffer.deinit();
@@ -263,6 +271,33 @@ pub const Connection = struct {
         self.dispatcher_pool = try dispatcher_mod.acquireGlobalPool(self.allocator);
 
         log.debug("Acquired global dispatcher pool", .{});
+    }
+    
+    /// Helper for ResponseManager - get next subscription ID
+    fn getNextSubId(self: *Self) u64 {
+        return self.next_sid.fetchAdd(1, .monotonic);
+    }
+    
+    /// Helper for ResponseManager - create internal subscription
+    pub fn subscribeInternal(self: *Self, subject: []const u8, handler: MsgHandler) !*Subscription {
+        // Must be called with mutex held
+        const sid = self.getNextSubId();
+        const sub = try Subscription.init(self.allocator, sid, subject, handler);
+        errdefer sub.deinit();
+        
+        // Add to subscriptions map
+        self.subs_mutex.lock();
+        defer self.subs_mutex.unlock();
+        try self.subscriptions.put(sid, sub);
+        
+        // Send SUB command via buffer
+        var buffer = ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+        try buffer.writer().print("SUB {s} {d}\r\n", .{ subject, sid });
+        try self.bufferWrite(buffer.items);
+        
+        log.debug("Created internal subscription to {s} with sid {d}", .{ subject, sid });
+        return sub;
     }
 
     pub fn connect(self: *Self, url: []const u8) !void {
@@ -642,24 +677,26 @@ pub const Connection = struct {
             log.debug("Sending request to {s} with timeout {d}ms", .{ subject, timeout_ms });
         }
 
-        // 1. Create unique inbox
-        const reply_subject = try inbox.newInbox(self.allocator);
-        defer self.allocator.free(reply_subject);
-
-        // 2. Subscribe to inbox
-        const sub = try self.subscribeSync(reply_subject);
+        self.mutex.lock();
+        
+        // Ensure response system is initialized
+        try self.response_manager.ensureInitialized(self);
+        
+        // Create request
+        const request_info = try self.response_manager.createRequest(subject, data);
         defer {
-            self.unsubscribe(sub) catch |err| {
-                log.warn("Failed to unsubscribe from inbox: {}", .{err});
-            };
-            sub.deinit();
+            self.allocator.free(request_info.reply_subject);
+            self.allocator.free(request_info.token);
+            self.response_manager.cleanupRequest(request_info.token);
         }
-
-        // 3. Publish with reply-to
-        try self.publishRequest(subject, reply_subject, data);
-
-        // 4. Wait for response with timeout
-        return sub.nextMsg(timeout_ms);
+        
+        self.mutex.unlock();
+        
+        // Send request
+        try self.publishRequest(subject, request_info.reply_subject, data);
+        
+        // Wait for response
+        return request_info.response_info.wait(timeout_ms);
     }
 
     fn processInitialHandshake(self: *Self) !void {
