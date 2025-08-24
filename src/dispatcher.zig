@@ -10,6 +10,18 @@ const log = std.log.scoped(.dispatcher);
 pub const DispatchMessage = struct {
     subscription: *Subscription,
     message: *Message,
+
+    pub fn init(subscription: *Subscription, message: *Message) DispatchMessage {
+        subscription.retain();
+        return .{
+            .subscription = subscription,
+            .message = message,
+        };
+    }
+
+    pub fn deinit(self: *const DispatchMessage) void {
+        self.subscription.release();
+    }
 };
 
 /// Dispatcher thread that processes messages for multiple subscriptions
@@ -30,6 +42,12 @@ pub const Dispatcher = struct {
     
     pub fn deinit(self: *Dispatcher) void {
         self.stop();
+        // Clean up any remaining messages in the queue
+        while (self.queue.tryPop()) |dispatch_msg| {
+            log.warn("Dropping unprocessed message for subscription {}", .{dispatch_msg.subscription.sid});
+            dispatch_msg.message.deinit();
+            dispatch_msg.deinit(); // Release subscription reference
+        }
         self.queue.deinit();
     }
     
@@ -56,10 +74,8 @@ pub const Dispatcher = struct {
     
     /// Enqueue a message for dispatch
     pub fn enqueue(self: *Dispatcher, subscription: *Subscription, message: *Message) !void {
-        const dispatch_msg = DispatchMessage{
-            .subscription = subscription,
-            .message = message,
-        };
+        const dispatch_msg = DispatchMessage.init(subscription, message);
+        errdefer dispatch_msg.deinit();
         try self.queue.push(dispatch_msg);
     }
     
@@ -91,10 +107,11 @@ pub const Dispatcher = struct {
     /// Process a single dispatch message
     fn processMessage(self: *Dispatcher, dispatch_msg: DispatchMessage) void {
         _ = self; // unused
-        
+        defer dispatch_msg.deinit(); // Release subscription reference
+
         const subscription = dispatch_msg.subscription;
         const message = dispatch_msg.message;
-        
+
         // Call the subscription's handler in this dispatcher thread context
         if (subscription.handler) |handler| {
             handler.call(message);

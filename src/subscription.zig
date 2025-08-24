@@ -81,6 +81,10 @@ pub const Subscription = struct {
             msg.deinit();
         }
         self.messages.deinit();
+        
+        // Clear dispatcher reference (no explicit unsubscription needed - reference counting handles it)
+        self.dispatcher = null;
+        
         self.allocator.destroy(self);
     }
 
