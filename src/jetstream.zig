@@ -188,6 +188,24 @@ pub const ConsumerInfo = struct {
     created: []const u8,
 };
 
+/// Request for $JS.API.STREAM.PURGE
+pub const StreamPurgeRequest = struct {
+    /// Restrict purging to messages that match this subject
+    filter: ?[]const u8 = null,
+    /// Purge all messages up to but not including the message with this sequence
+    seq: ?u64 = null,
+    /// Ensures this many messages are present after the purge
+    keep: ?u64 = null,
+};
+
+/// Response from $JS.API.STREAM.PURGE
+const StreamPurgeResponse = struct {
+    /// Indicates if this response is an error
+    success: bool,
+    /// The number of messages purged
+    purged: u64,
+};
+
 pub const JetStreamOptions = struct {
     request_timeout_ms: u64 = default_request_timeout_ms,
     // Add options here
@@ -435,5 +453,19 @@ pub const JetStream = struct {
 
         // Just check for errors, don't need to parse the response
         try self.maybeParseErrorResponse(msg);
+    }
+
+    /// Purges messages from a stream.
+    pub fn purgeStream(self: *JetStream, stream_name: []const u8, request: StreamPurgeRequest) !Result(StreamPurgeResponse) {
+        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.PURGE.{s}", .{stream_name});
+        defer self.allocator.free(subject);
+
+        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{});
+        defer self.allocator.free(request_json);
+
+        const msg = try self.sendRequest(subject, request_json);
+        defer msg.deinit();
+
+        return try self.parseResponse(StreamPurgeResponse, msg);
     }
 };

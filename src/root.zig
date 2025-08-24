@@ -17,6 +17,7 @@ pub const JetStream = @import("jetstream.zig").JetStream;
 pub const JetStreamOptions = @import("jetstream.zig").JetStreamOptions;
 pub const StreamConfig = @import("jetstream.zig").StreamConfig;
 pub const StreamInfo = @import("jetstream.zig").StreamInfo;
+pub const StreamPurgeRequest = @import("jetstream.zig").StreamPurgeRequest;
 pub const ConsumerConfig = @import("jetstream.zig").ConsumerConfig;
 pub const ConsumerInfo = @import("jetstream.zig").ConsumerInfo;
 pub const Stream = @import("jetstream.zig").Stream;
