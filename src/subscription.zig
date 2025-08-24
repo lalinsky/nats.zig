@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const RefCounter = @import("ref_counter.zig").RefCounter;
-const Queue = @import("queue.zig").Queue;
+const ConcurrentQueue = @import("queue.zig").ConcurrentQueue;
 
 const log = std.log.scoped(.subscription);
 
@@ -24,7 +24,7 @@ pub const MsgHandler = struct {
 pub const Subscription = struct {
     sid: u64,
     subject: []const u8,
-    messages: Queue(*Message),
+    messages: MessageQueue,
     allocator: Allocator,
 
     // Reference counting for safe cleanup
@@ -33,24 +33,19 @@ pub const Subscription = struct {
     // Callback support
     handler: ?MsgHandler = null,
 
-    pub fn initSync(allocator: Allocator, sid: u64, subject: []const u8) !*Subscription {
-        const sub = try allocator.create(Subscription);
-        sub.* = Subscription{
-            .sid = sid,
-            .subject = try allocator.dupe(u8, subject),
-            .messages = Queue(*Message).init(allocator),
-            .allocator = allocator,
-            .handler = null,
-        };
-        return sub;
-    }
+    pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
-    pub fn initAsync(allocator: Allocator, sid: u64, subject: []const u8, handler: MsgHandler) !*Subscription {
+    pub fn init(allocator: Allocator, sid: u64, subject: []const u8, handler: ?MsgHandler) !*Subscription {
         const sub = try allocator.create(Subscription);
+        errdefer allocator.destroy(sub);
+
+        const subject_copy = try allocator.dupe(u8, subject);
+        errdefer allocator.free(subject_copy);
+
         sub.* = Subscription{
             .sid = sid,
-            .subject = try allocator.dupe(u8, subject),
-            .messages = Queue(*Message).init(allocator),
+            .subject = subject_copy,
+            .messages = MessageQueue.init(allocator, .{}),
             .allocator = allocator,
             .handler = handler,
         };
@@ -76,7 +71,7 @@ pub const Subscription = struct {
             handler.cleanup(self.allocator);
         }
 
-        // Close queue first to prevent new messages, then clean up pending messages
+        // Close the queue to prevent new messages and clean up pending messages
         self.messages.close();
         while (self.messages.tryPop()) |msg| {
             msg.deinit();
@@ -91,7 +86,7 @@ pub const Subscription = struct {
     }
 
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) ?*Message {
-        return self.messages.pop(timeout_ms);
+        return self.messages.pop(timeout_ms) catch null;
     }
 };
 
