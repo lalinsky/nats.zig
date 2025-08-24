@@ -435,8 +435,8 @@ test "purge stream" {
     try conn.publish("test.purge.msg2", "Second message");
     try conn.publish("test.purge.msg3", "Third message");
 
-    // Allow messages to be processed
-    std.time.sleep(100 * std.time.ns_per_ms); // 100ms
+    // Flush to ensure messages are sent to the server
+    try conn.flush();
 
     // Test basic purge (purge all messages)
     const purge_request = nats.StreamPurgeRequest{};
@@ -468,8 +468,8 @@ test "purge stream with filter" {
     try conn.publish("test.filter.purge", "Purge this message");
     try conn.publish("test.filter.purge", "Purge this message too");
 
-    // Allow messages to be processed
-    std.time.sleep(100 * std.time.ns_per_ms);
+    // Flush to ensure messages are sent to the server
+    try conn.flush();
 
     // Test purge with filter (only purge messages with "purge" subject)
     const purge_request = nats.StreamPurgeRequest{
@@ -504,8 +504,8 @@ test "purge stream with sequence limit" {
     try conn.publish("test.seq.msg", "Message 3");
     try conn.publish("test.seq.msg", "Message 4");
 
-    // Allow messages to be processed
-    std.time.sleep(100 * std.time.ns_per_ms);
+    // Flush to ensure messages are sent to the server
+    try conn.flush();
 
     // Test purge up to sequence 3 (should purge messages 1 and 2)
     const purge_request = nats.StreamPurgeRequest{
@@ -540,8 +540,8 @@ test "purge stream with keep parameter" {
     try conn.publish("test.keep.msg", "Message 4");
     try conn.publish("test.keep.msg", "Message 5");
 
-    // Allow messages to be processed
-    std.time.sleep(100 * std.time.ns_per_ms);
+    // Flush to ensure messages are sent to the server
+    try conn.flush();
 
     // Test purge with keep=2 (should keep the 2 most recent messages)
     const purge_request = nats.StreamPurgeRequest{
