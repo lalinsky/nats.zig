@@ -677,22 +677,22 @@ pub const Connection = struct {
             log.debug("Sending request to {s} with timeout {d}ms", .{ subject, timeout_ms });
         }
 
-        self.mutex.lock();
-        
         // Ensure response system is initialized
+        self.mutex.lock();
         try self.response_manager.ensureInitialized(self);
+        self.mutex.unlock();
         
         // Create request
+        self.mutex.lock();
         const request_info = try self.response_manager.createRequest(subject, data);
         defer {
             self.allocator.free(request_info.reply_subject);
             self.allocator.free(request_info.token);
             self.response_manager.cleanupRequest(request_info.token);
         }
-        
         self.mutex.unlock();
         
-        // Send request
+        // Send request (publishRequest will acquire its own mutex)
         try self.publishRequest(subject, request_info.reply_subject, data);
         
         // Wait for response
