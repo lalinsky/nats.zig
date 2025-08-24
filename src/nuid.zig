@@ -19,22 +19,9 @@ const MAX_INCREMENT: u64 = 333;
 
 /// Internal NUID structure
 const Nuid = struct {
-    prefix: [NUID_PREFIX_LEN]u8,
-    sequence: u64,
-    increment: u64,
-
-    fn init() Nuid {
-        var nuid = Nuid{
-            .prefix = undefined,
-            .sequence = 0,
-            .increment = 0,
-        };
-
-        nuid.randomizePrefix();
-        nuid.resetSequence();
-
-        return nuid;
-    }
+    prefix: [NUID_PREFIX_LEN]u8 = undefined,
+    sequence: u64 = MAX_SEQUENCE, // Force reset on first next() call
+    increment: u64 = 1,
 
     fn randomizePrefix(self: *Nuid) void {
         // Generate a random number up to MAX_PREFIX and encode it in base36
@@ -77,24 +64,20 @@ const Nuid = struct {
 /// Thread-safe global NUID instance
 const GlobalNuid = struct {
     mutex: Mutex = .{},
-    nuid: ?Nuid = null,
+    nuid: Nuid = .{},
 
     fn reset(self: *GlobalNuid) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        self.nuid = Nuid.init();
+        self.nuid = .{};
     }
 
     fn next(self: *GlobalNuid, buffer: *[NUID_TOTAL_LEN]u8) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.nuid == null) {
-            self.nuid = Nuid.init();
-        }
-
-        self.nuid.?.next(buffer);
+        self.nuid.next(buffer);
     }
 };
 
