@@ -260,7 +260,7 @@ pub const Connection = struct {
     fn ensureDispatcherPool(self: *Self) !void {
         if (self.dispatcher_pool != null) return; // Already initialized
         
-        const thread_count = 4; // Default thread count - could be configurable later
+        const thread_count = 1; // Default thread count - could be configurable later
         self.dispatcher_pool = try DispatcherPool.init(self.allocator, thread_count);
         try self.dispatcher_pool.?.start();
         
