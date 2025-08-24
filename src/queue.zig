@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 
 const PopError = error{
     QueueEmpty,
+    QueueClosed,
 };
 
 const PushError = error{
@@ -272,12 +273,26 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            const timeout_ns = timeout_ms * std.time.ns_per_ms;
-
-            while (self.items_available == 0) {
-                self.data_cond.timedWait(&self.mutex, timeout_ns) catch {
+            // Fast path for non-blocking (timeout_ms == 0)
+            if (timeout_ms == 0) {
+                if (self.is_closed and self.items_available == 0) {
+                    return PopError.QueueClosed;
+                }
+                if (self.items_available == 0) {
                     return PopError.QueueEmpty;
-                };
+                }
+            } else {
+                const timeout_ns = timeout_ms * std.time.ns_per_ms;
+
+                while (self.items_available == 0 and !self.is_closed) {
+                    self.data_cond.timedWait(&self.mutex, timeout_ns) catch {
+                        return PopError.QueueEmpty;
+                    };
+                }
+
+                if (self.is_closed and self.items_available == 0) {
+                    return PopError.QueueClosed;
+                }
             }
 
             // At this point we have data, pop it
@@ -305,17 +320,49 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             return self.pop(0) catch null;
         }
 
-        /// Wait for data and get next readable slice
-        pub fn waitAndGetSlice(self: *Self) !View {
+        /// Get readable slice with timeout (0 = non-blocking, maxInt(u64) = wait forever)
+        pub fn getSlice(self: *Self, timeout_ms: u64) PopError!View {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            // Wait for data to be available
-            while (self.items_available == 0) {
-                self.data_cond.wait(&self.mutex);
+            // Fast path for non-blocking (timeout_ms == 0)
+            if (timeout_ms == 0) {
+                if (self.is_closed and self.items_available == 0) {
+                    return PopError.QueueClosed;
+                }
+                if (self.items_available == 0) {
+                    return PopError.QueueEmpty;
+                }
+            } else if (timeout_ms == std.math.maxInt(u64)) {
+                // Wait indefinitely
+                while (self.items_available == 0 and !self.is_closed) {
+                    self.data_cond.wait(&self.mutex);
+                }
+
+                if (self.is_closed and self.items_available == 0) {
+                    return PopError.QueueClosed;
+                }
+            } else {
+                // Wait with timeout
+                const timeout_ns = timeout_ms * std.time.ns_per_ms;
+
+                while (self.items_available == 0 and !self.is_closed) {
+                    self.data_cond.timedWait(&self.mutex, timeout_ns) catch {
+                        return PopError.QueueEmpty;
+                    };
+                }
+
+                if (self.is_closed and self.items_available == 0) {
+                    return PopError.QueueClosed;
+                }
             }
 
-            const chunk = self.head orelse unreachable;
+            const chunk = self.head orelse return PopError.QueueEmpty;
+            const available = chunk.availableToRead();
+
+            if (available == 0) {
+                return PopError.QueueEmpty;
+            }
 
             return View{
                 .data = chunk.getReadSlice(),
@@ -326,25 +373,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
         /// Try to get readable slice without blocking
         pub fn tryGetSlice(self: *Self) ?View {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            if (self.items_available == 0) {
-                return null;
-            }
-
-            const chunk = self.head orelse return null;
-            const available = chunk.availableToRead();
-
-            if (available == 0) {
-                return null;
-            }
-
-            return View{
-                .data = chunk.getReadSlice(),
-                .chunk = chunk,
-                .queue = self,
-            };
+            return self.getSlice(0) catch null;
         }
 
         /// Consume items after processing
@@ -486,9 +515,9 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             return self.queue.tryGetSlice();
         }
 
-        /// Wait and get readable byte slice
-        pub fn waitAndGetSlice(self: *Self) !Queue.View {
-            return self.queue.waitAndGetSlice();
+        /// Get readable byte slice with timeout
+        pub fn getSlice(self: *Self, timeout_ms: u64) !Queue.View {
+            return self.queue.getSlice(timeout_ms);
         }
 
         /// Get bytes available
@@ -696,6 +725,54 @@ test "queue close functionality" {
 
     // Verify closed state
     try std.testing.expect(queue.isClosed());
+}
+
+test "blocking pop handles queue closure" {
+    const allocator = std.testing.allocator;
+
+    const Queue = ConcurrentQueue(i32, 4);
+    var queue = Queue.init(allocator, .{});
+    defer queue.deinit();
+
+    // Start a thread that will close the queue after a delay
+    const Closer = struct {
+        fn run(q: *Queue) !void {
+            std.time.sleep(10 * std.time.ns_per_ms);
+            q.close();
+        }
+    };
+
+    const closer = try std.Thread.spawn(.{}, Closer.run, .{&queue});
+    
+    // This should return QueueClosed when the queue is closed
+    const result = queue.pop(1000);
+    try std.testing.expectError(PopError.QueueClosed, result);
+
+    closer.join();
+}
+
+test "getSlice handles queue closure with indefinite wait" {
+    const allocator = std.testing.allocator;
+
+    const Queue = ConcurrentQueue(i32, 4);
+    var queue = Queue.init(allocator, .{});
+    defer queue.deinit();
+
+    // Start a thread that will close the queue after a delay
+    const Closer = struct {
+        fn run(q: *Queue) !void {
+            std.time.sleep(10 * std.time.ns_per_ms);
+            q.close();
+        }
+    };
+
+    const closer = try std.Thread.spawn(.{}, Closer.run, .{&queue});
+    
+    // This should return QueueClosed when the queue is closed
+    const result = queue.getSlice(std.math.maxInt(u64));
+    try std.testing.expectError(PopError.QueueClosed, result);
+
+    closer.join();
 }
 
 test "buffer close functionality" {
