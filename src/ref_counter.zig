@@ -47,6 +47,7 @@ pub fn RefCounter(comptime T: type) type {
         /// are visible before the count reaches zero.
         pub fn decr(self: *Self) bool {
             const prev_ref_count = self.refs.fetchSub(1, .release);
+            std.debug.assert(prev_ref_count > 0);
             if (prev_ref_count == 1) {
                 // Use acquire load as substitute for fence (Zig 0.14 doesn't have @fence)
                 // This synchronizes with all release operations from other threads
