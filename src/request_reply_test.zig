@@ -1,3 +1,16 @@
+// Copyright 2025 Lukas Lalinsky
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 const std = @import("std");
 const nats = @import("root.zig");
 const Connection = nats.Connection;
@@ -49,8 +62,8 @@ test "subscription timeout" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    const sub = try Subscription.init(allocator, 1, "test.subject");
-    defer sub.deinit(allocator);
+    const sub = try Subscription.init(allocator, 1, "test.subject", null);
+    defer sub.deinit();
     
     // Test immediate timeout (should return null)
     const start = std.time.nanoTimestamp();
@@ -83,8 +96,8 @@ test "unsubscribe functionality" {
     defer conn.deinit();
     
     // Create a subscription (but we're not connected, so this should work in memory)
-    const sub = try Subscription.init(allocator, 1, "test.subject");
-    defer sub.deinit(allocator);
+    const sub = try Subscription.init(allocator, 1, "test.subject", null);
+    defer sub.deinit();
     
     // Test that unsubscribe fails when disconnected
     const result = conn.unsubscribe(sub);

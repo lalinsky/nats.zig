@@ -1,6 +1,26 @@
+// Copyright 2025 Lukas Lalinsky
+// Copyright 2015-2025 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
+
+// Header constants (like C NATS library)
+const STATUS_HDR = "Status";
+const DESCRIPTION_HDR = "Description";
+const HDR_STATUS_NO_RESP_503 = "503";
+const NATS_STATUS_PREFIX = "NATS/1.0";
 
 // Simple, idiomatic Zig message implementation using ArenaAllocator
 pub const Message = struct {
@@ -101,11 +121,46 @@ pub const Message = struct {
         
         const raw = self.raw_headers orelse return;
         
-        // Simple header parsing - split by lines
+        // Parse headers like Go NATS library
         var lines = std.mem.splitSequence(u8, raw, "\r\n");
-        _ = lines.next(); // Skip "NATS/1.0" line
+        const first_line = lines.next() orelse return;
         
         const arena_allocator = self.arena.allocator();
+        
+        // Check if we have an inlined status (like "NATS/1.0 503" or "NATS/1.0 503 No Responders")
+        if (std.mem.startsWith(u8, first_line, NATS_STATUS_PREFIX) and first_line.len > NATS_STATUS_PREFIX.len) {
+            const status_part = std.mem.trim(u8, first_line[NATS_STATUS_PREFIX.len..], " \t");
+            if (status_part.len > 0) {
+                // Extract status code (first 3 characters if available)
+                const status_len = 3; // Like Go's statusLen
+                var status: []const u8 = undefined;
+                var description: ?[]const u8 = null;
+                
+                if (status_part.len == status_len) {
+                    status = status_part;
+                } else if (status_part.len > status_len) {
+                    status = status_part[0..status_len];
+                    const desc_part = std.mem.trim(u8, status_part[status_len..], " \t");
+                    if (desc_part.len > 0) {
+                        description = desc_part;
+                    }
+                } else {
+                    status = status_part; // Less than 3 chars, use as-is
+                }
+                
+                // Add Status header directly to avoid circular dependency
+                var status_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
+                status_list.appendAssumeCapacity(status);
+                try self.headers.put(arena_allocator, STATUS_HDR, status_list);
+                
+                // Add Description header if present
+                if (description) |desc| {
+                    var desc_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
+                    desc_list.appendAssumeCapacity(desc);
+                    try self.headers.put(arena_allocator, DESCRIPTION_HDR, desc_list);
+                }
+            }
+        }
         
         
         while (lines.next()) |line| {
@@ -181,12 +236,12 @@ pub const Message = struct {
         _ = self.headers.fetchRemove(key);
     }
     
-    // Check if message indicates "no responders"
-    pub fn isNoResponders(self: *Self) !bool {
+    // Check if message indicates "no responders" - matches Go NATS library logic
+    pub fn isNoResponders(self: *Self) bool {
         if (self.data.len != 0) return false;
         
-        const status = try self.headerGet("Status");
-        return status != null and std.mem.startsWith(u8, status.?, "503");
+        const status = self.headerGet(STATUS_HDR) catch return false;
+        return status != null and std.mem.eql(u8, status.?, HDR_STATUS_NO_RESP_503);
     }
     
     // Encode headers for transmission
@@ -195,7 +250,7 @@ pub const Message = struct {
         
         if (self.headers.count() == 0) return;
         
-        try writer.writeAll("NATS/1.0\r\n");
+        try writer.writeAll(NATS_STATUS_PREFIX ++ "\r\n");
         
         var iter = self.headers.iterator();
         while (iter.next()) |entry| {

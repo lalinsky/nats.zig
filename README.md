@@ -2,6 +2,30 @@
 
 A Zig client library for NATS, the cloud-native messaging system.
 
+## Development Status
+
+This project is under active development and is not yet complete. The goal is to be as feature complete as the official NATS client libraries. It is based on the NATS C and Go libraries.
+
+## Installation
+
+1) Add nats.zig as a dependency in your `build.zig.zon`:
+
+```bash
+zig fetch --save "git+https://github.com/lalinsky/nats.zig"
+```
+
+2) In your `build.zig`, add the `nats` module as a dependency to your program:
+
+```zig
+const nats = b.dependency("nats", .{
+    .target = target,
+    .optimize = optimize,
+});
+
+// the executable from your call to b.addExecutable(...)
+exe.root_module.addImport("nats", nats.module("nats"));
+```
+
 ## Examples
 
 ### Connect and Publish
@@ -44,6 +68,39 @@ fn messageHandler(msg: *nats.Message, counter: *u32) void {
 // Subscribe with callback handler
 var counter: u32 = 0;
 const sub = try nc.subscribe("hello", messageHandler, .{&counter});
+```
+
+### Send Request
+
+```zig
+// Send request and wait for reply with 5 second timeout
+const reply = try nc.request("help", "need assistance", 5000);
+defer reply.deinit();
+
+std.debug.print("Received reply: {s}\n", .{reply.data});
+```
+
+### Request Handling
+
+```zig
+// Define request handler
+fn helpHandler(msg: *nats.Message, context: *MyContext) void {
+    defer msg.deinit();
+    
+    // Process the request
+    const request_data = msg.data;
+    std.debug.print("Received request: {s}\n", .{request_data});
+    
+    // Send reply
+    const response = "Here's your help response";
+    msg.reply(response) catch |err| {
+        std.debug.print("Failed to send reply: {}\n", .{err});
+    };
+}
+
+// Subscribe to handle requests
+var context = MyContext{};
+const sub = try nc.subscribe("help", helpHandler, .{&context});
 ```
 
 ### JetStream Stream Management

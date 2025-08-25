@@ -1,3 +1,16 @@
+// Copyright 2025 Lukas Lalinsky
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 const std = @import("std");
 const net = std.net;
 const Allocator = std.mem.Allocator;
@@ -8,6 +21,8 @@ const Message = @import("message.zig").Message;
 const subscription_mod = @import("subscription.zig");
 const Subscription = subscription_mod.Subscription;
 const MsgHandler = subscription_mod.MsgHandler;
+const dispatcher_mod = @import("dispatcher.zig");
+const DispatcherPool = dispatcher_mod.DispatcherPool;
 const server_pool_mod = @import("server_pool.zig");
 const ServerPool = server_pool_mod.ServerPool;
 const Server = server_pool_mod.Server;
@@ -17,6 +32,7 @@ const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
 const build_options = @import("build_options");
 const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
+const ResponseManager = @import("response_manager.zig").ResponseManager;
 
 const log = std.log.scoped(.connection);
 
@@ -115,6 +131,7 @@ pub const ConnectionError = error{
     AuthFailed,
     InvalidProtocol,
     OutOfMemory,
+    NoResponders,
 } || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
 
 pub const ConnectionStatus = enum {
@@ -152,7 +169,7 @@ pub const ConnectionOptions = struct {
     reconnect: ReconnectOptions = .{},
     callbacks: ConnectionCallbacks = .{},
     trace: bool = false,
-    no_responders: bool = false,
+    no_responders: bool = true,
 };
 
 pub const Connection = struct {
@@ -203,6 +220,12 @@ pub const Connection = struct {
     subscriptions: std.AutoHashMap(u64, *Subscription),
     subs_mutex: std.Thread.Mutex = .{},
 
+    // Message dispatching
+    dispatcher_pool: ?*DispatcherPool = null,
+
+    // Response management (shared subscription for request/reply)
+    response_manager: ResponseManager,
+
     // Parser
     parser: Parser,
 
@@ -218,12 +241,19 @@ pub const Connection = struct {
             .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
             .write_buffer = WriteBuffer.init(allocator, .{}),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
+            .response_manager = ResponseManager.init(allocator),
             .parser = Parser.init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
         self.close();
+
+        // Release global dispatcher pool
+        if (self.dispatcher_pool != null) {
+            dispatcher_mod.releaseGlobalPool();
+            self.dispatcher_pool = null;
+        }
 
         // Clean up subscriptions
         var iter = self.subscriptions.iterator();
@@ -235,6 +265,9 @@ pub const Connection = struct {
         // Clean up write buffer
         self.write_buffer.deinit();
 
+        // Clean up response manager
+        self.response_manager.deinit();
+
         // Clean up server pool and pending buffer
         self.server_pool.deinit();
         self.pending_buffer.deinit();
@@ -244,6 +277,16 @@ pub const Connection = struct {
 
         self.parser.deinit();
     }
+
+    /// Ensure dispatcher pool is initialized (lazy initialization)
+    fn ensureDispatcherPool(self: *Self) !void {
+        if (self.dispatcher_pool != null) return; // Already initialized
+
+        self.dispatcher_pool = try dispatcher_mod.acquireGlobalPool(self.allocator);
+
+        log.debug("Acquired global dispatcher pool", .{});
+    }
+
 
     pub fn connect(self: *Self, url: []const u8) !void {
         if (self.status != .disconnected) {
@@ -475,6 +518,7 @@ pub const Connection = struct {
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.init(self.allocator, sid, subject, null);
+        errdefer sub.deinit();
 
         // Add to subscriptions map
         self.subs_mutex.lock();
@@ -506,6 +550,11 @@ pub const Connection = struct {
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.init(self.allocator, sid, subject, handler);
+        errdefer sub.deinit();
+
+        // Assign dispatcher for async subscription (round-robin like C library)
+        try self.ensureDispatcherPool();
+        sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
 
         // Add to subscriptions map
         self.subs_mutex.lock();
@@ -611,29 +660,26 @@ pub const Connection = struct {
         log.debug("Published request to {s} with reply {s}: {s}", .{ subject, reply, data });
     }
 
-    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !?*Message {
+    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !*Message {
         if (self.options.trace) {
             log.debug("Sending request to {s} with timeout {d}ms", .{ subject, timeout_ms });
         }
 
-        // 1. Create unique inbox
-        const reply_subject = try inbox.newInbox(self.allocator);
+        // Ensure response system is initialized (without mutex held)
+        try self.response_manager.ensureInitialized(self);
+
+        // Create request
+        const handle = try self.response_manager.createRequest();
+        defer self.response_manager.cleanupRequest(handle);
+
+        // Get reply subject and send request
+        const reply_subject = try self.response_manager.getReplySubject(self.allocator, handle);
         defer self.allocator.free(reply_subject);
-
-        // 2. Subscribe to inbox
-        const sub = try self.subscribeSync(reply_subject);
-        defer {
-            self.unsubscribe(sub) catch |err| {
-                log.warn("Failed to unsubscribe from inbox: {}", .{err});
-            };
-            sub.deinit();
-        }
-
-        // 3. Publish with reply-to
+        
         try self.publishRequest(subject, reply_subject, data);
 
-        // 4. Wait for response with timeout
-        return sub.nextMsg(timeout_ms);
+        // Wait for response
+        return self.response_manager.waitForResponse(handle, timeout_ms * std.time.ns_per_ms);
     }
 
     fn processInitialHandshake(self: *Self) !void {
@@ -664,7 +710,7 @@ pub const Connection = struct {
         defer buffer.deinit();
 
         // Calculate effective no_responders: enable if server supports headers
-        const effective_no_responders = self.options.no_responders or self.server_info.headers;
+        const no_responders = self.options.no_responders and self.server_info.headers;
 
         // Get client name from options or use default
         const client_name = self.options.name orelse build_options.name;
@@ -674,7 +720,7 @@ pub const Connection = struct {
             .verbose = self.options.verbose,
             .pedantic = false,
             .headers = true,
-            .no_responders = effective_no_responders,
+            .no_responders = no_responders,
             .name = client_name,
             .lang = build_options.lang,
             .version = build_options.version,
@@ -888,9 +934,19 @@ pub const Connection = struct {
             // Log before consuming message (to avoid use-after-free)
             log.debug("Delivering message to subscription {d}: {s}", .{ msg_arg.sid, message.data });
 
-            if (s.handler) |handler| {
-                // Execute callback without holding locks
-                handler.call(message);
+            if (s.handler) |_| {
+                // Async subscription - dispatch to assigned dispatcher
+                if (s.dispatcher) |dispatcher| {
+                    dispatcher.enqueue(s, message) catch |err| {
+                        log.err("Failed to dispatch message for sid {d}: {}", .{ msg_arg.sid, err });
+                        message.deinit();
+                        return;
+                    };
+                } else {
+                    log.err("Async subscription {} has no assigned dispatcher", .{msg_arg.sid});
+                    message.deinit();
+                    return;
+                }
             } else {
                 // Sync subscription - queue message
                 s.messages.push(message) catch |err| {
