@@ -50,7 +50,7 @@ var counter: u32 = 0;
 const sub = try nc.subscribe("hello", messageHandler, .{&counter});
 ```
 
-### Request/Reply
+### Send Request
 
 ```zig
 // Send request and wait for reply with 5 second timeout
@@ -58,6 +58,29 @@ const reply = try nc.request("help", "need assistance", 5000);
 defer reply.deinit();
 
 std.debug.print("Received reply: {s}\n", .{reply.data});
+```
+
+### Request Handling
+
+```zig
+// Define request handler
+fn helpHandler(msg: *nats.Message, context: *MyContext) void {
+    defer msg.deinit();
+    
+    // Process the request
+    const request_data = msg.data;
+    std.debug.print("Received request: {s}\n", .{request_data});
+    
+    // Send reply
+    const response = "Here's your help response";
+    msg.reply(response) catch |err| {
+        std.debug.print("Failed to send reply: {}\n", .{err});
+    };
+}
+
+// Subscribe to handle requests
+var context = MyContext{};
+const sub = try nc.subscribe("help", helpHandler, .{&context});
 ```
 
 ### JetStream Stream Management
