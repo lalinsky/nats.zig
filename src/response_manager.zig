@@ -33,24 +33,27 @@ pub const ResponseInfo = struct {
         return self.result.?;
     }
 
-    pub fn complete(self: *ResponseInfo, msg: *Message) void {
+    pub fn complete(self: *ResponseInfo, msg: *Message) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.result == null) {
-            self.result = msg;
-            self.condition.signal();
+        if (self.result != null) {
+            return error.AlreadyCompleted;
         }
+        self.result = msg;
+        self.condition.signal();
     }
 
-    pub fn completeWithError(self: *ResponseInfo, err: anyerror) void {
+    pub fn completeWithError(self: *ResponseInfo, err: anyerror) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.result == null) {
-            self.result = err;
-            self.condition.signal();
+        if (self.result != null) {
+            return error.AlreadyCompleted;
         }
+
+        self.result = err;
+        self.condition.signal();
     }
 };
 
@@ -167,8 +170,8 @@ pub const ResponseManager = struct {
     }
 
     fn responseHandler(self: *ResponseManager, msg: *Message) void {
-        var msg_used = false;
-        defer if (!msg_used) msg.deinit();
+        var own_msg = true;
+        defer if (own_msg) msg.deinit();
 
         const token = self.extractToken(msg.subject) orelse {
             log.warn("Received response with invalid token: {s}", .{msg.subject});
@@ -184,10 +187,10 @@ pub const ResponseManager = struct {
         };
 
         if (msg.isNoResponders()) {
-            resp.completeWithError(error.NoResponders);
+            resp.completeWithError(error.NoResponders) catch return;
         } else {
-            resp.complete(msg);
-            msg_used = true; // Message ownership transferred to response
+            resp.complete(msg) catch return;
+            own_msg = false; // Message ownership transferred to response
         }
     }
 
