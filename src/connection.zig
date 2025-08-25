@@ -274,11 +274,6 @@ pub const Connection = struct {
         log.debug("Acquired global dispatcher pool", .{});
     }
 
-    /// Helper for ResponseManager - get next subscription ID
-    fn getNextSubId(self: *Self) u64 {
-        return self.next_sid.fetchAdd(1, .monotonic);
-    }
-
 
     pub fn connect(self: *Self, url: []const u8) !void {
         if (self.status != .disconnected) {
