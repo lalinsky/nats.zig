@@ -656,20 +656,17 @@ pub const Connection = struct {
         try self.response_manager.ensureInitialized(self);
 
         // Create request
-        const request_info = try self.response_manager.createRequest(subject, data);
+        const handle = try self.response_manager.createRequest(subject, data);
+        defer self.response_manager.cleanupRequest(handle);
 
-        defer {
-            self.allocator.free(request_info.reply_subject);
-            // Remove from token map (this also frees the token memory)
-            self.response_manager.cleanupRequest(request_info.token);
-            self.allocator.destroy(request_info.response_info);
-        }
-
-        // Send request (publishRequest will acquire its own mutex)
-        try self.publishRequest(subject, request_info.reply_subject, data);
+        // Get reply subject and send request
+        const reply_subject = try self.response_manager.getReplySubject(handle);
+        defer self.allocator.free(reply_subject);
+        
+        try self.publishRequest(subject, reply_subject, data);
 
         // Wait for response
-        return request_info.response_info.timedWait(timeout_ms * std.time.ns_per_ms);
+        return self.response_manager.waitForResponse(handle, timeout_ms * std.time.ns_per_ms);
     }
 
     fn processInitialHandshake(self: *Self) !void {

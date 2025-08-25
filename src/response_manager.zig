@@ -10,51 +10,11 @@ const ConnectionError = @import("connection.zig").ConnectionError;
 
 const log = std.log.scoped(.response_manager);
 
-pub const ResponseInfo = struct {
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
-    result: ?anyerror!*Message = null,
+// Define explicit type for response results
+const ResponseResult = anyerror!*Message;
 
-    pub fn timedWait(self: *ResponseInfo, timeout_ns: u64) !*Message {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        var timer = std.time.Timer.start() catch unreachable;
-        while (self.result == null) {
-            const elapsed_ns = timer.read();
-            if (elapsed_ns >= timeout_ns) {
-                return error.Timeout;
-            }
-            const remaining_ns = timeout_ns - elapsed_ns;
-            try self.condition.timedWait(&self.mutex, remaining_ns);
-        }
-
-        // Return the stored result (error or message)
-        return self.result.?;
-    }
-
-    pub fn complete(self: *ResponseInfo, msg: *Message) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.result != null) {
-            return error.AlreadyCompleted;
-        }
-        self.result = msg;
-        self.condition.signal();
-    }
-
-    pub fn completeWithError(self: *ResponseInfo, err: anyerror) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.result != null) {
-            return error.AlreadyCompleted;
-        }
-
-        self.result = err;
-        self.condition.signal();
-    }
+pub const RequestHandle = struct {
+    rid: u64,
 };
 
 const INBOX_BASE_PREFIX = "_INBOX.";
@@ -69,11 +29,17 @@ pub const ResponseManager = struct {
     resp_sub_prefix: []u8 = &.{},
 
     resp_mux: ?*Subscription = null,
-    resp_map: std.StringHashMapUnmanaged(*ResponseInfo) = .{},
-    resp_mutex: std.Thread.Mutex = .{},
+    
+    // Single shared sync primitives instead of per-request
+    pending_mutex: std.Thread.Mutex = .{},
+    pending_condition: std.Thread.Condition = .{},
+    is_closed: bool = false,
+    
+    // Map of rid -> result (null means still pending)
+    pending_responses: std.AutoHashMapUnmanaged(u64, ?ResponseResult) = .{},
 
-    // Token generation state (simple counter)
-    token_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    // Request ID generation state (simple counter)
+    rid_counter: u64 = 0,
 
     pub fn init(allocator: Allocator) ResponseManager {
         return ResponseManager{
@@ -82,26 +48,38 @@ pub const ResponseManager = struct {
     }
 
     pub fn deinit(self: *ResponseManager) void {
-        // No need to free inbox_prefix - it's now a static buffer
-
         // Subscription teardown is handled by Connection; just forget our pointer.
         self.resp_mux = null;
 
-        // Clean up any remaining tokens (keys only, ResponseInfo is managed elsewhere)
-        if (self.resp_map.count() > 0) {
-            log.warn("Cleaning up {} remaining token keys during shutdown", .{self.resp_map.count()});
-            var iterator = self.resp_map.iterator();
+        // Signal shutdown and wake up all waiters
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
+        
+        self.is_closed = true;
+        self.pending_condition.broadcast(); // Wake up all waiters
+        
+        // Clean up any remaining pending responses
+        if (self.pending_responses.count() > 0) {
+            log.warn("Cleaning up {} remaining pending responses during shutdown", .{self.pending_responses.count()});
+            var iterator = self.pending_responses.iterator();
             while (iterator.next()) |entry| {
-                const key = entry.key_ptr.*;
-                self.allocator.free(key);
+                // If there's a pending message, clean it up
+                if (entry.value_ptr.*) |result| {
+                    if (result) |msg| {
+                        msg.deinit();
+                    } else |_| {
+                        // Error result, nothing to clean up
+                    }
+                }
             }
         }
-        self.resp_map.deinit(self.allocator);
+        
+        self.pending_responses.deinit(self.allocator);
     }
 
     pub fn ensureInitialized(self: *ResponseManager, connection: *Connection) !void {
-        self.resp_mutex.lock();
-        defer self.resp_mutex.unlock();
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
 
         // Already initialized by another thread
         if (self.resp_mux != null) return;
@@ -121,47 +99,65 @@ pub const ResponseManager = struct {
         log.debug("Initialized response manager with prefix: {s}, wildcard: {s}", .{ self.resp_sub_prefix, subject });
     }
 
-    pub fn createRequest(self: *ResponseManager, subject: []const u8, _: []const u8) !struct {
-        response_info: *ResponseInfo,
-        reply_subject: []u8,
-        token: []u8
-    } {
-        const token = try self.generateToken();
-        errdefer self.allocator.free(token);
+    pub fn createRequest(self: *ResponseManager, subject: []const u8, _: []const u8) !RequestHandle {
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
+        
+        if (self.is_closed) return error.ConnectionClosed;
+        
+        const rid = self.rid_counter;
+        self.rid_counter += 1;
+        
+        try self.pending_responses.put(self.allocator, rid, null);
 
-        const reply_subject = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.resp_sub_prefix, token });
-        errdefer self.allocator.free(reply_subject);
-
-        const response_info = try self.allocator.create(ResponseInfo);
-        errdefer self.allocator.destroy(response_info);
-
-        response_info.* = .{};
-
-        self.resp_mutex.lock();
-        defer self.resp_mutex.unlock();
-        try self.resp_map.put(self.allocator, token, response_info);
-
-        log.debug("Created request for {s}, reply: {s}, token: {s}", .{ subject, reply_subject, token });
-        return .{
-            .response_info = response_info,
-            .reply_subject = reply_subject,
-            .token = token
-        };
+        log.debug("Created request for {s}, rid: {d}", .{ subject, rid });
+        
+        return RequestHandle{ .rid = rid };
     }
 
-    pub fn cleanupRequest(self: *ResponseManager, token: []const u8) void {
-        self.resp_mutex.lock();
-        defer self.resp_mutex.unlock();
-        if (self.resp_map.fetchRemove(token)) |entry| {
-            log.debug("Cleaned up request map entry with token: {s}", .{entry.key});
-            self.allocator.free(entry.key);
-            // ResponseInfo is destroyed by the caller (request()), after wait() returns.
+    pub fn getReplySubject(self: *ResponseManager, handle: RequestHandle) ![]u8 {
+        return try std.fmt.allocPrint(self.allocator, "{s}{d}", .{ self.resp_sub_prefix, handle.rid });
+    }
+
+    pub fn cleanupRequest(self: *ResponseManager, handle: RequestHandle) void {
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
+        
+        if (self.pending_responses.fetchRemove(handle.rid)) |entry| {
+            log.debug("Cleaned up request map entry with rid: {d}", .{handle.rid});
+            
+            // If there's a pending message, clean it up
+            if (entry.value) |result| {
+                if (result) |msg| {
+                    msg.deinit();
+                } else |_| {
+                    // Error result, nothing to clean up
+                }
+            }
         }
     }
 
-    fn generateToken(self: *ResponseManager) ![]u8 {
-        const value = self.token_counter.fetchAdd(1, .monotonic);
-        return try std.fmt.allocPrint(self.allocator, "{d}", .{value});
+    pub fn waitForResponse(self: *ResponseManager, handle: RequestHandle, timeout_ns: u64) !*Message {
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
+        
+        if (self.is_closed) return error.ConnectionClosed;
+        
+        const entry = self.pending_responses.getEntry(handle.rid) orelse {
+            return error.InvalidToken;
+        };
+        
+        var timer = std.time.Timer.start() catch unreachable;
+        while (entry.value_ptr.* == null and !self.is_closed) {
+            const elapsed = timer.read();
+            if (elapsed >= timeout_ns) return error.Timeout;
+            
+            try self.pending_condition.timedWait(&self.pending_mutex, timeout_ns - elapsed);
+        }
+        
+        if (self.is_closed) return error.ConnectionClosed;
+        
+        return entry.value_ptr.*.?;
     }
 
     fn responseHandlerWrapper(msg: *Message, manager: *ResponseManager) void {
@@ -173,30 +169,34 @@ pub const ResponseManager = struct {
         var own_msg = true;
         defer if (own_msg) msg.deinit();
 
-        const token = self.extractToken(msg.subject) orelse {
-            log.warn("Received response with invalid token: {s}", .{msg.subject});
+        const rid = self.extractRid(msg.subject) orelse {
+            log.warn("Received response with invalid rid: {s}", .{msg.subject});
             return;
         };
 
-        self.resp_mutex.lock();
-        defer self.resp_mutex.unlock();
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
 
-        const resp = self.resp_map.get(token) orelse {
-            log.warn("Received response for unknown token: {s}", .{msg.subject});
+        const entry = self.pending_responses.getEntry(rid) orelse {
+            log.warn("Received response for unknown rid: {d}", .{rid});
             return;
         };
 
         if (msg.isNoResponders()) {
-            resp.completeWithError(error.NoResponders) catch return;
+            entry.value_ptr.* = error.NoResponders;
+            // Keep own_msg = true, so message gets cleaned up
         } else {
-            resp.complete(msg) catch return;
+            entry.value_ptr.* = msg;
             own_msg = false; // Message ownership transferred to response
         }
+        
+        self.pending_condition.broadcast(); // Wake up waiting threads
     }
 
-    fn extractToken(self: *ResponseManager, subject: []const u8) ?[]const u8 {
+    fn extractRid(self: *ResponseManager, subject: []const u8) ?u64 {
         if (std.mem.startsWith(u8, subject, self.resp_sub_prefix)) {
-            return subject[self.resp_sub_prefix.len..];
+            const rid_str = subject[self.resp_sub_prefix.len..];
+            return std.fmt.parseInt(u64, rid_str, 10) catch null;
         }
         return null;
     }
@@ -214,46 +214,31 @@ test "response manager basic functionality" {
     var manager = ResponseManager.init(allocator);
     defer manager.deinit();
 
-    // Test that we can generate tokens
-    const token1 = try manager.generateToken();
-    defer allocator.free(token1);
-    const token2 = try manager.generateToken();
-    defer allocator.free(token2);
+    // Test that we can create request handles with different rids
+    const handle1 = try manager.createRequest("test.subject", "data");
+    defer manager.cleanupRequest(handle1);
+    
+    const handle2 = try manager.createRequest("test.subject", "data");
+    defer manager.cleanupRequest(handle2);
 
-    try testing.expect(!std.mem.eql(u8, token1, token2));
-    try testing.expectEqualStrings("0", token1);
-    try testing.expectEqualStrings("1", token2);
+    try testing.expect(handle1.rid != handle2.rid);
+    try testing.expectEqual(@as(u64, 0), handle1.rid);
+    try testing.expectEqual(@as(u64, 1), handle2.rid);
 }
 
-test "token generation sequence" {
+test "request handle timeout functionality" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
     var manager = ResponseManager.init(allocator);
     defer manager.deinit();
 
-    // Test simple numeric sequence
-    const token1 = try manager.generateToken();
-    defer allocator.free(token1);
-    try testing.expectEqualStrings("0", token1);
-
-    const token2 = try manager.generateToken();
-    defer allocator.free(token2);
-    try testing.expectEqualStrings("1", token2);
-
-    const token3 = try manager.generateToken();
-    defer allocator.free(token3);
-    try testing.expectEqualStrings("2", token3);
-}
-
-test "response info future functionality" {
-    const testing = std.testing;
-
-    var response_info = ResponseInfo{};
+    const handle = try manager.createRequest("test.subject", "data");
+    defer manager.cleanupRequest(handle);
 
     // Test timeout behavior
     const start = std.time.nanoTimestamp();
-    const result = response_info.timedWait(1_000_000); // 1ms timeout (in nanoseconds)
+    const result = manager.waitForResponse(handle, 1_000_000); // 1ms timeout
     const duration = std.time.nanoTimestamp() - start;
 
     try testing.expectError(error.Timeout, result);
