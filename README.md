@@ -6,6 +6,26 @@ A Zig client library for NATS, the cloud-native messaging system.
 
 This project is under active development and is not yet complete. The goal is to be as feature complete as the official NATS client libraries. It is based on the NATS C and Go libraries.
 
+## Installation
+
+1) Add nats.zig as a dependency in your `build.zig.zon`:
+
+```bash
+zig fetch --save "git+https://github.com/lalinsky/nats.zig"
+```
+
+2) In your `build.zig`, add the `nats` module as a dependency to your program:
+
+```zig
+const nats = b.dependency("nats", .{
+    .target = target,
+    .optimize = optimize,
+});
+
+// the executable from your call to b.addExecutable(...)
+exe.root_module.addImport("nats", nats.module("nats"));
+```
+
 ## Examples
 
 ### Connect and Publish
