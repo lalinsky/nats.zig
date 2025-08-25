@@ -2,6 +2,10 @@
 
 A Zig client library for NATS, the cloud-native messaging system.
 
+## Development Status
+
+This project is under active development and is not yet complete. The goal is to be as feature complete as the official NATS client libraries. It is based on concepts from the NATS C and Go libraries.
+
 ## Examples
 
 ### Connect and Publish
