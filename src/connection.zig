@@ -156,7 +156,7 @@ pub const ConnectionOptions = struct {
     reconnect: ReconnectOptions = .{},
     callbacks: ConnectionCallbacks = .{},
     trace: bool = false,
-    no_responders: bool = false,
+    no_responders: bool = true,
 };
 
 pub const Connection = struct {
@@ -700,7 +700,7 @@ pub const Connection = struct {
         defer buffer.deinit();
 
         // Calculate effective no_responders: enable if server supports headers
-        const effective_no_responders = self.options.no_responders or self.server_info.headers;
+        const no_responders = self.options.no_responders and self.server_info.headers;
 
         // Get client name from options or use default
         const client_name = self.options.name orelse build_options.name;
@@ -710,7 +710,7 @@ pub const Connection = struct {
             .verbose = self.options.verbose,
             .pedantic = false,
             .headers = true,
-            .no_responders = effective_no_responders,
+            .no_responders = no_responders,
             .name = client_name,
             .lang = build_options.lang,
             .version = build_options.version,
