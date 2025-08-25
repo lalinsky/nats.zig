@@ -17,6 +17,7 @@ const Connection = @import("connection.zig").Connection;
 const Subscription = @import("subscription.zig").Subscription;
 const subscription_mod = @import("subscription.zig");
 const jetstream_message = @import("jetstream_message.zig");
+const inbox = @import("inbox.zig");
 
 const log = std.log.scoped(.jetstream);
 
@@ -288,11 +289,19 @@ pub const PullSubscription = struct {
     consumer_name: []const u8,
     /// Consumer information
     consumer_info: Result(ConsumerInfo),
+    /// Persistent wildcard inbox subscription
+    inbox_subscription: *Subscription,
+    /// Inbox prefix for reply subjects (e.g., "_INBOX.abc123.")
+    inbox_prefix: []u8,
+    /// Fetch ID counter for unique reply subjects
+    fetch_id_counter: u64 = 0,
     /// Mutex for thread safety
     mutex: std.Thread.Mutex = .{},
     
     pub fn deinit(self: *PullSubscription) void {
         self.consumer_info.deinit();
+        self.inbox_subscription.deinit();
+        self.js.allocator.free(self.inbox_prefix);
         self.js.allocator.destroy(self);
     }
     
@@ -301,6 +310,17 @@ pub const PullSubscription = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         
+        // Generate unique fetch ID and reply subject
+        self.fetch_id_counter += 1;
+        const fetch_id = self.fetch_id_counter;
+        
+        const reply_subject = try std.fmt.allocPrint(
+            self.js.allocator,
+            "{s}{d}",
+            .{ self.inbox_prefix, fetch_id }
+        );
+        defer self.js.allocator.free(reply_subject);
+        
         // Build the pull request subject
         const pull_subject = try std.fmt.allocPrint(
             self.js.allocator,
@@ -308,21 +328,6 @@ pub const PullSubscription = struct {
             .{ self.stream_name, self.consumer_name }
         );
         defer self.js.allocator.free(pull_subject);
-        
-        // Create unique inbox for responses
-        const nuid = @import("nuid.zig");
-        const nuid_str = try nuid.nextString(self.js.allocator);
-        defer self.js.allocator.free(nuid_str);
-        const inbox = try std.fmt.allocPrint(
-            self.js.allocator,
-            "_INBOX.{s}",
-            .{nuid_str}
-        );
-        defer self.js.allocator.free(inbox);
-        
-        // Create synchronous subscription for the inbox
-        const inbox_sub = try self.js.nc.subscribeSync(inbox);
-        defer inbox_sub.deinit();
         
         // Serialize the fetch request to JSON
         const request_json = try std.json.stringifyAlloc(self.js.allocator, request, .{});
@@ -337,7 +342,7 @@ pub const PullSubscription = struct {
         defer self.js.allocator.free(api_subject);
         
         // Send the pull request with reply subject
-        try self.js.nc.publishRequest(api_subject, inbox, request_json);
+        try self.js.nc.publishRequest(api_subject, reply_subject, request_json);
         
         // Collect messages
         var messages = std.ArrayList(*JetStreamMessage).init(self.js.allocator);
@@ -349,7 +354,11 @@ pub const PullSubscription = struct {
         
         // Collect messages until batch is complete or timeout
         while (!batch_complete and messages.items.len < request.batch) {
-            if (inbox_sub.nextMsg(timeout_ms)) |raw_msg| {
+            if (self.inbox_subscription.nextMsg(timeout_ms)) |raw_msg| {
+                // JetStream messages arrive with original subjects and ACK reply subjects
+                // The timestamp in the ACK subject ensures messages belong to this fetch request
+                // (timestamps are monotonically increasing and unique per message delivery)
+                
                 // Check for status messages
                 if (raw_msg.headers.get("Status")) |status_values| {
                     if (status_values.items.len > 0) {
@@ -931,6 +940,29 @@ pub const JetStream = struct {
                              consumer_info.value.config.durable_name orelse
                              return error.MissingConsumerName;
 
+        // Generate unique inbox prefix for this pull subscription
+        const inbox_base = try inbox.newInbox(self.allocator);
+        defer self.allocator.free(inbox_base);
+        
+        const inbox_prefix = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}.",
+            .{inbox_base}
+        );
+        errdefer self.allocator.free(inbox_prefix);
+        
+        // Create wildcard subscription subject
+        const wildcard_subject = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}*",
+            .{inbox_prefix}
+        );
+        defer self.allocator.free(wildcard_subject);
+        
+        // Create the persistent wildcard inbox subscription
+        const inbox_subscription = try self.nc.subscribeSync(wildcard_subject);
+        errdefer inbox_subscription.deinit();
+
         // Allocate PullSubscription
         const pull_subscription = try self.allocator.create(PullSubscription);
         pull_subscription.* = PullSubscription{
@@ -938,6 +970,8 @@ pub const JetStream = struct {
             .stream_name = stream_name,
             .consumer_name = consumer_name,
             .consumer_info = consumer_info,
+            .inbox_subscription = inbox_subscription,
+            .inbox_prefix = inbox_prefix,
         };
 
         return pull_subscription;

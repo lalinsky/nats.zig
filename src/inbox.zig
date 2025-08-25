@@ -20,8 +20,9 @@ const INBOX_PREFIX = "_INBOX.";
 /// Generate a unique inbox subject for request/reply pattern
 /// Format: _INBOX.<22-char-nuid>
 pub fn newInbox(allocator: std.mem.Allocator) ![]u8 {
-    const nuid_bytes = nuid.next();
-    return try std.fmt.allocPrint(allocator, "{s}{s}", .{ INBOX_PREFIX, nuid_bytes });
+    var nuid_buf: [nuid.NUID_TOTAL_LEN]u8 = undefined;
+    nuid.next(&nuid_buf);
+    return try std.fmt.allocPrint(allocator, "{s}{s}", .{ INBOX_PREFIX, nuid_buf });
 }
 
 test "inbox generation" {
