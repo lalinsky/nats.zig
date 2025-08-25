@@ -6,6 +6,7 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const STATUS_HDR = "Status";
 const DESCRIPTION_HDR = "Description";
 const HDR_STATUS_NO_RESP_503 = "503";
+const NATS_STATUS_PREFIX = "NATS/1.0";
 
 // Simple, idiomatic Zig message implementation using ArenaAllocator
 pub const Message = struct {
@@ -113,9 +114,8 @@ pub const Message = struct {
         const arena_allocator = self.arena.allocator();
         
         // Check if we have an inlined status (like "NATS/1.0 503" or "NATS/1.0 503 No Responders")
-        const nats_prefix = "NATS/1.0";
-        if (std.mem.startsWith(u8, first_line, nats_prefix) and first_line.len > nats_prefix.len) {
-            const status_part = std.mem.trim(u8, first_line[nats_prefix.len..], " \t");
+        if (std.mem.startsWith(u8, first_line, NATS_STATUS_PREFIX) and first_line.len > NATS_STATUS_PREFIX.len) {
+            const status_part = std.mem.trim(u8, first_line[NATS_STATUS_PREFIX.len..], " \t");
             if (status_part.len > 0) {
                 // Extract status code (first 3 characters if available)
                 const status_len = 3; // Like Go's statusLen
@@ -135,16 +135,14 @@ pub const Message = struct {
                 }
                 
                 // Add Status header directly to avoid circular dependency
-                const status_copy = try arena_allocator.dupe(u8, status);
-                var status_list = ArrayListUnmanaged([]const u8){};
-                try status_list.append(arena_allocator, status_copy);
+                var status_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
+                status_list.appendAssumeCapacity(status);
                 try self.headers.put(arena_allocator, STATUS_HDR, status_list);
                 
                 // Add Description header if present
                 if (description) |desc| {
-                    const desc_copy = try arena_allocator.dupe(u8, desc);
-                    var desc_list = ArrayListUnmanaged([]const u8){};
-                    try desc_list.append(arena_allocator, desc_copy);
+                    var desc_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
+                    desc_list.appendAssumeCapacity(desc);
                     try self.headers.put(arena_allocator, DESCRIPTION_HDR, desc_list);
                 }
             }
@@ -238,7 +236,7 @@ pub const Message = struct {
         
         if (self.headers.count() == 0) return;
         
-        try writer.writeAll("NATS/1.0\r\n");
+        try writer.writeAll(NATS_STATUS_PREFIX ++ "\r\n");
         
         var iter = self.headers.iterator();
         while (iter.next()) |entry| {

@@ -11,37 +11,35 @@ const log = std.log.scoped(.response_manager);
 pub const ResponseInfo = struct {
     mutex: std.Thread.Mutex = .{},
     condition: std.Thread.Condition = .{},
-    message: ?*Message = null,
+    result: ?anyerror!?*Message = null,
     completed: bool = false,
-    error_status: ?anyerror = null,
-    timeout_expired: bool = false,
     
     pub fn wait(self: *ResponseInfo, timeout_ms: u64) !?*Message {
         self.mutex.lock();
         defer self.mutex.unlock();
         
-        const deadline = std.time.nanoTimestamp() + (timeout_ms * 1_000_000);
+        const deadline = std.time.nanoTimestamp();
+        const timeout_ns = timeout_ms * std.time.ns_per_ms;
+        const end_time = deadline + @as(i64, @intCast(timeout_ns));
         
-        while (!self.completed and !self.timeout_expired and self.error_status == null) {
+        while (!self.completed) {
             const now = std.time.nanoTimestamp();
-            if (now >= deadline) {
-                self.timeout_expired = true;
-                break;
+            if (now >= end_time) {
+                return null; // timeout
             }
             
-            const remaining_ns = @as(u64, @intCast(deadline - now));
+            const remaining_ns = @as(u64, @intCast(end_time - now));
             self.condition.timedWait(&self.mutex, remaining_ns) catch {
-                self.timeout_expired = true;
-                break;
+                return null; // timeout
             };
         }
         
-        // Check if an error occurred
-        if (self.error_status) |err| {
-            return err;
+        // Return the stored result (error or message)
+        if (self.result) |result| {
+            return result;
         }
         
-        return self.message;
+        return null;
     }
     
     pub fn complete(self: *ResponseInfo, msg: *Message) void {
@@ -49,7 +47,7 @@ pub const ResponseInfo = struct {
         defer self.mutex.unlock();
         
         if (!self.completed) {
-            self.message = msg;
+            self.result = msg;
             self.completed = true;
             self.condition.signal();
         }
@@ -60,21 +58,24 @@ pub const ResponseInfo = struct {
         defer self.mutex.unlock();
         
         if (!self.completed) {
-            self.error_status = err;
+            self.result = err;
             self.completed = true;
             self.condition.signal();
         }
     }
 };
 
+const INBOX_PREFIX_LEN = 30; // "_INBOX.{22-char-nuid}." = 7 + 22 + 1 = 30
+
 pub const ResponseManager = struct {
     allocator: Allocator,
     
-    // Response handling state
-    resp_sub_prefix: ?[]u8 = null,
-    resp_sub_len: usize = 0,
+    // Response handling state (static buffer for inbox prefix)
+    resp_sub_prefix: [INBOX_PREFIX_LEN]u8 = undefined,
+    resp_sub_prefix_len: u8 = 0,
     resp_mux: ?*Subscription = null,
-    resp_map: std.HashMap([]const u8, *ResponseInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    resp_map: std.StringHashMapUnmanaged(*ResponseInfo),
+    resp_mutex: std.Thread.Mutex = .{},
     
     // Token generation state (simple counter)
     token_counter: u64 = 0,
@@ -82,52 +83,75 @@ pub const ResponseManager = struct {
     pub fn init(allocator: Allocator) ResponseManager {
         return ResponseManager{
             .allocator = allocator,
-            .resp_map = std.HashMap([]const u8, *ResponseInfo, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .resp_map = .{},
         };
     }
     
     pub fn deinit(self: *ResponseManager) void {
-        if (self.resp_sub_prefix) |prefix| {
-            self.allocator.free(prefix);
-        }
+        // No need to free resp_sub_prefix - it's now a static buffer
         
-        if (self.resp_mux) |sub| {
-            sub.deinit();
-        }
+        // Subscription teardown is handled by Connection; just forget our pointer.
+        self.resp_mux = null;
         
         // Clean up any remaining response infos
         var iterator = self.resp_map.iterator();
         while (iterator.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
+            // If a message is still attached (e.g., shutdown during in-flight requests), free it.
+            if (entry.value_ptr.*.result) |result| {
+                if (result) |maybe_msg| {
+                    if (maybe_msg) |msg| {
+                        msg.deinit();
+                    }
+                } else |_| {
+                    // Error case, nothing to clean up
+                }
+            }
             self.allocator.destroy(entry.value_ptr.*);
         }
-        self.resp_map.deinit();
+        self.resp_map.deinit(self.allocator);
     }
     
     pub fn ensureInitialized(self: *ResponseManager, connection: anytype) !void {
+        // Use a simple check first (without lock for performance)
         if (self.resp_mux != null) return; // Already initialized
         
-        // Generate unique inbox prefix
-        const base_inbox = try inbox.newInbox(self.allocator);
-        defer self.allocator.free(base_inbox);
+        // Double-check with lock to prevent race conditions
+        self.resp_mutex.lock();
+        defer self.resp_mutex.unlock();
+        if (self.resp_mux != null) return; // Already initialized by another thread
         
-        self.resp_sub_prefix = try std.fmt.allocPrint(self.allocator, "{s}.", .{base_inbox});
-        self.resp_sub_len = self.resp_sub_prefix.?.len - 1;
+        // Generate unique inbox prefix using static buffer
+        const nuid_bytes = @import("nuid.zig").next();
+        const prefix_slice = std.fmt.bufPrint(&self.resp_sub_prefix, "_INBOX.{s}.", .{nuid_bytes}) catch unreachable;
+        self.resp_sub_prefix_len = @intCast(prefix_slice.len);
         
-        // Create wildcard subscription
-        const wildcard_subject = try std.fmt.allocPrint(self.allocator, "{s}*", .{self.resp_sub_prefix.?});
-        defer self.allocator.free(wildcard_subject);
+        // Create wildcard subscription using a temporary buffer
+        var wildcard_buffer: [INBOX_PREFIX_LEN + 1]u8 = undefined;
+        const wildcard_slice = std.fmt.bufPrint(&wildcard_buffer, "{s}*", .{self.getPrefix()}) catch unreachable;
+        const wildcard_subject = wildcard_slice;
         
-        // Create single shared subscription with response handler
-        const handler = MsgHandler{
-            .ptr = self,
-            .callFn = responseHandler,
-            .cleanupFn = responseCleanup,
+        // Temporarily release mutex for subscription creation
+        self.resp_mutex.unlock();
+        const subscription = connection.subscribe(wildcard_subject, responseHandlerWrapper, .{self}) catch |err| {
+            self.resp_mutex.lock();
+            return err;
         };
+        self.resp_mutex.lock();
         
-        self.resp_mux = try connection.subscribeInternal(wildcard_subject, handler);
+        // Final check to ensure we didn't race with another thread
+        if (self.resp_mux != null) {
+            // Another thread beat us to it, clean up our subscription
+            // (The connection will handle cleanup when it's torn down)
+            return;
+        }
         
-        log.debug("Initialized response manager with prefix: {s}, wildcard: {s}", .{ self.resp_sub_prefix.?, wildcard_subject });
+        self.resp_mux = subscription;
+        log.debug("Initialized response manager with prefix: {s}, wildcard: {s}", .{ self.getPrefix(), wildcard_subject });
+    }
+    
+    fn getPrefix(self: *const ResponseManager) []const u8 {
+        return self.resp_sub_prefix[0..self.resp_sub_prefix_len];
     }
     
     pub fn createRequest(self: *ResponseManager, subject: []const u8, _: []const u8) !struct { 
@@ -145,9 +169,11 @@ pub const ResponseManager = struct {
         const token_copy = try self.allocator.dupe(u8, token);
         errdefer self.allocator.free(token_copy);
         
-        try self.resp_map.put(token_copy, response_info);
+        self.resp_mutex.lock();
+        defer self.resp_mutex.unlock();
+        try self.resp_map.put(self.allocator, token_copy, response_info);
         
-        const reply_subject = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.resp_sub_prefix.?, token });
+        const reply_subject = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.getPrefix(), token });
         
         log.debug("Created request for {s}, reply: {s}, token: {s}", .{ subject, reply_subject, token });
         
@@ -159,10 +185,12 @@ pub const ResponseManager = struct {
     }
     
     pub fn cleanupRequest(self: *ResponseManager, token: []const u8) void {
+        self.resp_mutex.lock();
+        defer self.resp_mutex.unlock();
         if (self.resp_map.fetchRemove(token)) |entry| {
             self.allocator.free(entry.key);
-            self.allocator.destroy(entry.value);
-            log.debug("Cleaned up request with token: {s}", .{token});
+            // ResponseInfo is destroyed by the caller (request()), after wait() returns.
+            log.debug("Cleaned up request map entry with token: {s}", .{token});
         }
     }
     
@@ -171,46 +199,50 @@ pub const ResponseManager = struct {
         return try std.fmt.allocPrint(self.allocator, "{d}", .{self.token_counter});
     }
     
-    fn responseHandler(ptr: *anyopaque, msg: *Message) void {
-        const self: *ResponseManager = @ptrCast(@alignCast(ptr));
+    fn responseHandlerWrapper(msg: *Message, manager: *ResponseManager) void {
+        // Regular subscribe handler wrapper
+        manager.responseHandler(msg);
+    }
+    
+    fn responseHandler(self: *ResponseManager, msg: *Message) void {        
+        log.debug("Response handler received message on: {s} (prefix: {s})", .{ msg.subject, self.getPrefix() });
         
-        log.debug("Response handler received message on: {s} (prefix: {s})", .{ msg.subject, self.resp_sub_prefix.? });
-        
-        if (extractResponseToken(msg.subject, self.resp_sub_prefix.?)) |token| {
+        if (extractResponseToken(msg.subject, self.getPrefix())) |token| {
             log.debug("Extracted token: '{s}'", .{token});
-            if (self.resp_map.get(token)) |response_info| {
+            self.resp_mutex.lock();
+            const response_info = self.resp_map.get(token);
+            self.resp_mutex.unlock();
+            
+            if (response_info) |ri| {
                 log.debug("Found response info for token: {s}, completing request", .{token});
                 
                 // Check if this is a "No Responders" error message
                 if (msg.isNoResponders()) {
                     log.debug("Received No Responders error, completing with error", .{});
                     msg.deinit(); // Clean up message since we're not passing it along
-                    response_info.completeWithError(ConnectionError.NoResponders);
+                    ri.completeWithError(ConnectionError.NoResponders);
                 } else {
-                    response_info.complete(msg);
+                    ri.complete(msg);
                 }
                 return;
             } else {
                 log.warn("No response info found for token: '{s}', map size: {}", .{ token, self.resp_map.count() });
                 // Debug: print all keys in map
+                self.resp_mutex.lock();
                 var iterator = self.resp_map.iterator();
                 while (iterator.next()) |entry| {
                     log.debug("Map contains key: '{s}'", .{entry.key_ptr.*});
                 }
+                self.resp_mutex.unlock();
             }
         } else {
-            log.warn("Could not extract token from subject: {s}, expected prefix: {s}", .{ msg.subject, self.resp_sub_prefix.? });
+            log.warn("Could not extract token from subject: {s}, expected prefix: {s}", .{ msg.subject, self.getPrefix() });
         }
         
         // No one waiting, clean up message
         msg.deinit();
     }
     
-    fn responseCleanup(ptr: *anyopaque, allocator: Allocator) void {
-        _ = ptr;
-        _ = allocator;
-        // Nothing to cleanup for the handler context
-    }
     
     fn extractResponseToken(subject: []const u8, prefix: []const u8) ?[]const u8 {
         if (std.mem.startsWith(u8, subject, prefix)) {
@@ -276,5 +308,4 @@ test "response info future functionality" {
     
     try testing.expectEqual(@as(?*Message, null), result);
     try testing.expect(duration >= 1_000_000); // At least 1ms passed
-    try testing.expect(response_info.timeout_expired);
 }

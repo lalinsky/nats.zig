@@ -279,31 +279,6 @@ pub const Connection = struct {
         return self.next_sid.fetchAdd(1, .monotonic);
     }
 
-    /// Helper for ResponseManager - create internal subscription
-    pub fn subscribeInternal(self: *Self, subject: []const u8, handler: MsgHandler) !*Subscription {
-        // Must be called with mutex held
-        const sid = self.getNextSubId();
-        const sub = try Subscription.init(self.allocator, sid, subject, handler);
-        errdefer sub.deinit();
-
-        // Assign dispatcher for async subscription (round-robin like C library)
-        try self.ensureDispatcherPool();
-        sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
-
-        // Add to subscriptions map
-        self.subs_mutex.lock();
-        defer self.subs_mutex.unlock();
-        try self.subscriptions.put(sid, sub);
-
-        // Send SUB command via buffer
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-        try buffer.writer().print("SUB {s} {d}\r\n", .{ subject, sid });
-        try self.bufferWrite(buffer.items);
-
-        log.debug("Created internal subscription to {s} with sid {d}", .{ subject, sid });
-        return sub;
-    }
 
     pub fn connect(self: *Self, url: []const u8) !void {
         if (self.status != .disconnected) {
@@ -682,20 +657,21 @@ pub const Connection = struct {
             log.debug("Sending request to {s} with timeout {d}ms", .{ subject, timeout_ms });
         }
 
-        // Ensure response system is initialized
-        self.mutex.lock();
+        // Ensure response system is initialized (without mutex held)
         try self.response_manager.ensureInitialized(self);
-        self.mutex.unlock();
 
         // Create request
         self.mutex.lock();
         const request_info = try self.response_manager.createRequest(subject, data);
+        self.mutex.unlock();
+
         defer {
             self.allocator.free(request_info.reply_subject);
             self.allocator.free(request_info.token);
+            // Remove from token map first, then reclaim the ResponseInfo object.
             self.response_manager.cleanupRequest(request_info.token);
+            self.allocator.destroy(request_info.response_info);
         }
-        self.mutex.unlock();
 
         // Send request (publishRequest will acquire its own mutex)
         try self.publishRequest(subject, request_info.reply_subject, data);
