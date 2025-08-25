@@ -49,8 +49,8 @@ test "subscription timeout" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    const sub = try Subscription.init(allocator, 1, "test.subject");
-    defer sub.deinit(allocator);
+    const sub = try Subscription.init(allocator, 1, "test.subject", null);
+    defer sub.deinit();
     
     // Test immediate timeout (should return null)
     const start = std.time.nanoTimestamp();
@@ -83,8 +83,8 @@ test "unsubscribe functionality" {
     defer conn.deinit();
     
     // Create a subscription (but we're not connected, so this should work in memory)
-    const sub = try Subscription.init(allocator, 1, "test.subject");
-    defer sub.deinit(allocator);
+    const sub = try Subscription.init(allocator, 1, "test.subject", null);
+    defer sub.deinit();
     
     // Test that unsubscribe fails when disconnected
     const result = conn.unsubscribe(sub);

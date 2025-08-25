@@ -6,6 +6,7 @@ const nats = @import("nats");
 // Import all test modules
 pub const minimal_tests = @import("minimal_test.zig");
 pub const headers_tests = @import("headers_test.zig");
+pub const core_request_reply_tests = @import("core_request_reply_test.zig");
 // pub const reconnection_tests = @import("reconnection_test.zig");
 pub const jetstream_tests = @import("jetstream_test.zig");
 pub const jetstream_stream_tests = @import("jetstream_stream_test.zig");

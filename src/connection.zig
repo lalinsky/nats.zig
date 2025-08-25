@@ -19,6 +19,7 @@ const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
 const build_options = @import("build_options");
 const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
+const ResponseManager = @import("response_manager.zig").ResponseManager;
 
 const log = std.log.scoped(.connection);
 
@@ -117,6 +118,7 @@ pub const ConnectionError = error{
     AuthFailed,
     InvalidProtocol,
     OutOfMemory,
+    NoResponders,
 } || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
 
 pub const ConnectionStatus = enum {
@@ -154,7 +156,7 @@ pub const ConnectionOptions = struct {
     reconnect: ReconnectOptions = .{},
     callbacks: ConnectionCallbacks = .{},
     trace: bool = false,
-    no_responders: bool = false,
+    no_responders: bool = true,
 };
 
 pub const Connection = struct {
@@ -208,6 +210,9 @@ pub const Connection = struct {
     // Message dispatching
     dispatcher_pool: ?*DispatcherPool = null,
 
+    // Response management (shared subscription for request/reply)
+    response_manager: ResponseManager,
+
     // Parser
     parser: Parser,
 
@@ -223,6 +228,7 @@ pub const Connection = struct {
             .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
             .write_buffer = WriteBuffer.init(allocator, .{}),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
+            .response_manager = ResponseManager.init(allocator),
             .parser = Parser.init(allocator),
         };
     }
@@ -246,6 +252,9 @@ pub const Connection = struct {
         // Clean up write buffer
         self.write_buffer.deinit();
 
+        // Clean up response manager
+        self.response_manager.deinit();
+
         // Clean up server pool and pending buffer
         self.server_pool.deinit();
         self.pending_buffer.deinit();
@@ -264,6 +273,7 @@ pub const Connection = struct {
 
         log.debug("Acquired global dispatcher pool", .{});
     }
+
 
     pub fn connect(self: *Self, url: []const u8) !void {
         if (self.status != .disconnected) {
@@ -637,29 +647,26 @@ pub const Connection = struct {
         log.debug("Published request to {s} with reply {s}: {s}", .{ subject, reply, data });
     }
 
-    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !?*Message {
+    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !*Message {
         if (self.options.trace) {
             log.debug("Sending request to {s} with timeout {d}ms", .{ subject, timeout_ms });
         }
 
-        // 1. Create unique inbox
-        const reply_subject = try inbox.newInbox(self.allocator);
+        // Ensure response system is initialized (without mutex held)
+        try self.response_manager.ensureInitialized(self);
+
+        // Create request
+        const handle = try self.response_manager.createRequest();
+        defer self.response_manager.cleanupRequest(handle);
+
+        // Get reply subject and send request
+        const reply_subject = try self.response_manager.getReplySubject(self.allocator, handle);
         defer self.allocator.free(reply_subject);
-
-        // 2. Subscribe to inbox
-        const sub = try self.subscribeSync(reply_subject);
-        defer {
-            self.unsubscribe(sub) catch |err| {
-                log.warn("Failed to unsubscribe from inbox: {}", .{err});
-            };
-            sub.deinit();
-        }
-
-        // 3. Publish with reply-to
+        
         try self.publishRequest(subject, reply_subject, data);
 
-        // 4. Wait for response with timeout
-        return sub.nextMsg(timeout_ms);
+        // Wait for response
+        return self.response_manager.waitForResponse(handle, timeout_ms * std.time.ns_per_ms);
     }
 
     fn processInitialHandshake(self: *Self) !void {
@@ -690,7 +697,7 @@ pub const Connection = struct {
         defer buffer.deinit();
 
         // Calculate effective no_responders: enable if server supports headers
-        const effective_no_responders = self.options.no_responders or self.server_info.headers;
+        const no_responders = self.options.no_responders and self.server_info.headers;
 
         // Get client name from options or use default
         const client_name = self.options.name orelse build_options.name;
@@ -700,7 +707,7 @@ pub const Connection = struct {
             .verbose = self.options.verbose,
             .pedantic = false,
             .headers = true,
-            .no_responders = effective_no_responders,
+            .no_responders = no_responders,
             .name = client_name,
             .lang = build_options.lang,
             .version = build_options.version,
