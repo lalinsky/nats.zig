@@ -11,8 +11,7 @@ const log = std.log.scoped(.response_manager);
 pub const ResponseInfo = struct {
     mutex: std.Thread.Mutex = .{},
     condition: std.Thread.Condition = .{},
-    result: ?anyerror!?*Message = null,
-    completed: bool = false,
+    result: ?anyerror!*Message = null,
     
     pub fn wait(self: *ResponseInfo, timeout_ms: u64) !?*Message {
         self.mutex.lock();
@@ -22,7 +21,7 @@ pub const ResponseInfo = struct {
         const timeout_ns = timeout_ms * std.time.ns_per_ms;
         const end_time = deadline + @as(i64, @intCast(timeout_ns));
         
-        while (!self.completed) {
+        while (self.result == null) {
             const now = std.time.nanoTimestamp();
             if (now >= end_time) {
                 return null; // timeout
@@ -35,20 +34,15 @@ pub const ResponseInfo = struct {
         }
         
         // Return the stored result (error or message)
-        if (self.result) |result| {
-            return result;
-        }
-        
-        return null;
+        return self.result.?;
     }
     
     pub fn complete(self: *ResponseInfo, msg: *Message) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         
-        if (!self.completed) {
+        if (self.result == null) {
             self.result = msg;
-            self.completed = true;
             self.condition.signal();
         }
     }
@@ -57,9 +51,8 @@ pub const ResponseInfo = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         
-        if (!self.completed) {
+        if (self.result == null) {
             self.result = err;
-            self.completed = true;
             self.condition.signal();
         }
     }
@@ -93,21 +86,14 @@ pub const ResponseManager = struct {
         // Subscription teardown is handled by Connection; just forget our pointer.
         self.resp_mux = null;
         
-        // Clean up any remaining response infos
-        var iterator = self.resp_map.iterator();
-        while (iterator.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            // If a message is still attached (e.g., shutdown during in-flight requests), free it.
-            if (entry.value_ptr.*.result) |result| {
-                if (result) |maybe_msg| {
-                    if (maybe_msg) |msg| {
-                        msg.deinit();
-                    }
-                } else |_| {
-                    // Error case, nothing to clean up
-                }
+        // Clean up any remaining tokens (keys only, ResponseInfo is managed elsewhere)
+        if (self.resp_map.count() > 0) {
+            log.warn("Cleaning up {} remaining token keys during shutdown", .{self.resp_map.count()});
+            var iterator = self.resp_map.iterator();
+            while (iterator.next()) |entry| {
+                const key = entry.key_ptr.*;
+                self.allocator.free(key);
             }
-            self.allocator.destroy(entry.value_ptr.*);
         }
         self.resp_map.deinit(self.allocator);
     }
