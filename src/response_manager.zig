@@ -52,12 +52,15 @@ pub const ResponseManager = struct {
     }
 
     pub fn deinit(self: *ResponseManager) void {
-        // Subscription teardown is handled by Connection; just forget our pointer.
-        self.resp_mux = null;
-
         // Signal shutdown and wake up all waiters
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
+        
+        // Explicitly release the resp_mux subscription to reduce callback races
+        if (self.resp_mux) |subscription| {
+            subscription.deinit();
+        }
+        self.resp_mux = null;
         
         self.is_closed = true;
         self.pending_condition.broadcast(); // Wake up all waiters
