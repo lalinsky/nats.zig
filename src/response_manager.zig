@@ -167,7 +167,8 @@ pub const ResponseManager = struct {
     }
 
     fn responseHandler(self: *ResponseManager, msg: *Message) void {
-        errdefer msg.deinit();
+        var msg_used = false;
+        defer if (!msg_used) msg.deinit();
 
         const token = self.extractToken(msg.subject) orelse {
             log.warn("Received response with invalid token: {s}", .{msg.subject});
@@ -186,6 +187,7 @@ pub const ResponseManager = struct {
             resp.completeWithError(error.NoResponders);
         } else {
             resp.complete(msg);
+            msg_used = true; // Message ownership transferred to response
         }
     }
 
