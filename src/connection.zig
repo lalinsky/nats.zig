@@ -660,7 +660,7 @@ pub const Connection = struct {
         defer self.response_manager.cleanupRequest(handle);
 
         // Get reply subject and send request
-        const reply_subject = try self.response_manager.getReplySubject(handle);
+        const reply_subject = try self.response_manager.getReplySubject(self.allocator, handle);
         defer self.allocator.free(reply_subject);
         
         try self.publishRequest(subject, reply_subject, data);

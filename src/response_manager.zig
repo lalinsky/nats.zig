@@ -117,8 +117,8 @@ pub const ResponseManager = struct {
         return RequestHandle{ .rid = rid };
     }
 
-    pub fn getReplySubject(self: *ResponseManager, handle: RequestHandle) ![]u8 {
-        return try std.fmt.allocPrint(self.allocator, "{s}{d}", .{ self.resp_sub_prefix, handle.rid });
+    pub fn getReplySubject(self: *ResponseManager, allocator: std.mem.Allocator, handle: RequestHandle) ![]u8 {
+        return try std.fmt.allocPrint(allocator, "{s}{d}", .{ self.resp_sub_prefix, handle.rid });
     }
 
     pub fn cleanupRequest(self: *ResponseManager, handle: RequestHandle) void {
