@@ -231,9 +231,219 @@ const StreamPurgeResponse = struct {
     purged: u64,
 };
 
+/// Request for fetching messages from a pull consumer
+pub const FetchRequest = struct {
+    /// Maximum number of messages to fetch
+    batch: i32 = 1,
+    /// Maximum bytes to fetch (optional)
+    max_bytes: ?i64 = null,
+    /// Request timeout in nanoseconds (default: 30 seconds)
+    expires: u64 = 30_000_000_000,
+    /// Don't wait if no messages are available immediately
+    no_wait: bool = false,
+    /// Heartbeat interval in nanoseconds for long requests
+    idle_heartbeat: ?u64 = null,
+};
+
+/// Batch of messages returned from fetch operation
+pub const MessageBatch = struct {
+    /// Array of JetStream messages
+    messages: []*JetStreamMessage,
+    /// Any error that occurred during fetch
+    error_info: ?anyerror = null,
+    /// Allocator used for cleanup
+    allocator: std.mem.Allocator,
+    
+    pub fn deinit(self: *MessageBatch) void {
+        // Clean up each message individually
+        for (self.messages) |js_msg| {
+            js_msg.deinit();
+        }
+        // Free the messages array
+        self.allocator.free(self.messages);
+    }
+    
+    /// Check if there was an error during the fetch operation
+    pub fn hasError(self: *MessageBatch) bool {
+        return self.error_info != null;
+    }
+    
+    /// Get the error that occurred, if any
+    pub fn getError(self: *MessageBatch) ?anyerror {
+        return self.error_info;
+    }
+};
 
 
 
+
+
+/// JetStream pull subscription
+pub const PullSubscription = struct {
+    /// JetStream context
+    js: *JetStream,
+    /// Stream name
+    stream_name: []const u8,
+    /// Consumer name
+    consumer_name: []const u8,
+    /// Consumer information
+    consumer_info: Result(ConsumerInfo),
+    /// Mutex for thread safety
+    mutex: std.Thread.Mutex = .{},
+    
+    pub fn deinit(self: *PullSubscription) void {
+        self.consumer_info.deinit();
+        self.js.allocator.destroy(self);
+    }
+    
+    /// Fetch a batch of messages from the pull consumer
+    pub fn fetch(self: *PullSubscription, request: FetchRequest) !MessageBatch {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        
+        // Build the pull request subject
+        const pull_subject = try std.fmt.allocPrint(
+            self.js.allocator,
+            "CONSUMER.MSG.NEXT.{s}.{s}",
+            .{ self.stream_name, self.consumer_name }
+        );
+        defer self.js.allocator.free(pull_subject);
+        
+        // Create unique inbox for responses
+        const nuid = @import("nuid.zig");
+        const nuid_str = try nuid.nextString(self.js.allocator);
+        defer self.js.allocator.free(nuid_str);
+        const inbox = try std.fmt.allocPrint(
+            self.js.allocator,
+            "_INBOX.{s}",
+            .{nuid_str}
+        );
+        defer self.js.allocator.free(inbox);
+        
+        // Create synchronous subscription for the inbox
+        const inbox_sub = try self.js.nc.subscribeSync(inbox);
+        defer inbox_sub.deinit();
+        
+        // Serialize the fetch request to JSON
+        const request_json = try std.json.stringifyAlloc(self.js.allocator, request, .{});
+        defer self.js.allocator.free(request_json);
+        
+        // Build the full API subject
+        const api_subject = try std.fmt.allocPrint(
+            self.js.allocator,
+            "{s}{s}",
+            .{ default_api_prefix, pull_subject }
+        );
+        defer self.js.allocator.free(api_subject);
+        
+        // Send the pull request with reply subject
+        try self.js.nc.publishRequest(api_subject, inbox, request_json);
+        
+        // Collect messages
+        var messages = std.ArrayList(*JetStreamMessage).init(self.js.allocator);
+        defer messages.deinit();
+        
+        const timeout_ms = @as(u64, @intCast(request.expires / 1_000_000)); // Convert nanoseconds to milliseconds
+        var batch_complete = false;
+        var fetch_error: ?anyerror = null;
+        
+        // Collect messages until batch is complete or timeout
+        while (!batch_complete and messages.items.len < request.batch) {
+            if (inbox_sub.nextMsg(timeout_ms)) |raw_msg| {
+                // Check for status messages
+                if (raw_msg.headers.get("Status")) |status_values| {
+                    if (status_values.items.len > 0) {
+                        const status_code = status_values.items[0];
+                        
+                        if (std.mem.eql(u8, status_code, "404")) {
+                            // No messages available
+                            raw_msg.deinit();
+                            batch_complete = true;
+                            break;
+                        } else if (std.mem.eql(u8, status_code, "408")) {
+                            // Request timeout
+                            raw_msg.deinit();
+                            fetch_error = error.RequestTimeout;
+                            batch_complete = true;
+                            break;
+                        } else if (std.mem.eql(u8, status_code, "409")) {
+                            // Consumer sequence mismatch
+                            raw_msg.deinit();
+                            fetch_error = error.ConsumerSequenceMismatch;
+                            batch_complete = true;
+                            break;
+                        } else if (std.mem.eql(u8, status_code, "100")) {
+                            // Heartbeat - continue waiting
+                            raw_msg.deinit();
+                            continue;
+                        }
+                    }
+                    // Unknown status code - clean up and continue
+                    raw_msg.deinit();
+                } else {
+                    // This is a regular message - convert to JetStream message
+                    const js_msg_ptr = try jetstream_message.createJetStreamMessage(self.js, raw_msg);
+                    try messages.append(js_msg_ptr);
+                    
+                    // raw_msg is now owned by the JetStreamMessage
+                }
+            } else {
+                // Timeout occurred
+                batch_complete = true;
+            }
+        }
+        
+        // Convert ArrayList to owned slice
+        const messages_slice = try messages.toOwnedSlice();
+        
+        return MessageBatch{
+            .messages = messages_slice,
+            .error_info = fetch_error,
+            .allocator = self.js.allocator,
+        };
+    }
+    
+    /// Convenience method to fetch a single message
+    pub fn next(self: *PullSubscription, timeout_ns: u64) !?*JetStreamMessage {
+        const request = FetchRequest{
+            .batch = 1,
+            .expires = timeout_ns,
+            .no_wait = false,
+        };
+        
+        var batch = try self.fetch(request);
+        defer {
+            // Only free the slice, not the messages since we're returning one
+            if (batch.messages.len > 1) {
+                // Clean up any extra messages
+                for (batch.messages[1..]) |js_msg| {
+                    js_msg.deinit();
+                }
+            }
+            batch.allocator.free(batch.messages);
+        }
+        
+        if (batch.hasError()) {
+            return batch.getError().?;
+        }
+        
+        if (batch.messages.len > 0) {
+            return batch.messages[0];
+        }
+        
+        return null;
+    }
+    
+    /// Convenience method to fetch available messages without waiting
+    pub fn fetchNoWait(self: *PullSubscription, batch_size: i32) !MessageBatch {
+        const request = FetchRequest{
+            .batch = batch_size,
+            .no_wait = true,
+        };
+        
+        return try self.fetch(request);
+    }
+};
 
 /// JetStream push subscription
 pub const JetStreamSubscription = struct {
@@ -700,4 +910,37 @@ pub const JetStream = struct {
         };
         return js_sub;
     }
+
+    /// Create a pull subscription for the specified stream
+    pub fn pullSubscribe(
+        self: *JetStream,
+        stream_name: []const u8,
+        consumer_config: ConsumerConfig
+    ) !*PullSubscription {
+        // Create pull consumer config with appropriate defaults
+        var pull_config = consumer_config;
+        pull_config.deliver_subject = null; // Force null for pull consumers
+        if (pull_config.max_waiting == 0) pull_config.max_waiting = 512; // Default max waiting pulls
+
+        // Create the consumer
+        var consumer_info = try self.addConsumer(stream_name, pull_config);
+        errdefer consumer_info.deinit();
+
+        // Get the consumer name (use name first, then durable_name)
+        const consumer_name = consumer_info.value.config.name orelse 
+                             consumer_info.value.config.durable_name orelse
+                             return error.MissingConsumerName;
+
+        // Allocate PullSubscription
+        const pull_subscription = try self.allocator.create(PullSubscription);
+        pull_subscription.* = PullSubscription{
+            .js = self,
+            .stream_name = stream_name,
+            .consumer_name = consumer_name,
+            .consumer_info = consumer_info,
+        };
+
+        return pull_subscription;
+    }
+
 };

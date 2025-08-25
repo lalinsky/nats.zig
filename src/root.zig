@@ -46,6 +46,11 @@ pub const MsgMetadata = @import("jetstream.zig").MsgMetadata;
 pub const SequencePair = @import("jetstream.zig").SequencePair;
 pub const JetStreamSubscription = @import("jetstream.zig").JetStreamSubscription;
 
+// JetStream Pull Subscription types  
+pub const PullSubscription = @import("jetstream.zig").PullSubscription;
+pub const FetchRequest = @import("jetstream.zig").FetchRequest;
+pub const MessageBatch = @import("jetstream.zig").MessageBatch;
+
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 
 // Test basic functionality
