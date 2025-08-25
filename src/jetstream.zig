@@ -232,6 +232,42 @@ const StreamPurgeResponse = struct {
     purged: u64,
 };
 
+/// Request for $JS.API.STREAM.MSG.GET
+pub const GetMsgRequest = struct {
+    /// Stream sequence number of the message to retrieve, cannot be combined with last_by_subj
+    seq: ?u64 = null,
+    /// Retrieves the last message for a given subject, cannot be combined with seq
+    last_by_subj: ?[]const u8 = null,
+};
+
+/// Request for $JS.API.STREAM.MSG.DELETE
+pub const DeleteMsgRequest = struct {
+    /// Stream sequence number of the message to delete
+    seq: u64,
+    /// Only remove the message, don't securely erase data
+    no_erase: ?bool = null,
+};
+
+/// Response from $JS.API.STREAM.MSG.DELETE
+const MsgDeleteResponse = struct {
+    /// Indicates if the deletion was successful
+    success: bool,
+};
+
+/// Response from $JS.API.STREAM.MSG.GET
+const GetMsgResponse = struct {
+    message: StoredMessage,
+};
+
+/// Stored message data from JetStream
+const StoredMessage = struct {
+    subject: []const u8,
+    seq: u64,
+    time: []const u8,
+    hdrs: ?[]const u8 = null,
+    data: ?[]const u8 = null,
+};
+
 /// Request for fetching messages from a pull consumer
 pub const FetchRequest = struct {
     /// Maximum number of messages to fetch
@@ -294,7 +330,7 @@ pub const PullSubscription = struct {
     /// Fetch a batch of messages from the pull consumer
     pub fn fetch(self: *PullSubscription, batch: usize, timeout_ms: u64) !MessageBatch {
         if (batch == 0) return error.InvalidBatchSize;
-        
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -694,6 +730,110 @@ pub const JetStream = struct {
         defer msg.deinit();
 
         return try self.parseResponse(StreamPurgeResponse, msg);
+    }
+
+    /// Internal function for getting messages from the stream
+    fn getMsgInternal(self: *JetStream, stream_name: []const u8, request: GetMsgRequest) !*Message {
+        // Validate request - must specify either seq or last_by_subj, but not both
+        if (request.seq == null and request.last_by_subj == null) {
+            return error.InvalidGetMessageRequest;
+        }
+        if (request.seq != null and request.last_by_subj != null) {
+            return error.InvalidGetMessageRequest;
+        }
+
+        // Build the subject for the API call
+        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.MSG.GET.{s}", .{stream_name});
+        defer self.allocator.free(subject);
+
+        // Serialize the request to JSON
+        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{});
+        defer self.allocator.free(request_json);
+
+        const resp = try self.sendRequest(subject, request_json);
+        defer resp.deinit();
+
+        // Parse the response to extract the message
+        const parsed_resp = try self.parseResponse(GetMsgResponse, resp);
+        defer parsed_resp.deinit();
+
+        const stored_msg = parsed_resp.value.message;
+
+        // Create empty message and populate it
+        const msg = try Message.initEmpty(self.allocator);
+        errdefer msg.deinit();
+
+        const arena_allocator = msg.arena.allocator();
+
+        // Set basic fields
+        msg.subject = try arena_allocator.dupe(u8, stored_msg.subject);
+        msg.seq = stored_msg.seq;
+
+        // Decode and set data
+        if (stored_msg.data) |data_b64| {
+            const decoder = std.base64.standard.Decoder;
+            const data_len = try decoder.calcSizeForSlice(data_b64);
+            const decoded_data = try arena_allocator.alloc(u8, data_len);
+            try decoder.decode(decoded_data, data_b64);
+            msg.data = decoded_data;
+        }
+
+        // Decode and set headers
+        if (stored_msg.hdrs) |hdrs_b64| {
+            const decoder = std.base64.standard.Decoder;
+            const hdrs_len = try decoder.calcSizeForSlice(hdrs_b64);
+            const decoded_headers = try arena_allocator.alloc(u8, hdrs_len);
+            try decoder.decode(decoded_headers, hdrs_b64);
+            msg.raw_headers = decoded_headers;
+            msg.needs_header_parsing = true;
+        }
+
+        // Parse time from RFC3339 format
+        if (stored_msg.time.len > 0) {
+            // TODO: Parse RFC3339 timestamp like "2023-01-15T14:30:45.123456789Z"
+            // msg.time = ...
+        }
+
+        return msg;
+    }
+
+    /// Gets a message from the stream by sequence number
+    pub fn getMsg(self: *JetStream, stream_name: []const u8, seq: u64) !*Message {
+        return self.getMsgInternal(stream_name, .{ .seq = seq });
+    }
+
+    /// Gets the last message from the stream for a given subject
+    pub fn getLastMsg(self: *JetStream, stream_name: []const u8, subject: []const u8) !*Message {
+        return self.getMsgInternal(stream_name, .{ .last_by_subj = subject });
+    }
+
+    /// Internal function for deleting messages from the stream
+    fn deleteMsgInternal(self: *JetStream, stream_name: []const u8, request: DeleteMsgRequest) !bool {
+        // Build the subject for the API call
+        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.MSG.DELETE.{s}", .{stream_name});
+        defer self.allocator.free(subject);
+
+        // Serialize the request to JSON
+        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{});
+        defer self.allocator.free(request_json);
+
+        const msg = try self.sendRequest(subject, request_json);
+        defer msg.deinit();
+
+        const response = try self.parseResponse(MsgDeleteResponse, msg);
+        defer response.deinit();
+
+        return response.value.success;
+    }
+
+    /// Deletes a message from the stream (marks as deleted, doesn't erase from storage)
+    pub fn deleteMsg(self: *JetStream, stream_name: []const u8, seq: u64) !bool {
+        return self.deleteMsgInternal(stream_name, DeleteMsgRequest{ .seq = seq, .no_erase = true });
+    }
+
+    /// Erases a message from the stream (securely removes from storage)
+    pub fn eraseMsg(self: *JetStream, stream_name: []const u8, seq: u64) !bool {
+        return self.deleteMsgInternal(stream_name, DeleteMsgRequest{ .seq = seq, .no_erase = null });
     }
 
     /// Subscribe to a JetStream push consumer with callback handler

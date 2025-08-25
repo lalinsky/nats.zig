@@ -97,6 +97,30 @@ pub const Message = struct {
         return msg;
     }
 
+    // Create empty message with just arena allocation
+    pub fn initEmpty(allocator: Allocator) !*Self {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+
+        const arena_allocator = arena.allocator();
+        const msg = try arena_allocator.create(Self);
+
+        msg.* = .{
+            .subject = &[_]u8{},
+            .reply = null,
+            .data = &[_]u8{},
+            .headers = .{},
+            .raw_headers = null,
+            .needs_header_parsing = false,
+            .sid = 0,
+            .seq = 0,
+            .time = 0,
+            .arena = arena,
+        };
+
+        return msg;
+    }
+
     pub fn deinit(self: *Self) void {
         // Arena takes care of ALL allocations including the message struct itself!
         self.arena.deinit();
