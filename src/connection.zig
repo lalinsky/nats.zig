@@ -255,10 +255,10 @@ pub const Connection = struct {
             self.dispatcher_pool = null;
         }
 
-        // Clean up subscriptions
+        // Clean up subscriptions - release connection's references first
         var iter = self.subscriptions.iterator();
         while (iter.next()) |entry| {
-            entry.value_ptr.*.deinit();
+            entry.value_ptr.*.release(); // Release connection's ownership reference
         }
         self.subscriptions.deinit();
 
@@ -524,6 +524,7 @@ pub const Connection = struct {
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
         try self.subscriptions.put(sid, sub);
+        sub.retain(); // Connection takes ownership reference
 
         // Send SUB command via buffer
         var buffer = ArrayList(u8).init(self.allocator);
@@ -560,6 +561,7 @@ pub const Connection = struct {
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
         try self.subscriptions.put(sid, sub);
+        sub.retain(); // Connection takes ownership reference
 
         // Send SUB command via buffer
         var buffer = ArrayList(u8).init(self.allocator);
@@ -583,7 +585,9 @@ pub const Connection = struct {
         // Remove from subscriptions map
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
-        _ = self.subscriptions.remove(sub.sid);
+        if (self.subscriptions.remove(sub.sid)) {
+            sub.release(); // Release connection's ownership reference
+        }
 
         // Send UNSUB command
         var buffer = ArrayList(u8).init(self.allocator);
