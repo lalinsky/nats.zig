@@ -234,9 +234,7 @@ pub const JetStream = struct {
         const full_subject = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ default_api_prefix, subject });
         defer self.allocator.free(full_subject);
 
-        return try self.nc.request(full_subject, payload, self.opts.request_timeout_ms) orelse {
-            return error.NoResponse;
-        };
+        return try self.nc.request(full_subject, payload, self.opts.request_timeout_ms);
     }
 
     /// Parse an error response from the server, if present.

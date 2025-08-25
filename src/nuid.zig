@@ -6,7 +6,7 @@ const Mutex = std.Thread.Mutex;
 /// Encoded in base36 for a total of 22 characters
 const NUID_PREFIX_LEN = 12;
 const NUID_SEQUENCE_LEN = 10;
-const NUID_TOTAL_LEN = NUID_PREFIX_LEN + NUID_SEQUENCE_LEN;
+pub const NUID_TOTAL_LEN = NUID_PREFIX_LEN + NUID_SEQUENCE_LEN;
 
 const BASE = 36;
 const DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -37,11 +37,13 @@ const Nuid = struct {
         var random_bytes: [16]u8 = undefined;
         std.crypto.random.bytes(&random_bytes);
 
-        const seq_random = std.mem.readInt(u64, random_bytes[0..8], .little);
-        const inc_random = std.mem.readInt(u64, random_bytes[8..16], .little);
-
-        self.sequence = seq_random % MAX_SEQUENCE;
+        const inc_random = std.mem.readInt(u64, random_bytes[0..8], .little);
         self.increment = MIN_INCREMENT + (inc_random % (MAX_INCREMENT - MIN_INCREMENT + 1));
+        
+        // Ensure sequence + increment doesn't overflow MAX_SEQUENCE
+        const seq_random = std.mem.readInt(u64, random_bytes[8..16], .little);
+        const max_safe_sequence = MAX_SEQUENCE - self.increment;
+        self.sequence = seq_random % max_safe_sequence;
     }
 
     fn next(self: *Nuid, buffer: *[NUID_TOTAL_LEN]u8) void {
@@ -98,15 +100,14 @@ fn encodeBase36(value: u64, buffer: []u8) void {
 }
 
 /// Generate the next NUID
-pub fn next() [NUID_TOTAL_LEN]u8 {
-    var buffer: [NUID_TOTAL_LEN]u8 = undefined;
-    global_nuid.next(&buffer);
-    return buffer;
+pub fn next(buffer: *[NUID_TOTAL_LEN]u8) void {
+    global_nuid.next(buffer);
 }
 
 /// Generate the next NUID as a string slice
 pub fn nextString(allocator: std.mem.Allocator) ![]u8 {
-    const nuid_bytes = next();
+    var nuid_bytes: [NUID_TOTAL_LEN]u8 = undefined;
+    next(&nuid_bytes);
     return try allocator.dupe(u8, &nuid_bytes);
 }
 
@@ -119,8 +120,10 @@ test "nuid generation" {
     const testing = std.testing;
 
     // Test basic generation
-    const nuid1 = next();
-    const nuid2 = next();
+    var nuid1: [NUID_TOTAL_LEN]u8 = undefined;
+    var nuid2: [NUID_TOTAL_LEN]u8 = undefined;
+    next(&nuid1);
+    next(&nuid2);
 
     // Should be exactly 22 characters
     try testing.expectEqual(@as(usize, NUID_TOTAL_LEN), nuid1.len);
@@ -164,7 +167,8 @@ test "nuid uniqueness" {
     defer seen.deinit();
 
     for (0..1000) |_| {
-        const nuid = next();
+        var nuid: [NUID_TOTAL_LEN]u8 = undefined;
+        next(&nuid);
         const result = try seen.getOrPut(nuid);
         try testing.expect(!result.found_existing);
     }
@@ -217,7 +221,8 @@ test "thread safety" {
         thread.* = try std.Thread.spawn(.{}, struct {
             fn run(ctx: ThreadContext) void {
                 for (0..ctx.count) |j| {
-                    const nuid = next();
+                    var nuid: [NUID_TOTAL_LEN]u8 = undefined;
+                    next(&nuid);
                     ctx.results[ctx.start_index + j] = nuid;
                 }
             }
@@ -251,4 +256,23 @@ test "thread safety" {
     }
 
     try testing.expectEqual(@as(usize, total_nuids), seen.count());
+}
+
+test "nuid overflow safety" {
+    const testing = std.testing;
+    
+    // Test that resetSequence ensures sequence + increment never overflows
+    var nuid = Nuid{};
+    
+    // Force many resets to test different random combinations
+    for (0..1000) |_| {
+        nuid.resetSequence();
+        
+        // Verify sequence + increment is always < MAX_SEQUENCE
+        try testing.expect(nuid.sequence + nuid.increment < MAX_SEQUENCE);
+        
+        // Verify increment is within expected bounds
+        try testing.expect(nuid.increment >= MIN_INCREMENT);
+        try testing.expect(nuid.increment <= MAX_INCREMENT);
+    }
 }

@@ -151,11 +151,11 @@ test "message with reply and headers" {
 test "no responders header detection" {
     // Create a message that simulates "no responders" response
     const msg = try nats.Message.initWithHeaders(std.testing.allocator, "test.subject", null, "", // Empty data for no responders
-        "NATS/1.0\r\nStatus: 503 No Responders Available\r\n\r\n");
+        "NATS/1.0 503\r\n\r\n");
     defer msg.deinit();
 
     // Test no responders detection
-    const is_no_responders = try msg.isNoResponders();
+    const is_no_responders = msg.isNoResponders();
     try std.testing.expect(is_no_responders);
 
     log.info("No responders detection test passed", .{});
