@@ -235,9 +235,9 @@ const StreamPurgeResponse = struct {
 /// Request for fetching messages from a pull consumer
 pub const FetchRequest = struct {
     /// Maximum number of messages to fetch
-    batch: i32 = 1,
+    batch: usize = 1,
     /// Maximum bytes to fetch (optional)
-    max_bytes: ?i64 = null,
+    max_bytes: ?u64 = null,
     /// Request timeout in nanoseconds (default: 30 seconds)
     expires: u64 = 30_000_000_000,
     /// Don't wait if no messages are available immediately
@@ -292,7 +292,9 @@ pub const PullSubscription = struct {
     }
 
     /// Fetch a batch of messages from the pull consumer
-    pub fn fetch(self: *PullSubscription, batch: i32, timeout_ms: u64) !MessageBatch {
+    pub fn fetch(self: *PullSubscription, batch: usize, timeout_ms: u64) !MessageBatch {
+        if (batch == 0) return error.InvalidBatchSize;
+        
         self.mutex.lock();
         defer self.mutex.unlock();
 
