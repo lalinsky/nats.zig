@@ -143,21 +143,27 @@ pub const ResponseManager = struct {
         
         if (self.is_closed) return error.ConnectionClosed;
         
-        const entry = self.pending_responses.getEntry(handle.rid) orelse {
-            return error.InvalidToken;
-        };
-        
         var timer = std.time.Timer.start() catch unreachable;
-        while (entry.value_ptr.* == null and !self.is_closed) {
+        while (true) {
+            // Look up entry fresh each iteration - previous pointers may be invalid after timedWait
+            const entry = self.pending_responses.getEntry(handle.rid) orelse {
+                return error.UnknownRequest;
+            };
+            
+            if (entry.value_ptr.*) |result| {
+                // Got response - remove entry and transfer ownership to caller
+                self.pending_responses.removeByPtr(entry.key_ptr);
+                return result;
+            }
+            
+            if (self.is_closed) return error.ConnectionClosed;
+            
             const elapsed = timer.read();
             if (elapsed >= timeout_ns) return error.Timeout;
             
+            // After this call, any entry pointers become invalid due to potential HashMap modifications
             try self.pending_condition.timedWait(&self.pending_mutex, timeout_ns - elapsed);
         }
-        
-        if (self.is_closed) return error.ConnectionClosed;
-        
-        return entry.value_ptr.*.?;
     }
 
     fn responseHandlerWrapper(msg: *Message, manager: *ResponseManager) void {
@@ -176,6 +182,9 @@ pub const ResponseManager = struct {
 
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
+        
+        // Don't process responses after shutdown
+        if (self.is_closed) return;
 
         const entry = self.pending_responses.getEntry(rid) orelse {
             log.warn("Received response for unknown rid: {d}", .{rid});
