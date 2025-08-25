@@ -31,6 +31,10 @@ pub const ResponseManager = struct {
     resp_mux: ?*Subscription = null,
     
     // Single shared sync primitives instead of per-request
+    // NOTE: If the shared condition variable becomes a performance bottleneck due to
+    // "thundering herd" effects with many concurrent requests, we can optimize by
+    // storing per-request condition variables in the pending_responses map and
+    // signaling only the specific waiting thread. This trades memory for CPU efficiency.
     pending_mutex: std.Thread.Mutex = .{},
     pending_condition: std.Thread.Condition = .{},
     is_closed: bool = false,
@@ -99,7 +103,7 @@ pub const ResponseManager = struct {
         log.debug("Initialized response manager with prefix: {s}, wildcard: {s}", .{ self.resp_sub_prefix, subject });
     }
 
-    pub fn createRequest(self: *ResponseManager, subject: []const u8, _: []const u8) !RequestHandle {
+    pub fn createRequest(self: *ResponseManager) !RequestHandle {
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
         
@@ -109,8 +113,6 @@ pub const ResponseManager = struct {
         self.rid_counter += 1;
         
         try self.pending_responses.put(self.allocator, rid, null);
-
-        log.debug("Created request for {s}, rid: {d}", .{ subject, rid });
         
         return RequestHandle{ .rid = rid };
     }
@@ -224,10 +226,10 @@ test "response manager basic functionality" {
     defer manager.deinit();
 
     // Test that we can create request handles with different rids
-    const handle1 = try manager.createRequest("test.subject", "data");
+    const handle1 = try manager.createRequest();
     defer manager.cleanupRequest(handle1);
     
-    const handle2 = try manager.createRequest("test.subject", "data");
+    const handle2 = try manager.createRequest();
     defer manager.cleanupRequest(handle2);
 
     try testing.expect(handle1.rid != handle2.rid);
@@ -242,7 +244,7 @@ test "request handle timeout functionality" {
     var manager = ResponseManager.init(allocator);
     defer manager.deinit();
 
-    const handle = try manager.createRequest("test.subject", "data");
+    const handle = try manager.createRequest();
     defer manager.cleanupRequest(handle);
 
     // Test timeout behavior

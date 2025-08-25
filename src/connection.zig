@@ -656,7 +656,7 @@ pub const Connection = struct {
         try self.response_manager.ensureInitialized(self);
 
         // Create request
-        const handle = try self.response_manager.createRequest(subject, data);
+        const handle = try self.response_manager.createRequest();
         defer self.response_manager.cleanupRequest(handle);
 
         // Get reply subject and send request
