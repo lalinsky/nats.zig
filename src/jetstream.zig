@@ -257,6 +257,20 @@ pub const JetStreamSubscription = struct {
     pub fn unsubscribe(self: *JetStreamSubscription) !void {
         try self.js.nc.unsubscribe(self.subscription);
     }
+
+    /// Get the next JetStream message synchronously (for sync subscriptions)
+    pub fn nextMsg(self: *JetStreamSubscription, timeout_ms: u64) ?*JetStreamMessage {
+        // Get the next message from the underlying subscription
+        const msg = self.subscription.nextMsg(timeout_ms) orelse return null;
+
+        // Convert to JetStream message
+        const js_msg = jetstream_message.createJetStreamMessage(self.js, msg) catch {
+            msg.deinit(); // Clean up on error
+            return null;
+        };
+
+        return js_msg;
+    }
 };
 
 pub const JetStreamOptions = struct {
@@ -625,11 +639,11 @@ pub const JetStream = struct {
                 }
                 
                 // Create JetStream message wrapper for regular messages
-                const js_msg = jetstream_message.createJetStreamMessage(js, js.allocator, msg) catch {
+                const js_msg = jetstream_message.createJetStreamMessage(js, msg) catch {
                     msg.deinit(); // Clean up on error
                     return;
                 };
-                defer js.allocator.destroy(js_msg);
+                // No need for manual cleanup - the arena handles everything
 
                 // Call user handler with JetStream message
                 @call(.auto, handlerFn, .{js_msg} ++ user_args);
@@ -647,6 +661,43 @@ pub const JetStream = struct {
             .consumer_info = consumer_info,
         };
 
+        return js_sub;
+    }
+
+    /// Create a synchronous push subscription for manual message consumption
+    pub fn subscribeSync(
+        self: *JetStream,
+        stream_name: []const u8,
+        consumer_config: ConsumerConfig
+    ) !*JetStreamSubscription {
+        // Validate that this is a push consumer configuration with deliver_subject
+        if (consumer_config.deliver_subject == null) {
+            return error.MissingDeliverSubject;
+        }
+
+        // Create push consumer config
+        var push_config = consumer_config;
+        push_config.max_waiting = 0;  // Push consumers don't support max_waiting
+        push_config.max_batch = null; // Push consumers don't support max_batch
+        push_config.max_expires = null; // Push consumers don't support max_expires
+
+        // Create the push consumer
+        var consumer_info = try self.addConsumer(stream_name, push_config);
+        errdefer consumer_info.deinit();
+
+        const deliver_subject = consumer_config.deliver_subject.?;
+
+        // Create synchronous subscription (no callback handler)
+        const subscription = try self.nc.subscribeSync(deliver_subject);
+        errdefer subscription.deinit();
+
+        // Create JetStream subscription wrapper
+        const js_sub = try self.allocator.create(JetStreamSubscription);
+        js_sub.* = JetStreamSubscription{
+            .subscription = subscription,
+            .js = self,
+            .consumer_info = consumer_info,
+        };
         return js_sub;
     }
 };

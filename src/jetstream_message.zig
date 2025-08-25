@@ -156,8 +156,9 @@ pub fn parseAckSubject(subject: []const u8, metadata: *MsgMetadata) void {
 }
 
 /// Parse JetStream headers from a message and create JetStreamMessage wrapper
-pub fn createJetStreamMessage(js: *anyopaque, allocator: std.mem.Allocator, msg: *Message) !*JetStreamMessage {
-    const js_msg = try allocator.create(JetStreamMessage);
+pub fn createJetStreamMessage(js: *anyopaque, msg: *Message) !*JetStreamMessage {
+    // Allocate the JetStreamMessage on the message's arena so it gets cleaned up automatically
+    const js_msg = try msg.arena.allocator().create(JetStreamMessage);
     js_msg.* = JetStreamMessage{
         .msg = msg,
         .js = js,
