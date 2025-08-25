@@ -17,6 +17,7 @@ const Connection = @import("connection.zig").Connection;
 const Subscription = @import("subscription.zig").Subscription;
 const subscription_mod = @import("subscription.zig");
 const jetstream_message = @import("jetstream_message.zig");
+const inbox = @import("inbox.zig");
 
 const log = std.log.scoped(.jetstream);
 
@@ -166,7 +167,7 @@ pub const ConsumerConfig = struct {
     max_ack_pending: i64 = 1000,
     /// If the Consumer is idle for more than this many nano seconds a empty message with Status header 100 will be sent
     idle_heartbeat: ?u64 = null,
-    /// For push consumers this will regularly send an empty mess with Status header 100 and a reply subject  
+    /// For push consumers this will regularly send an empty mess with Status header 100 and a reply subject
     /// (This field was moved to the end to avoid duplication)
     /// The number of pulls that can be outstanding on a pull consumer
     max_waiting: i64 = 512,
@@ -231,9 +232,158 @@ const StreamPurgeResponse = struct {
     purged: u64,
 };
 
+/// Request for fetching messages from a pull consumer
+pub const FetchRequest = struct {
+    /// Maximum number of messages to fetch
+    batch: usize = 1,
+    /// Maximum bytes to fetch (optional)
+    max_bytes: ?u64 = null,
+    /// Request timeout in nanoseconds (default: 30 seconds)
+    expires: u64 = 30_000_000_000,
+    /// Don't wait if no messages are available immediately
+    no_wait: bool = false,
+    /// Heartbeat interval in nanoseconds for long requests
+    idle_heartbeat: ?u64 = null,
+};
 
+/// Batch of messages returned from fetch operation
+pub const MessageBatch = struct {
+    /// Allocator used for cleanup
+    allocator: std.mem.Allocator,
+    /// Array of JetStream messages
+    messages: []*JetStreamMessage,
+    /// Any error that occurred during fetch
+    err: ?anyerror = null,
 
+    pub fn deinit(self: *MessageBatch) void {
+        // Clean up each message individually
+        for (self.messages) |msg| {
+            msg.deinit();
+        }
+        // Free the messages array
+        self.allocator.free(self.messages);
+    }
+};
 
+/// JetStream pull subscription
+pub const PullSubscription = struct {
+    /// JetStream context
+    js: *JetStream,
+    /// Stream name
+    stream_name: []const u8,
+    /// Consumer name
+    consumer_name: []const u8,
+    /// Consumer information
+    consumer_info: Result(ConsumerInfo),
+    /// Persistent wildcard inbox subscription
+    inbox_subscription: *Subscription,
+    /// Inbox prefix for reply subjects (e.g., "_INBOX.abc123.")
+    inbox_prefix: []u8,
+    /// Fetch ID counter for unique reply subjects
+    fetch_id_counter: u64 = 0,
+    /// Mutex for thread safety
+    mutex: std.Thread.Mutex = .{},
+
+    pub fn deinit(self: *PullSubscription) void {
+        self.consumer_info.deinit();
+        self.inbox_subscription.deinit();
+        self.js.allocator.free(self.inbox_prefix);
+        self.js.allocator.destroy(self);
+    }
+
+    /// Fetch a batch of messages from the pull consumer
+    pub fn fetch(self: *PullSubscription, batch: usize, timeout_ms: u64) !MessageBatch {
+        if (batch == 0) return error.InvalidBatchSize;
+        
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Generate unique fetch ID and reply subject
+        self.fetch_id_counter += 1;
+        const fetch_id = self.fetch_id_counter;
+
+        const reply_subject = try std.fmt.allocPrint(self.js.allocator, "{s}{d}", .{ self.inbox_prefix, fetch_id });
+        defer self.js.allocator.free(reply_subject);
+
+        const request = FetchRequest{
+            .batch = batch,
+            .expires = timeout_ms * std.time.ns_per_ms,
+        };
+
+        // Serialize the fetch request to JSON
+        const request_json = try std.json.stringifyAlloc(self.js.allocator, request, .{});
+        defer self.js.allocator.free(request_json);
+
+        // Build the full API subject
+        const api_subject = try std.fmt.allocPrint(self.js.allocator, "{s}CONSUMER.MSG.NEXT.{s}.{s}", .{ default_api_prefix, self.stream_name, self.consumer_name });
+        defer self.js.allocator.free(api_subject);
+
+        // Send the pull request with reply subject
+        try self.js.nc.publishRequest(api_subject, reply_subject, request_json);
+
+        // Collect messages
+        var messages = std.ArrayList(*JetStreamMessage).init(self.js.allocator);
+        defer messages.deinit();
+
+        var batch_complete = false;
+        var fetch_error: ?anyerror = null;
+
+        // Collect messages until batch is complete or timeout
+        while (!batch_complete and messages.items.len < request.batch) {
+            if (self.inbox_subscription.nextMsg(timeout_ms)) |raw_msg| {
+                log.debug("Message: subject={s}, reply={s}, data='{s}'", .{ raw_msg.subject, raw_msg.reply orelse "none", raw_msg.data });
+                // JetStream messages arrive with original subjects and ACK reply subjects
+                // The timestamp in the ACK subject ensures messages belong to this fetch request
+                // (timestamps are monotonically increasing and unique per message delivery)
+
+                if (try raw_msg.headerGet("Status")) |status_code| {
+                    if (std.mem.eql(u8, status_code, "404")) {
+                        // No messages available
+                        raw_msg.deinit();
+                        batch_complete = true;
+                        break;
+                    } else if (std.mem.eql(u8, status_code, "408")) {
+                        // Request timeout
+                        raw_msg.deinit();
+                        fetch_error = error.RequestTimeout;
+                        batch_complete = true;
+                        break;
+                    } else if (std.mem.eql(u8, status_code, "409")) {
+                        // Consumer sequence mismatch
+                        raw_msg.deinit();
+                        fetch_error = error.ConsumerSequenceMismatch;
+                        batch_complete = true;
+                        break;
+                    } else if (std.mem.eql(u8, status_code, "100")) {
+                        // Heartbeat - continue waiting
+                        raw_msg.deinit();
+                        continue;
+                    }
+                    // Unknown status code - clean up and continue
+                    raw_msg.deinit();
+                } else {
+                    // This is a regular message - convert to JetStream message
+                    const js_msg_ptr = try jetstream_message.createJetStreamMessage(self.js, raw_msg);
+                    errdefer js_msg_ptr.deinit();
+
+                    try messages.append(js_msg_ptr);
+                }
+            } else {
+                // Timeout occurred
+                batch_complete = true;
+            }
+        }
+
+        // Convert ArrayList to owned slice
+        const messages_slice = try messages.toOwnedSlice();
+
+        return MessageBatch{
+            .messages = messages_slice,
+            .err = fetch_error,
+            .allocator = self.js.allocator,
+        };
+    }
+};
 
 /// JetStream push subscription
 pub const JetStreamSubscription = struct {
@@ -243,16 +393,16 @@ pub const JetStreamSubscription = struct {
     js: *JetStream,
     /// Consumer information (Result wrapper)
     consumer_info: Result(ConsumerInfo),
-    
+
     pub fn deinit(self: *JetStreamSubscription) void {
         self.consumer_info.deinit();
-        
+
         // Clean up the underlying subscription (this will clean up the handler context)
         self.subscription.deinit();
-        
+
         self.js.allocator.destroy(self);
     }
-    
+
     /// Unsubscribe from the delivery subject
     pub fn unsubscribe(self: *JetStreamSubscription) !void {
         try self.js.nc.unsubscribe(self.subscription);
@@ -279,10 +429,6 @@ pub const JetStreamOptions = struct {
 };
 
 pub const Result = std.json.Parsed;
-
-
-
-
 
 pub const JetStream = struct {
     allocator: std.mem.Allocator,
@@ -563,12 +709,12 @@ pub const JetStream = struct {
                 log.debug("  {s}: {s}", .{ key, value });
             }
         }
-        
+
         // Get the description header to distinguish between heartbeats and flow control
         if (msg.headers.get("Description")) |desc_values| {
             if (desc_values.items.len > 0) {
                 const description = desc_values.items[0];
-                
+
                 if (std.mem.eql(u8, description, "Idle Heartbeat")) {
                     // This is an idle heartbeat - just log it (optional)
                     log.debug("Received idle heartbeat from JetStream", .{});
@@ -576,7 +722,7 @@ pub const JetStream = struct {
                 } else if (std.mem.eql(u8, description, "FlowControl Request")) {
                     // This is a flow control request - we need to respond
                     log.debug("Received flow control request from JetStream", .{});
-                    
+
                     if (msg.reply) |reply_subject| {
                         // Respond with empty message to acknowledge flow control
                         try js.nc.publish(reply_subject, "");
@@ -586,7 +732,7 @@ pub const JetStream = struct {
                     }
                     return;
                 }
-                
+
                 // Unknown status message description
                 log.warn("Unknown status message description: {s}", .{description});
             }
@@ -596,13 +742,7 @@ pub const JetStream = struct {
         }
     }
 
-    pub fn subscribe(
-        self: *JetStream,
-        stream_name: []const u8,
-        consumer_config: ConsumerConfig,
-        comptime handlerFn: anytype,
-        args: anytype
-    ) !*JetStreamSubscription {
+    pub fn subscribe(self: *JetStream, stream_name: []const u8, consumer_config: ConsumerConfig, comptime handlerFn: anytype, args: anytype) !*JetStreamSubscription {
         // Validate that this is a push consumer configuration
         if (consumer_config.deliver_subject == null) {
             return error.MissingDeliverSubject;
@@ -610,7 +750,7 @@ pub const JetStream = struct {
 
         // Create push consumer config by removing pull-only fields
         var push_config = consumer_config;
-        push_config.max_waiting = 0;  // Push consumers don't support max_waiting
+        push_config.max_waiting = 0; // Push consumers don't support max_waiting
         push_config.max_batch = null; // Push consumers don't support max_batch
         push_config.max_expires = null; // Push consumers don't support max_expires
 
@@ -623,7 +763,7 @@ pub const JetStream = struct {
         // Define the handler inline to avoid the two-level context issue
         const JSHandler = struct {
             fn wrappedHandler(msg: *Message, js: *JetStream, user_args: @TypeOf(args)) void {
-                // Check for status messages (heartbeats and flow control) 
+                // Check for status messages (heartbeats and flow control)
                 if (msg.headers.get("Status")) |status_values| {
                     if (status_values.items.len > 0) {
                         const status_code = status_values.items[0];
@@ -637,7 +777,7 @@ pub const JetStream = struct {
                         }
                     }
                 }
-                
+
                 // Create JetStream message wrapper for regular messages
                 const js_msg = jetstream_message.createJetStreamMessage(js, msg) catch {
                     msg.deinit(); // Clean up on error
@@ -665,11 +805,7 @@ pub const JetStream = struct {
     }
 
     /// Create a synchronous push subscription for manual message consumption
-    pub fn subscribeSync(
-        self: *JetStream,
-        stream_name: []const u8,
-        consumer_config: ConsumerConfig
-    ) !*JetStreamSubscription {
+    pub fn subscribeSync(self: *JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*JetStreamSubscription {
         // Validate that this is a push consumer configuration with deliver_subject
         if (consumer_config.deliver_subject == null) {
             return error.MissingDeliverSubject;
@@ -677,7 +813,7 @@ pub const JetStream = struct {
 
         // Create push consumer config
         var push_config = consumer_config;
-        push_config.max_waiting = 0;  // Push consumers don't support max_waiting
+        push_config.max_waiting = 0; // Push consumers don't support max_waiting
         push_config.max_batch = null; // Push consumers don't support max_batch
         push_config.max_expires = null; // Push consumers don't support max_expires
 
@@ -699,5 +835,50 @@ pub const JetStream = struct {
             .consumer_info = consumer_info,
         };
         return js_sub;
+    }
+
+    /// Create a pull subscription for the specified stream
+    pub fn pullSubscribe(self: *JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*PullSubscription {
+        // Create pull consumer config with appropriate defaults
+        var pull_config = consumer_config;
+        pull_config.deliver_subject = null; // Force null for pull consumers
+        if (pull_config.max_waiting == 0) pull_config.max_waiting = 512; // Default max waiting pulls
+
+        // Create the consumer
+        var consumer_info = try self.addConsumer(stream_name, pull_config);
+        errdefer consumer_info.deinit();
+
+        // Get the consumer name (use name first, then durable_name)
+        const consumer_name = consumer_info.value.config.name orelse
+            consumer_info.value.config.durable_name orelse
+            return error.MissingConsumerName;
+
+        // Generate unique inbox prefix for this pull subscription
+        const inbox_base = try inbox.newInbox(self.allocator);
+        defer self.allocator.free(inbox_base);
+
+        const inbox_prefix = try std.fmt.allocPrint(self.allocator, "{s}.", .{inbox_base});
+        errdefer self.allocator.free(inbox_prefix);
+
+        // Create wildcard subscription subject
+        const wildcard_subject = try std.fmt.allocPrint(self.allocator, "{s}*", .{inbox_prefix});
+        defer self.allocator.free(wildcard_subject);
+
+        // Create the persistent wildcard inbox subscription
+        const inbox_subscription = try self.nc.subscribeSync(wildcard_subject);
+        errdefer inbox_subscription.deinit();
+
+        // Allocate PullSubscription
+        const pull_subscription = try self.allocator.create(PullSubscription);
+        pull_subscription.* = PullSubscription{
+            .js = self,
+            .stream_name = stream_name,
+            .consumer_name = consumer_name,
+            .consumer_info = consumer_info,
+            .inbox_subscription = inbox_subscription,
+            .inbox_prefix = inbox_prefix,
+        };
+
+        return pull_subscription;
     }
 };
