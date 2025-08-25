@@ -652,7 +652,7 @@ pub const Connection = struct {
         log.debug("Published request to {s} with reply {s}: {s}", .{ subject, reply, data });
     }
 
-    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !?*Message {
+    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !*Message {
         if (self.options.trace) {
             log.debug("Sending request to {s} with timeout {d}ms", .{ subject, timeout_ms });
         }
@@ -667,8 +667,7 @@ pub const Connection = struct {
 
         defer {
             self.allocator.free(request_info.reply_subject);
-            self.allocator.free(request_info.token);
-            // Remove from token map first, then reclaim the ResponseInfo object.
+            // Remove from token map (this also frees the token memory)
             self.response_manager.cleanupRequest(request_info.token);
             self.allocator.destroy(request_info.response_info);
         }
@@ -677,7 +676,7 @@ pub const Connection = struct {
         try self.publishRequest(subject, request_info.reply_subject, data);
 
         // Wait for response
-        return request_info.response_info.wait(timeout_ms);
+        return request_info.response_info.timedWait(timeout_ms * std.time.ns_per_ms);
     }
 
     fn processInitialHandshake(self: *Self) !void {

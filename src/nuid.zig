@@ -6,7 +6,7 @@ const Mutex = std.Thread.Mutex;
 /// Encoded in base36 for a total of 22 characters
 const NUID_PREFIX_LEN = 12;
 const NUID_SEQUENCE_LEN = 10;
-const NUID_TOTAL_LEN = NUID_PREFIX_LEN + NUID_SEQUENCE_LEN;
+pub const NUID_TOTAL_LEN = NUID_PREFIX_LEN + NUID_SEQUENCE_LEN;
 
 const BASE = 36;
 const DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -98,15 +98,14 @@ fn encodeBase36(value: u64, buffer: []u8) void {
 }
 
 /// Generate the next NUID
-pub fn next() [NUID_TOTAL_LEN]u8 {
-    var buffer: [NUID_TOTAL_LEN]u8 = undefined;
-    global_nuid.next(&buffer);
-    return buffer;
+pub fn next(buffer: *[NUID_TOTAL_LEN]u8) void {
+    global_nuid.next(buffer);
 }
 
 /// Generate the next NUID as a string slice
 pub fn nextString(allocator: std.mem.Allocator) ![]u8 {
-    const nuid_bytes = next();
+    var nuid_bytes: [NUID_TOTAL_LEN]u8 = undefined;
+    next(&nuid_bytes);
     return try allocator.dupe(u8, &nuid_bytes);
 }
 
@@ -119,8 +118,10 @@ test "nuid generation" {
     const testing = std.testing;
 
     // Test basic generation
-    const nuid1 = next();
-    const nuid2 = next();
+    var nuid1: [NUID_TOTAL_LEN]u8 = undefined;
+    var nuid2: [NUID_TOTAL_LEN]u8 = undefined;
+    next(&nuid1);
+    next(&nuid2);
 
     // Should be exactly 22 characters
     try testing.expectEqual(@as(usize, NUID_TOTAL_LEN), nuid1.len);
@@ -164,7 +165,8 @@ test "nuid uniqueness" {
     defer seen.deinit();
 
     for (0..1000) |_| {
-        const nuid = next();
+        var nuid: [NUID_TOTAL_LEN]u8 = undefined;
+        next(&nuid);
         const result = try seen.getOrPut(nuid);
         try testing.expect(!result.found_existing);
     }
@@ -217,7 +219,8 @@ test "thread safety" {
         thread.* = try std.Thread.spawn(.{}, struct {
             fn run(ctx: ThreadContext) void {
                 for (0..ctx.count) |j| {
-                    const nuid = next();
+                    var nuid: [NUID_TOTAL_LEN]u8 = undefined;
+                    next(&nuid);
                     ctx.results[ctx.start_index + j] = nuid;
                 }
             }
