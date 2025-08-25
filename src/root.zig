@@ -42,8 +42,9 @@ pub const JetStreamError = @import("jetstream.zig").JetStreamError;
 
 // JetStream Push Subscription types
 pub const JetStreamMessage = @import("jetstream.zig").JetStreamMessage;
+pub const MsgMetadata = @import("jetstream.zig").MsgMetadata;
+pub const SequencePair = @import("jetstream.zig").SequencePair;
 pub const JetStreamSubscription = @import("jetstream.zig").JetStreamSubscription;
-pub const AckType = @import("jetstream.zig").AckType;
 
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 

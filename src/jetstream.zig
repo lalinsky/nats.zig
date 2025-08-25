@@ -16,8 +16,14 @@ const Message = @import("message.zig").Message;
 const Connection = @import("connection.zig").Connection;
 const Subscription = @import("subscription.zig").Subscription;
 const subscription_mod = @import("subscription.zig");
+const jetstream_message = @import("jetstream_message.zig");
 
 const log = std.log.scoped(.jetstream);
+
+// Re-export JetStream message types
+pub const JetStreamMessage = jetstream_message.JetStreamMessage;
+pub const MsgMetadata = jetstream_message.MsgMetadata;
+pub const SequencePair = jetstream_message.SequencePair;
 
 const default_api_prefix = "$JS.API.";
 const default_request_timeout_ms = 5000;
@@ -225,65 +231,9 @@ const StreamPurgeResponse = struct {
     purged: u64,
 };
 
-/// JetStream message acknowledgment types
-pub const AckType = enum {
-    ack,     // +ACK - Acknowledge message 
-    nak,     // -NAK - Negative acknowledge (retry)
-    term,    // +TERM - Terminate delivery (don't retry)
-    progress, // +WPI - Work in progress (extend ack wait)
-};
 
-/// Enhanced message wrapper for JetStream push subscriptions
-pub const JetStreamMessage = struct {
-    /// Underlying NATS message
-    msg: *Message,
-    /// JetStream context for acknowledgments
-    js: *JetStream,
-    
-    /// JetStream metadata (parsed from headers)
-    stream: ?[]const u8 = null,
-    sequence: ?u64 = null,
-    subject: ?[]const u8 = null,
-    timestamp: ?[]const u8 = null,
-    reply: ?[]const u8 = null,
-    
-    pub fn deinit(self: *JetStreamMessage) void {
-        self.msg.deinit();
-    }
-    
-    /// Acknowledge successful processing
-    pub fn ack(self: *JetStreamMessage) !void {
-        try self.sendAck(.ack);
-    }
-    
-    /// Negative acknowledge - request redelivery
-    pub fn nak(self: *JetStreamMessage) !void {
-        try self.sendAck(.nak);
-    }
-    
-    /// Terminate delivery - don't redeliver this message
-    pub fn term(self: *JetStreamMessage) !void {
-        try self.sendAck(.term);
-    }
-    
-    /// Indicate work in progress - extend ack wait timer
-    pub fn inProgress(self: *JetStreamMessage) !void {
-        try self.sendAck(.progress);
-    }
-    
-    /// Send acknowledgment to JetStream
-    fn sendAck(self: *JetStreamMessage, ack_type: AckType) !void {
-        if (self.reply) |reply_subject| {
-            const ack_payload = switch (ack_type) {
-                .ack => "+ACK",
-                .nak => "-NAK", 
-                .term => "+TERM",
-                .progress => "+WPI",
-            };
-            try self.js.nc.publish(reply_subject, ack_payload);
-        }
-    }
-};
+
+
 
 /// JetStream push subscription
 pub const JetStreamSubscription = struct {
@@ -316,35 +266,9 @@ pub const JetStreamOptions = struct {
 
 pub const Result = std.json.Parsed;
 
-/// Parse JetStream headers from a message and create JetStreamMessage wrapper
-fn createJetStreamMessage(js: *JetStream, msg: *Message) !*JetStreamMessage {
-    const js_msg = try js.allocator.create(JetStreamMessage);
-    js_msg.* = JetStreamMessage{
-        .msg = msg,
-        .js = js,
-        .reply = msg.reply,
-    };
-    
-    // Parse JetStream headers if present
-    if (msg.headers.get("Nats-Stream")) |stream_values| {
-        if (stream_values.items.len > 0) js_msg.stream = stream_values.items[0];
-    }
-    if (msg.headers.get("Nats-Subject")) |subject_values| {
-        if (subject_values.items.len > 0) js_msg.subject = subject_values.items[0];
-    }
-    if (msg.headers.get("Nats-Time-Stamp")) |timestamp_values| {
-        if (timestamp_values.items.len > 0) js_msg.timestamp = timestamp_values.items[0];
-    }
-    
-    // Parse sequence number
-    if (msg.headers.get("Nats-Sequence")) |seq_values| {
-        if (seq_values.items.len > 0) {
-            js_msg.sequence = std.fmt.parseInt(u64, seq_values.items[0], 10) catch null;
-        }
-    }
-    
-    return js_msg;
-}
+
+
+
 
 pub const JetStream = struct {
     allocator: std.mem.Allocator,
@@ -701,7 +625,7 @@ pub const JetStream = struct {
                 }
                 
                 // Create JetStream message wrapper for regular messages
-                const js_msg = createJetStreamMessage(js, msg) catch {
+                const js_msg = jetstream_message.createJetStreamMessage(js, js.allocator, msg) catch {
                     msg.deinit(); // Clean up on error
                     return;
                 };
