@@ -136,6 +136,9 @@ pub const ResponseManager = struct {
                     // Error result, nothing to clean up
                 }
             }
+            
+            // Wake any threads waiting for this response
+            self.pending_condition.broadcast();
         }
     }
 
