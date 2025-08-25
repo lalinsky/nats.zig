@@ -661,9 +661,7 @@ pub const Connection = struct {
         try self.response_manager.ensureInitialized(self);
 
         // Create request
-        self.mutex.lock();
         const request_info = try self.response_manager.createRequest(subject, data);
-        self.mutex.unlock();
 
         defer {
             self.allocator.free(request_info.reply_subject);
