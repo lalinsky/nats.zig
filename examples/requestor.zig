@@ -25,16 +25,10 @@ pub fn main() !void {
         std.debug.print("Request failed: {}\n", .{err});
         std.process.exit(2);
     };
+    defer reply.deinit();
 
-    if (reply) |msg| {
-        defer msg.deinit();
-
-        // If we are here, we should have received the reply
-        std.debug.print("Received reply: {s}\n", .{msg.data});
-    } else {
-        std.debug.print("No reply received within timeout\n", .{});
-        std.process.exit(2);
-    }
+    // If we are here, we should have received the reply
+    std.debug.print("Received reply: {s}\n", .{reply.data});
 
     std.debug.print("Request/reply completed successfully!\n", .{});
 }

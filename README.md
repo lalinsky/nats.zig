@@ -46,6 +46,16 @@ var counter: u32 = 0;
 const sub = try nc.subscribe("hello", messageHandler, .{&counter});
 ```
 
+### Request/Reply
+
+```zig
+// Send request and wait for reply with 5 second timeout
+const reply = try nc.request("help", "need assistance", 5000);
+defer reply.deinit();
+
+std.debug.print("Received reply: {s}\n", .{reply.data});
+```
+
 ### JetStream Stream Management
 
 ```zig

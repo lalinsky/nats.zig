@@ -85,7 +85,7 @@ test "concurrent request reply" {
     std.time.sleep(10_000_000); // 10ms
 
     // Send multiple requests concurrently
-    var requests: [5]?*nats.Message = undefined;
+    var requests: [5]*nats.Message = undefined;
     for (&requests, 0..) |*request, i| {
         const data = try std.fmt.allocPrint(std.testing.allocator, "request-{d}", .{i});
         defer std.testing.allocator.free(data);
@@ -94,17 +94,13 @@ test "concurrent request reply" {
     }
 
     // Verify all responses
-    for (requests, 0..) |maybe_response, i| {
-        if (maybe_response) |response| {
-            defer response.deinit();
+    for (requests, 0..) |response, i| {
+        defer response.deinit();
 
-            const expected = try std.fmt.allocPrint(std.testing.allocator, "echo: request-{d}", .{i});
-            defer std.testing.allocator.free(expected);
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "echo: request-{d}", .{i});
+        defer std.testing.allocator.free(expected);
 
-            try std.testing.expectEqualStrings(expected, response.data);
-        } else {
-            return error.NoResponse;
-        }
+        try std.testing.expectEqualStrings(expected, response.data);
     }
 }
 
