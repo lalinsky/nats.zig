@@ -293,12 +293,13 @@ pub const JetStreamSubscription = struct {
     js: *JetStream,
     /// Consumer information (Result wrapper)
     consumer_info: Result(ConsumerInfo),
-    /// JS context for cleanup (stored as anyopaque to avoid type issues)
-    js_context: *anyopaque,
     
     pub fn deinit(self: *JetStreamSubscription) void {
         self.consumer_info.deinit();
-        // Note: js_context cleanup is handled by the subscription's handler cleanup
+        
+        // Clean up the underlying subscription (this will clean up the handler context)
+        self.subscription.deinit();
+        
         self.js.allocator.destroy(self);
     }
     
@@ -681,24 +682,16 @@ pub const JetStream = struct {
 
         const deliver_subject = consumer_config.deliver_subject.?;
 
-        // Define context struct
-        const JSContext = struct {
-            js: *JetStream,
-            user_args: @TypeOf(args),
-        };
-
-        // Create a handler that wraps NATS messages as JetStream messages
-        const JSWrapper = struct {
-            fn wrappedHandler(msg: *Message, ctx_ptr: *anyopaque) void {
-                const ctx: *JSContext = @ptrCast(@alignCast(ctx_ptr));
-                
+        // Define the handler inline to avoid the two-level context issue
+        const JSHandler = struct {
+            fn wrappedHandler(msg: *Message, js: *JetStream, user_args: @TypeOf(args)) void {
                 // Check for status messages (heartbeats and flow control) 
                 if (msg.headers.get("Status")) |status_values| {
                     if (status_values.items.len > 0) {
-                        const status = status_values.items[0];
-                        if (std.mem.eql(u8, status, "100")) {
+                        const status_code = status_values.items[0];
+                        if (std.mem.eql(u8, status_code, "100")) {
                             // Handle status message internally, don't pass to user callback
-                            handleStatusMessage(msg, ctx.js) catch |err| {
+                            handleStatusMessage(msg, js) catch |err| {
                                 log.err("Failed to handle status message: {}", .{err});
                             };
                             msg.deinit(); // Clean up status message
@@ -708,25 +701,19 @@ pub const JetStream = struct {
                 }
                 
                 // Create JetStream message wrapper for regular messages
-                const js_msg = createJetStreamMessage(ctx.js, msg) catch {
+                const js_msg = createJetStreamMessage(js, msg) catch {
                     msg.deinit(); // Clean up on error
                     return;
                 };
-                defer ctx.js.allocator.destroy(js_msg);
+                defer js.allocator.destroy(js_msg);
 
                 // Call user handler with JetStream message
-                @call(.auto, handlerFn, .{js_msg} ++ ctx.user_args);
+                @call(.auto, handlerFn, .{js_msg} ++ user_args);
             }
         };
 
-        const js_context = try self.allocator.create(JSContext);
-        js_context.* = JSContext{
-            .js = self,
-            .user_args = args,
-        };
-
-        // Subscribe to the delivery subject using connection.subscribe
-        const subscription = try self.nc.subscribe(deliver_subject, JSWrapper.wrappedHandler, .{js_context});
+        // Subscribe to the delivery subject with simple arguments
+        const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self, args });
 
         // Create JetStream subscription wrapper
         const js_sub = try self.allocator.create(JetStreamSubscription);
@@ -734,7 +721,6 @@ pub const JetStream = struct {
             .subscription = subscription,
             .js = self,
             .consumer_info = consumer_info,
-            .js_context = js_context,
         };
 
         return js_sub;
