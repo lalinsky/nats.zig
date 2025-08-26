@@ -529,20 +529,16 @@ pub const Connection = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Check connection status
-        if (self.status != .connected) {
-            return ConnectionError.ConnectionClosed;
-        }
-
-        // Check reconnection buffer limits if reconnecting
-        if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
-            if (self.pending_buffer.buffer.items.len >= self.options.reconnect.reconnect_buf_size) {
-                return PublishError.InsufficientBuffer;
-            }
+        // Allow publishes when connected or reconnecting (buffered).
+        // Reject when not usable for sending.
+        switch (self.status) {
+            .connected, .reconnecting => {},
+            .closed, .connecting, .disconnected, .draining_subs, .draining_pubs => {
+                return ConnectionError.ConnectionClosed;
+            },
         }
 
         try self.bufferWrite(buffer.items, asap);
-
         if (reply_to_use) |reply| {
             log.debug("Published message to {s} with reply {s}: has_headers={}, data_len={d}, total_payload={d}", .{ msg.subject, reply, has_headers, msg.data.len, total_payload });
         } else {
