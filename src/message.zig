@@ -31,6 +31,7 @@ pub const Message = struct {
 
     // Metadata
     sid: u64 = 0,
+    seq: u64 = 0, // TODO this doesn't really belong here
 
     // Headers
     headers: std.hash_map.StringHashMapUnmanaged(ArrayListUnmanaged([]const u8)) = .{},
