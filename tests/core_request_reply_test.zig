@@ -154,3 +154,63 @@ test "request with different subjects" {
     defer response2.deinit();
     try std.testing.expectEqualStrings("echo: message2", response2.data);
 }
+
+test "requestMsg basic functionality" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    // Create echo handler
+    const replier_sub = try conn.subscribe("test.requestmsg", simpleEchoHandler, .{conn});
+    defer replier_sub.deinit();
+
+    std.time.sleep(10_000_000); // 10ms
+
+    // Create a message to send as request
+    const request_msg = try nats.Message.init(std.testing.allocator, "test.requestmsg", null, "requestMsg test data");
+    defer request_msg.deinit();
+
+    // Send request using requestMsg
+    const response = try conn.requestMsg(request_msg, 1000);
+    defer response.deinit();
+
+    // Verify response
+    try std.testing.expectEqualStrings("requestMsg test data", response.data);
+}
+
+test "requestMsg with headers" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    // Create handler that echoes back with headers
+    const replier_sub = try conn.subscribe("test.requestmsg.headers", echoHandler, .{conn});
+    defer replier_sub.deinit();
+
+    std.time.sleep(10_000_000); // 10ms
+
+    // Create a message with headers
+    const request_msg = try nats.Message.init(std.testing.allocator, "test.requestmsg.headers", null, "header test");
+    defer request_msg.deinit();
+
+    // Add some headers
+    try request_msg.headerSet("X-Test-Header", "test-value");
+    try request_msg.headerSet("X-Request-ID", "12345");
+
+    // Send request using requestMsg
+    const response = try conn.requestMsg(request_msg, 1000);
+    defer response.deinit();
+
+    // Verify response
+    try std.testing.expectEqualStrings("echo: header test", response.data);
+}
+
+test "requestMsg validation errors" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    // Test invalid subject (empty)
+    const empty_msg = try nats.Message.init(std.testing.allocator, "", null, "test data");
+    defer empty_msg.deinit();
+
+    const result = conn.requestMsg(empty_msg, 1000);
+    try std.testing.expectError(error.InvalidSubject, result);
+}

@@ -106,7 +106,7 @@ pub const PendingBuffer = struct {
 
     pub fn addMessage(self: *PendingBuffer, data: []const u8) !void {
         if (self.buffer.items.len + data.len > self.max_size) {
-            return ConnectionError.OutOfMemory;
+            return PublishError.InsufficientBuffer;
         }
         try self.buffer.appendSlice(data);
     }
@@ -123,6 +123,16 @@ pub const PendingBuffer = struct {
     }
 };
 
+pub const ConnectionClosedError = error{
+    ConnectionClosed,
+};
+
+pub const PublishError = error{
+    MaxPayload,
+    InsufficientBuffer,
+    InvalidSubject,
+} || ConnectionClosedError || std.mem.Allocator.Error;
+
 pub const ConnectionError = error{
     ConnectionFailed,
     ConnectionClosed,
@@ -132,7 +142,7 @@ pub const ConnectionError = error{
     InvalidProtocol,
     OutOfMemory,
     NoResponders,
-} || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
+} || PublishError || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
 
 pub const ConnectionStatus = enum {
     disconnected,
@@ -206,6 +216,7 @@ pub const Connection = struct {
     // Flusher synchronization (protected by main mutex)
     flusher_stop: bool = false,
     flusher_signaled: bool = false,
+    flusher_asap: bool = false,
     flusher_condition: std.Thread.Condition = .{},
 
     // PONG waiting (protected by main mutex)
@@ -286,7 +297,6 @@ pub const Connection = struct {
 
         log.debug("Acquired global dispatcher pool", .{});
     }
-
 
     pub fn connect(self: *Self, url: []const u8) !void {
         if (self.status != .disconnected) {
@@ -433,66 +443,81 @@ pub const Connection = struct {
         return self.status;
     }
 
+    /// Publishes data on a subject.
     pub fn publish(self: *Self, subject: []const u8, data: []const u8) !void {
-        // Lock immediately like C natsConn_publish
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.status != .connected) {
-            return ConnectionError.ConnectionClosed;
-        }
-
-        // Format the complete PUB message
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-
-        try buffer.writer().print("PUB {s} {d}\r\n", .{ subject, data.len });
-        try buffer.appendSlice(data);
-        try buffer.appendSlice("\r\n");
-
-        // Send via buffer (either immediate or flusher thread)
-        try self.bufferWrite(buffer.items);
-
-        log.debug("Published to {s}: {s}", .{ subject, data });
+        var msg = Message{
+            .subject = subject,
+            .data = data,
+            .arena = undefined, // we don't need a fully constructed arena for this
+        };
+        return self.publishMsgInternal(&msg, null, false);
     }
 
+    /// Publishes a message on a subject.
     pub fn publishMsg(self: *Self, msg: *Message) !void {
-        // Lock immediately like other publish methods
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        return self.publishMsgInternal(msg, null, false);
+    }
 
-        if (self.status != .connected) {
-            return ConnectionError.ConnectionClosed;
+    /// Publishes data on a subject, with a reply subject.
+    pub fn publishRequest(self: *Self, subject: []const u8, reply: []const u8, data: []const u8) !void {
+        var msg = Message{
+            .subject = subject,
+            .reply = reply,
+            .data = data,
+            .arena = undefined, // we don't need a fully constructed arena for this
+        };
+        return self.publishMsgInternal(&msg, null, true);
+    }
+
+    /// Publishes a message on a subject, with a reply subject.
+    pub fn publishRequestMsg(self: *Self, msg: *Message, reply: []const u8) !void {
+        return self.publishMsgInternal(msg, reply, true);
+    }
+
+    fn publishMsgInternal(self: *Self, msg: *Message, reply_override: ?[]const u8, asap: bool) !void {
+        if (msg.subject.len == 0) {
+            return error.InvalidSubject;
         }
 
         // Check if message has headers
         try msg.ensureHeadersParsed();
         const has_headers = msg.headers.count() > 0;
 
+        // Calculate total payload size (headers + data) like C library
+        var headers_len: usize = 0;
+        var headers_buffer = ArrayList(u8).init(self.allocator);
+        defer headers_buffer.deinit();
+
+        if (has_headers) {
+            try msg.encodeHeaders(headers_buffer.writer());
+            headers_len = headers_buffer.items.len;
+        }
+
+        const total_payload = headers_len + msg.data.len;
+
+        // Validate payload size against server limit (like C library)
+        if (self.server_info.max_payload > 0 and total_payload > @as(usize, @intCast(self.server_info.max_payload))) {
+            return PublishError.MaxPayload;
+        }
+
+        const reply_to_use = reply_override orelse msg.reply;
+
         var buffer = ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
 
         if (has_headers) {
-            // Format headers
-            var headers_buffer = ArrayList(u8).init(self.allocator);
-            defer headers_buffer.deinit();
-            try msg.encodeHeaders(headers_buffer.writer());
-
-            const headers_len = headers_buffer.items.len;
-            const total_len = headers_len + msg.data.len;
-
-            // HPUB format: HPUB <subject> [reply] <headers_len> <total_len>\r\n<headers><data>\r\n
-            if (msg.reply) |reply| {
-                try buffer.writer().print("HPUB {s} {s} {d} {d}\r\n", .{ msg.subject, reply, headers_len, total_len });
+            // HPUB <subject> [reply] <headers_len> <total_len>\r\n<headers><data>\r\n
+            if (reply_to_use) |reply| {
+                try buffer.writer().print("HPUB {s} {s} {d} {d}\r\n", .{ msg.subject, reply, headers_len, total_payload });
             } else {
-                try buffer.writer().print("HPUB {s} {d} {d}\r\n", .{ msg.subject, headers_len, total_len });
+                try buffer.writer().print("HPUB {s} {d} {d}\r\n", .{ msg.subject, headers_len, total_payload });
             }
             try buffer.appendSlice(headers_buffer.items);
             try buffer.appendSlice(msg.data);
             try buffer.appendSlice("\r\n");
         } else {
-            // Regular PUB format: PUB <subject> [reply] <size>\r\n<data>\r\n
-            if (msg.reply) |reply| {
+            // PUB <subject> [reply] <size>\r\n<data>\r\n
+            if (reply_to_use) |reply| {
                 try buffer.writer().print("PUB {s} {s} {d}\r\n", .{ msg.subject, reply, msg.data.len });
             } else {
                 try buffer.writer().print("PUB {s} {d}\r\n", .{ msg.subject, msg.data.len });
@@ -501,14 +526,28 @@ pub const Connection = struct {
             try buffer.appendSlice("\r\n");
         }
 
-        // Send via buffer
-        try self.bufferWrite(buffer.items);
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
-        log.debug("Published message to {s}: has_headers={}, data_len={d}", .{ msg.subject, has_headers, msg.data.len });
+        // Allow publishes when connected or reconnecting (buffered).
+        // Reject when not usable for sending.
+        switch (self.status) {
+            .connected, .reconnecting => {},
+            .closed, .connecting, .disconnected, .draining_subs, .draining_pubs => {
+                return ConnectionError.ConnectionClosed;
+            },
+        }
+
+        try self.bufferWrite(buffer.items, asap);
+        if (reply_to_use) |reply| {
+            log.debug("Published message to {s} with reply {s}: has_headers={}, data_len={d}, total_payload={d}", .{ msg.subject, reply, has_headers, msg.data.len, total_payload });
+        } else {
+            log.debug("Published message to {s}: has_headers={}, data_len={d}, total_payload={d}", .{ msg.subject, has_headers, msg.data.len, total_payload });
+        }
     }
 
     pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
-        // Lock immediately like C library
+        // Lock asaply like C library
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -530,14 +569,14 @@ pub const Connection = struct {
         var buffer = ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
         try buffer.writer().print("SUB {s} {d}\r\n", .{ subject, sid });
-        try self.bufferWrite(buffer.items);
+        try self.bufferWrite(buffer.items, false);
 
         log.debug("Subscribed to {s} with sid {d} (sync)", .{ subject, sid });
         return sub;
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
-        // Lock immediately like C library
+        // Lock asaply like C library
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -567,14 +606,14 @@ pub const Connection = struct {
         var buffer = ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
         try buffer.writer().print("SUB {s} {d}\r\n", .{ subject, sid });
-        try self.bufferWrite(buffer.items);
+        try self.bufferWrite(buffer.items, false);
 
         log.debug("Subscribed to {s} with sid {d} (async)", .{ subject, sid });
         return sub;
     }
 
     pub fn unsubscribe(self: *Self, sub: *Subscription) !void {
-        // Lock immediately like C library
+        // Lock asaply like C library
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -593,13 +632,13 @@ pub const Connection = struct {
         var buffer = ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
         try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
-        try self.bufferWrite(buffer.items);
+        try self.bufferWrite(buffer.items, false);
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
     }
 
     pub fn flush(self: *Self) !void {
-        // Lock immediately like C library
+        // Lock asaply like C library
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -607,18 +646,12 @@ pub const Connection = struct {
             return ConnectionError.ConnectionClosed;
         }
 
-        // Force flush any pending writes (mutex already held)
-        const has_pending = self.write_buffer.hasData();
-        if (has_pending) {
-            self.flusher_signaled = true;
-            self.flusher_condition.signal();
-        }
-
         // Increment pending PONG counter before sending PING
         self.pending_pongs += 1;
 
         // Send PING to ensure server acknowledges all previous messages (mutex held)
-        try self.bufferWrite("PING\r\n");
+        // This will also flush any pending writes without delay
+        try self.bufferWrite("PING\r\n", true);
 
         log.debug("Sent PING for flush, waiting for PONG", .{});
 
@@ -641,49 +674,44 @@ pub const Connection = struct {
         log.debug("Flush completed, received PONG", .{});
     }
 
-    pub fn publishRequest(self: *Self, subject: []const u8, reply: []const u8, data: []const u8) !void {
-        // Lock immediately like C library
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.status != .connected) {
-            return ConnectionError.ConnectionClosed;
-        }
-
-        // Format: PUB <subject> <reply> <size>\r\n<data>\r\n
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-
-        try buffer.writer().print("PUB {s} {s} {d}\r\n", .{ subject, reply, data.len });
-        try buffer.appendSlice(data);
-        try buffer.appendSlice("\r\n");
-
-        // Send via buffer (mutex held)
-        try self.bufferWrite(buffer.items);
-
-        log.debug("Published request to {s} with reply {s}: {s}", .{ subject, reply, data });
+    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !*Message {
+        var msg = Message{
+            .subject = subject,
+            .data = data,
+            .arena = undefined,
+        };
+        return self.requestMsg(&msg, timeout_ms);
     }
 
-    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !*Message {
+    pub fn requestMsg(self: *Self, msg: *Message, timeout_ms: u64) !*Message {
         if (self.options.trace) {
-            log.debug("Sending request to {s} with timeout {d}ms", .{ subject, timeout_ms });
+            log.debug("Sending request message to {s} with timeout {d}ms", .{ msg.subject, timeout_ms });
         }
 
         // Ensure response system is initialized (without mutex held)
         try self.response_manager.ensureInitialized(self);
 
-        // Create request
+        // Create request handle
         const handle = try self.response_manager.createRequest();
         defer self.response_manager.cleanupRequest(handle);
 
-        // Get reply subject and send request
+        // Get reply subject for the request (like C library)
         const reply_subject = try self.response_manager.getReplySubject(self.allocator, handle);
         defer self.allocator.free(reply_subject);
-        
-        try self.publishRequest(subject, reply_subject, data);
+
+        // Publish the request message
+        try self.publishRequestMsg(msg, reply_subject);
 
         // Wait for response
-        return self.response_manager.waitForResponse(handle, timeout_ms * std.time.ns_per_ms);
+        const reply_msg = try self.response_manager.waitForResponse(handle, timeout_ms * std.time.ns_per_ms);
+
+        // Check for "no responders" like C library
+        if (reply_msg.isNoResponders()) {
+            reply_msg.deinit();
+            return ConnectionError.NoResponders;
+        }
+
+        return reply_msg;
     }
 
     fn processInitialHandshake(self: *Self) !void {
@@ -840,10 +868,13 @@ pub const Connection = struct {
                 break;
             }
 
-            // Give a chance to accumulate more requests (like C implementation)
-            self.flusher_condition.timedWait(&self.mutex, 1_000_000) catch {}; // 1ms in nanoseconds
+            if (!self.flusher_asap) {
+                // Give a chance to accumulate more requests (like C implementation)
+                self.flusher_condition.timedWait(&self.mutex, 1_000_000) catch {}; // 1ms in nanoseconds
+            }
 
             self.flusher_signaled = false;
+            self.flusher_asap = false;
 
             if (self.status != .connected) {
                 // No need to flush if not connected
@@ -870,26 +901,19 @@ pub const Connection = struct {
                 total_size += iov.len;
             }
 
-            if (stream.writev(iovecs[0..iovec_count])) |total_written| {
-                log.debug("Flushed {} bytes", .{total_written});
-                self.write_buffer.consumeBytesMultiple(total_written);
-                if (total_written < total_size) {
-                    self.mutex.lock();
-                    self.flusher_signaled = true;
-                    // don't need to signal, since we're already in the flusher loop
-                    self.mutex.unlock();
-                }
-            } else |err| {
+            stream.writevAll(iovecs[0..iovec_count]) catch |err| {
                 log.err("Flush error: {}", .{err});
                 self.triggerReconnect(err);
                 break;
-            }
+            };
+
+            self.write_buffer.consumeBytesMultiple(total_size);
         }
 
         log.debug("Flusher loop exited", .{});
     }
 
-    fn bufferWrite(self: *Self, data: []const u8) !void {
+    fn bufferWrite(self: *Self, data: []const u8, asap: bool) !void {
         // Assume mutex is already held by caller
 
         // If we're reconnecting, buffer the message for later
@@ -900,8 +924,11 @@ pub const Connection = struct {
         // Buffer and signal flusher (mutex already held)
         try self.write_buffer.append(data);
 
-        if (!self.flusher_signaled) {
+        // Wake up the flusher thread, in the ASAP mode we signal() multiple times
+        // to wake it up from the 1ms delay, if needed
+        if (!self.flusher_signaled or asap) {
             self.flusher_signaled = true;
+            self.flusher_asap = asap;
             self.flusher_condition.signal();
         }
     }
