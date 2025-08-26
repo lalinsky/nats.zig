@@ -31,6 +31,7 @@ pub const Message = struct {
 
     // Metadata
     sid: u64 = 0,
+    seq: u64 = 0, // TODO this doesn't really belong here
 
     // Headers
     headers: std.hash_map.StringHashMapUnmanaged(ArrayListUnmanaged([]const u8)) = .{},
@@ -91,6 +92,23 @@ pub const Message = struct {
             .data = try arena_allocator.dupe(u8, data),
             .raw_headers = try arena_allocator.dupe(u8, raw_headers),
             .needs_header_parsing = true,
+            .arena = arena,
+        };
+
+        return msg;
+    }
+
+    // Create empty message with just arena allocation
+    pub fn initEmpty(allocator: Allocator) !*Self {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+
+        const arena_allocator = arena.allocator();
+        const msg = try arena_allocator.create(Self);
+
+        msg.* = .{
+            .subject = &[_]u8{},
+            .data = &[_]u8{},
             .arena = arena,
         };
 
