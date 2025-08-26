@@ -15,6 +15,7 @@ pub const jetstream_nak_tests = @import("jetstream_nak_test.zig");
 pub const jetstream_sync_tests = @import("jetstream_sync_test.zig");
 pub const jetstream_stream_purge_tests = @import("jetstream_stream_purge_test.zig");
 pub const jetstream_pull_tests = @import("jetstream_pull_test.zig");
+pub const jetstream_msg_tests = @import("jetstream_msg_test.zig");
 
 const utils = @import("utils.zig");
 
