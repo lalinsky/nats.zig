@@ -108,14 +108,7 @@ pub const Message = struct {
 
         msg.* = .{
             .subject = &[_]u8{},
-            .reply = null,
             .data = &[_]u8{},
-            .headers = .{},
-            .raw_headers = null,
-            .needs_header_parsing = false,
-            .sid = 0,
-            .seq = 0,
-            .time = 0,
             .arena = arena,
         };
 
