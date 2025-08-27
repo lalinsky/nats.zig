@@ -35,7 +35,7 @@ test "get message by sequence" {
     // Get second message
     const msg2 = try js.getMsg("TEST_MSG_GET", 2);
     defer msg2.deinit();
-    
+
     try testing.expectEqualStrings("Second message", msg2.data);
     try testing.expectEqual(@as(u64, 2), msg2.seq);
 }
@@ -185,7 +185,7 @@ test "get message with headers" {
     // Create message with headers
     var msg = try nats.Message.init(std.testing.allocator, "test.msg.headers", null, "Message with headers");
     defer msg.deinit();
-    
+
     try msg.headerSet("X-Test-Header", "test-value");
     try msg.headerSet("X-Another-Header", "another-value");
 

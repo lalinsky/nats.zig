@@ -29,7 +29,7 @@ test "NAK redelivery with delivery count verification" {
         nak_count: u32 = 0,
         mutex: std.Thread.Mutex = .{},
         allocator: std.mem.Allocator,
-        
+
         fn init(allocator: std.mem.Allocator) @This() {
             return .{
                 .messages = std.ArrayList([]const u8).init(allocator),
@@ -37,7 +37,7 @@ test "NAK redelivery with delivery count verification" {
                 .allocator = allocator,
             };
         }
-        
+
         fn deinit(self: *@This()) void {
             for (self.messages.items) |msg| {
                 self.allocator.free(msg);
@@ -57,20 +57,20 @@ test "NAK redelivery with delivery count verification" {
     const NakHandler = struct {
         fn handle(js_msg: *nats.JetStreamMessage, data: *TestData) void {
             defer js_msg.deinit();
-            
+
             data.mutex.lock();
             defer data.mutex.unlock();
-            
+
             // Store message data copy for comparison
             const msg_copy = data.allocator.dupe(u8, js_msg.msg.data) catch return;
             data.messages.append(msg_copy) catch return;
-            
+
             // Get delivery count from JetStream message metadata
             const delivery_count = js_msg.metadata.num_delivered;
             data.delivery_counts.append(delivery_count) catch return;
-            
+
             log.info("Received message (delivery #{}): {s}", .{ delivery_count, js_msg.msg.data });
-            
+
             if (delivery_count == 1) {
                 // First delivery - store the data and NAK it
                 data.first_delivery_data = data.allocator.dupe(u8, js_msg.msg.data) catch return;
@@ -110,36 +110,36 @@ test "NAK redelivery with delivery count verification" {
     while (attempts < 50) { // Wait up to 5 seconds
         std.time.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
-        
+
         test_data.mutex.lock();
         const message_count = test_data.messages.items.len;
         test_data.mutex.unlock();
-        
+
         if (message_count >= 2) break; // Got at least 2 deliveries
     }
 
     // Verify results
     test_data.mutex.lock();
     defer test_data.mutex.unlock();
-    
+
     // Should have received the message at least twice (original + redelivery after NAK)
     try testing.expect(test_data.messages.items.len >= 2);
     try testing.expect(test_data.delivery_counts.items.len >= 2);
     try testing.expect(test_data.nak_count >= 1);
-    
+
     // Verify first delivery had count = 1
     try testing.expectEqual(@as(u64, 1), test_data.delivery_counts.items[0]);
-    
+
     // Verify second delivery had count = 2
     try testing.expectEqual(@as(u64, 2), test_data.delivery_counts.items[1]);
-    
+
     // Verify both deliveries have the same message content
     try testing.expectEqualStrings(test_message, test_data.messages.items[0]);
     try testing.expectEqualStrings(test_message, test_data.messages.items[1]);
-    
+
     // Verify the redelivered message is identical to the first
     try testing.expectEqualStrings(test_data.first_delivery_data.?, test_data.messages.items[1]);
-    
+
     log.info("NAK redelivery test completed successfully:", .{});
     log.info("- Total deliveries: {}", .{test_data.messages.items.len});
     log.info("- NAK count: {}", .{test_data.nak_count});
@@ -156,7 +156,7 @@ test "NAK with max delivery limit" {
 
     // Create a test stream
     const stream_config = nats.StreamConfig{
-        .name = "TEST_NAK_LIMIT_STREAM", 
+        .name = "TEST_NAK_LIMIT_STREAM",
         .subjects = &.{"test.nak.limit.*"},
         .max_msgs = 100,
     };
@@ -169,27 +169,27 @@ test "NAK with max delivery limit" {
         received_deliveries: [5]u64 = undefined,
         mutex: std.Thread.Mutex = .{},
     };
-    
+
     var test_data = LimitTestData{};
 
     // Handler that always NAKs to test max delivery limit
     const AlwaysNakHandler = struct {
         fn handle(js_msg: *nats.JetStreamMessage, data: *LimitTestData) void {
             defer js_msg.deinit();
-            
+
             data.mutex.lock();
             defer data.mutex.unlock();
-            
-            // Get delivery count from JetStream message metadata  
+
+            // Get delivery count from JetStream message metadata
             const delivery_num = js_msg.metadata.num_delivered;
-            
+
             log.info("Received message delivery #{}", .{delivery_num});
-            
+
             if (data.delivery_count < data.received_deliveries.len) {
                 data.received_deliveries[data.delivery_count] = delivery_num;
                 data.delivery_count += 1;
             }
-            
+
             // Always NAK to trigger redelivery (up to max_deliver limit)
             js_msg.nak() catch |err| {
                 log.err("Failed to NAK: {}", .{err});
@@ -197,7 +197,7 @@ test "NAK with max delivery limit" {
         }
     };
 
-    // Consumer with max_deliver = 2 (original + 1 redelivery)  
+    // Consumer with max_deliver = 2 (original + 1 redelivery)
     const consumer_config = nats.ConsumerConfig{
         .durable_name = "nak_limit_consumer",
         .deliver_subject = "push.nak.limit",
@@ -217,11 +217,11 @@ test "NAK with max delivery limit" {
     while (wait_attempts < 30) { // Wait up to 3 seconds
         std.time.sleep(100 * std.time.ns_per_ms);
         wait_attempts += 1;
-        
+
         test_data.mutex.lock();
         const count = test_data.delivery_count;
         test_data.mutex.unlock();
-        
+
         // Should stop at max_deliver limit
         if (count >= 2) {
             // Give a bit more time to ensure no additional deliveries
@@ -233,14 +233,14 @@ test "NAK with max delivery limit" {
     // Verify results
     test_data.mutex.lock();
     defer test_data.mutex.unlock();
-    
+
     // Should have received exactly max_deliver deliveries
     try testing.expectEqual(@as(u32, 2), test_data.delivery_count);
-    
+
     // Verify delivery counts increment correctly
     try testing.expectEqual(@as(u64, 1), test_data.received_deliveries[0]); // First delivery
     try testing.expectEqual(@as(u64, 2), test_data.received_deliveries[1]); // Second delivery
-    
+
     log.info("Max delivery limit test completed:", .{});
     log.info("- Total deliveries received: {}", .{test_data.delivery_count});
     log.info("- First delivery count: {}", .{test_data.received_deliveries[0]});
@@ -271,12 +271,12 @@ test "JetStream message metadata parsing" {
     const MetadataHandler = struct {
         fn handle(js_msg: *nats.JetStreamMessage, received: *bool, verified: *bool, mtx: *std.Thread.Mutex) void {
             defer js_msg.deinit();
-            
+
             mtx.lock();
             defer mtx.unlock();
-            
+
             received.* = true;
-            
+
             log.info("JetStream message metadata:", .{});
             log.info("- Stream: {s}", .{js_msg.metadata.stream});
             log.info("- Consumer: {s}", .{js_msg.metadata.consumer});
@@ -284,19 +284,20 @@ test "JetStream message metadata parsing" {
             log.info("- Stream sequence: {?}", .{js_msg.metadata.sequence.stream});
             log.info("- Delivered count: {}", .{js_msg.metadata.num_delivered});
             log.info("- Pending count: {?}", .{js_msg.metadata.num_pending});
-            
+
             // Verify metadata is populated correctly
             const stream_name = js_msg.metadata.stream;
             const consumer_name = js_msg.metadata.consumer;
-            
+
             if (std.mem.eql(u8, stream_name, "TEST_METADATA_STREAM") and
                 std.mem.eql(u8, consumer_name, "metadata_consumer") and
                 js_msg.metadata.num_delivered == 1 and
                 js_msg.metadata.sequence.consumer != null and
-                js_msg.metadata.sequence.stream != null) {
+                js_msg.metadata.sequence.stream != null)
+            {
                 verified.* = true;
             }
-            
+
             // ACK the message
             js_msg.ack() catch |err| {
                 log.err("Failed to ACK: {}", .{err});
@@ -323,20 +324,20 @@ test "JetStream message metadata parsing" {
     while (attempts < 30) {
         std.time.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
-        
+
         mutex.lock();
         const done = received_message;
         mutex.unlock();
-        
+
         if (done) break;
     }
 
     // Verify results
     mutex.lock();
     defer mutex.unlock();
-    
+
     try testing.expect(received_message);
     try testing.expect(metadata_verified);
-    
+
     log.info("JetStream metadata parsing test completed successfully", .{});
 }

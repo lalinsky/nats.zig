@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
         version: []const u8,
         name: ?[]const u8 = null,
     };
-    
+
     // Parse the ZON content at compile time, or use fallback values if parsing fails
     var parsed_zon: BuildZon = undefined;
     var should_free = false;
@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
         parsed_zon = BuildZon{ .version = "0.0.0", .name = "nats.zig" };
     }
     defer if (should_free) std.zon.parse.free(b.allocator, parsed_zon);
-    
+
     // Create build options
     const options = b.addOptions();
     options.addOption([]const u8, "version", parsed_zon.version);
@@ -52,7 +52,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    
+
     // Add build options to the module
     lib_mod.addOptions("build_options", options);
 
