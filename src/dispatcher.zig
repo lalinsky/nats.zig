@@ -16,19 +16,31 @@ const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const Subscription = @import("subscription.zig").Subscription;
 const ConcurrentQueue = @import("queue.zig").ConcurrentQueue;
+const Connection = @import("connection.zig").Connection;
+const jetstream_message = @import("jetstream_message.zig");
 
 const log = std.log.scoped(.dispatcher);
+
+/// Check if a message is a JetStream message by examining the reply subject
+fn isJetStreamMessage(message: *Message) bool {
+    if (message.reply) |reply_subject| {
+        return std.mem.startsWith(u8, reply_subject, "$JS.ACK.");
+    }
+    return false;
+}
 
 /// Message to be dispatched to a subscription handler
 pub const DispatchMessage = struct {
     subscription: *Subscription,
     message: *Message,
+    connection: *Connection,
 
-    pub fn init(subscription: *Subscription, message: *Message) DispatchMessage {
+    pub fn init(subscription: *Subscription, message: *Message, connection: *Connection) DispatchMessage {
         subscription.retain();
         return .{
             .subscription = subscription,
             .message = message,
+            .connection = connection,
         };
     }
 
@@ -83,8 +95,8 @@ pub const Dispatcher = struct {
     }
     
     /// Enqueue a message for dispatch
-    pub fn enqueue(self: *Dispatcher, subscription: *Subscription, message: *Message) !void {
-        const dispatch_msg = DispatchMessage.init(subscription, message);
+    pub fn enqueue(self: *Dispatcher, subscription: *Subscription, message: *Message, connection: *Connection) !void {
+        const dispatch_msg = DispatchMessage.init(subscription, message, connection);
         errdefer dispatch_msg.deinit();
         try self.queue.push(dispatch_msg);
     }
@@ -121,12 +133,32 @@ pub const Dispatcher = struct {
 
         const subscription = dispatch_msg.subscription;
         const message = dispatch_msg.message;
+        const connection = dispatch_msg.connection;
 
         // Call the subscription's handler in this dispatcher thread context
         // Message ownership is transferred to the handler - handler is responsible for cleanup
         if (subscription.handler) |handler| {
             handler.call(message) catch |err| {
                 log.err("Message handler failed for subscription {}: {}", .{ subscription.sid, err });
+                
+                // Check if this is a JetStream message and auto-NAK if handler failed
+                if (isJetStreamMessage(message)) {
+                    log.warn("Auto-NAKing JetStream message due to handler failure", .{});
+                    
+                    // Create JetStream message wrapper and NAK it
+                    if (jetstream_message.createJetStreamMessage(connection, message)) |js_msg| {
+                        // Only NAK if not already ACK'd/NAK'd
+                        if (!js_msg.isAcked()) {
+                            js_msg.nak() catch |nak_err| {
+                                log.err("Failed to NAK JetStream message: {}", .{nak_err});
+                            };
+                        }
+                        // Note: js_msg is allocated on message's arena, no need to explicitly free
+                    } else |js_err| {
+                        log.err("Failed to create JetStream message wrapper for auto-NAK: {}", .{js_err});
+                    }
+                }
+                
                 // Handler owns the message even on error - no cleanup here
             };
         } else {

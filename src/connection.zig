@@ -1003,7 +1003,7 @@ pub const Connection = struct {
             if (s.handler) |_| {
                 // Async subscription - dispatch to assigned dispatcher
                 if (s.dispatcher) |dispatcher| {
-                    dispatcher.enqueue(s, message) catch |err| {
+                    dispatcher.enqueue(s, message, self) catch |err| {
                         log.err("Failed to dispatch message for sid {d}: {}", .{ msg_arg.sid, err });
                         message.deinit();
                         return;
