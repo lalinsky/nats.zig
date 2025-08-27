@@ -33,10 +33,10 @@ pub const MsgHandlerError = error{
 // Message handler storage for type-erased callback
 pub const MsgHandler = struct {
     ptr: *anyopaque,
-    callFn: *const fn (ptr: *anyopaque, msg: *Message) MsgHandlerError!void,
+    callFn: *const fn (ptr: *anyopaque, msg: *Message) anyerror!void,
     cleanupFn: *const fn (ptr: *anyopaque, allocator: Allocator) void,
 
-    pub fn call(self: *const MsgHandler, msg: *Message) MsgHandlerError!void {
+    pub fn call(self: *const MsgHandler, msg: *Message) anyerror!void {
         return self.callFn(self.ptr, msg);
     }
 
@@ -127,7 +127,7 @@ pub fn createMsgHandler(allocator: Allocator, comptime handlerFn: anytype, args:
     const Context = struct {
         args: @TypeOf(args),
 
-        pub fn call(ctx: *anyopaque, msg: *Message) MsgHandlerError!void {
+        pub fn call(ctx: *anyopaque, msg: *Message) anyerror!void {
             const self_ctx: *@This() = @ptrCast(@alignCast(ctx));
             
             // Handle both fallible and non-fallible user handler functions
