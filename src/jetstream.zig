@@ -25,7 +25,6 @@ const log = std.log.scoped(.jetstream);
 pub const JetStreamMessage = jetstream_message.JetStreamMessage;
 pub const MsgMetadata = jetstream_message.MsgMetadata;
 pub const SequencePair = jetstream_message.SequencePair;
-pub const JetStreamError = jetstream_message.JetStreamError;
 
 const default_api_prefix = "$JS.API.";
 const default_request_timeout_ms = 5000;
@@ -400,7 +399,7 @@ pub const PullSubscription = struct {
                     raw_msg.deinit();
                 } else {
                     // This is a regular message - convert to JetStream message
-                    const js_msg_ptr = try jetstream_message.createJetStreamMessage(self.js, raw_msg);
+                    const js_msg_ptr = try jetstream_message.createJetStreamMessage(self.js.nc, raw_msg);
                     errdefer js_msg_ptr.deinit();
 
                     try messages.append(js_msg_ptr);
@@ -451,7 +450,7 @@ pub const JetStreamSubscription = struct {
         const msg = self.subscription.nextMsg(timeout_ms) orelse return null;
 
         // Convert to JetStream message
-        const js_msg = jetstream_message.createJetStreamMessage(self.js, msg) catch {
+        const js_msg = jetstream_message.createJetStreamMessage(self.js.nc, msg) catch {
             msg.deinit(); // Clean up on error
             return null;
         };
@@ -920,13 +919,13 @@ pub const JetStream = struct {
                 }
 
                 // Create JetStream message wrapper for regular messages
-                const js_msg = jetstream_message.createJetStreamMessage(js, msg) catch {
+                const js_msg = jetstream_message.createJetStreamMessage(js.nc, msg) catch {
                     msg.deinit(); // Clean up on error
                     return;
                 };
 
                 // Call user handler with JetStream message - handler owns cleanup responsibility
-                // Support both void and fallible handlers  
+                // Support both void and fallible handlers
                 const ReturnType = @typeInfo(@TypeOf(handlerFn)).@"fn".return_type.?;
                 if (ReturnType == void) {
                     @call(.auto, handlerFn, .{js_msg} ++ user_args);

@@ -26,27 +26,27 @@ test "ack should succeed on first call" {
         acknowledged: bool = false,
         mutex: std.Thread.Mutex = .{},
     };
-    
+
     var test_data = TestData{};
 
     // Handler that performs first ack
     const AckHandler = struct {
         fn handle(js_msg: *nats.JetStreamMessage, data: *TestData) void {
             defer js_msg.deinit();
-            
+
             data.mutex.lock();
             defer data.mutex.unlock();
-            
+
             data.received = true;
-            
+
             // First ack should succeed
             js_msg.ack() catch |err| {
                 log.err("Failed to ACK message: {}", .{err});
                 return;
             };
-            
+
             // Verify message is acknowledged
-            data.acknowledged = js_msg.acked();
+            data.acknowledged = js_msg.isAcked();
         }
     };
 
@@ -69,18 +69,18 @@ test "ack should succeed on first call" {
     while (attempts < 30) {
         std.time.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
-        
+
         test_data.mutex.lock();
         const done = test_data.received;
         test_data.mutex.unlock();
-        
+
         if (done) break;
     }
 
     // Verify results
     test_data.mutex.lock();
     defer test_data.mutex.unlock();
-    
+
     try testing.expect(test_data.received);
     try testing.expect(test_data.acknowledged);
 }
@@ -94,7 +94,7 @@ test "ack should fail on second call" {
 
     // Create stream
     const stream_config = nats.StreamConfig{
-        .name = "TEST_DUP_ACK2_STREAM", 
+        .name = "TEST_DUP_ACK2_STREAM",
         .subjects = &.{"test.dup.ack2.*"},
     };
     var stream_info = try js.addStream(stream_config);
@@ -107,31 +107,31 @@ test "ack should fail on second call" {
         second_ack_failed: bool = false,
         mutex: std.Thread.Mutex = .{},
     };
-    
+
     var test_data = TestData{};
 
     // Handler that performs double ack
     const DoubleAckHandler = struct {
         fn handle(js_msg: *nats.JetStreamMessage, data: *TestData) void {
             defer js_msg.deinit();
-            
+
             data.mutex.lock();
             defer data.mutex.unlock();
-            
+
             data.received = true;
-            
+
             // First ack should succeed
             if (js_msg.ack()) {
                 data.first_ack_success = true;
             } else |_| {
                 return;
             }
-            
-            // Second ack should fail with MessageAlreadyAcknowledged
+
+            // Second ack should fail with AlreadyAcked
             if (js_msg.ack()) {
                 // Should not reach here
             } else |err| {
-                if (err == nats.JetStreamError.MessageAlreadyAcknowledged) {
+                if (err == nats.AckError.AlreadyAcked) {
                     data.second_ack_failed = true;
                 }
             }
@@ -157,18 +157,18 @@ test "ack should fail on second call" {
     while (attempts < 30) {
         std.time.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
-        
+
         test_data.mutex.lock();
         const done = test_data.received;
         test_data.mutex.unlock();
-        
+
         if (done) break;
     }
 
     // Verify results
     test_data.mutex.lock();
     defer test_data.mutex.unlock();
-    
+
     try testing.expect(test_data.received);
     try testing.expect(test_data.first_ack_success);
     try testing.expect(test_data.second_ack_failed);
@@ -196,31 +196,31 @@ test "nak should fail after ack" {
         nak_failed: bool = false,
         mutex: std.Thread.Mutex = .{},
     };
-    
+
     var test_data = TestData{};
 
     // Handler that acks then naks
     const AckNakHandler = struct {
         fn handle(js_msg: *nats.JetStreamMessage, data: *TestData) void {
             defer js_msg.deinit();
-            
+
             data.mutex.lock();
             defer data.mutex.unlock();
-            
+
             data.received = true;
-            
+
             // First ack should succeed
             if (js_msg.ack()) {
                 data.ack_success = true;
             } else |_| {
                 return;
             }
-            
+
             // NAK after ack should fail
             if (js_msg.nak()) {
                 // Should not reach here
             } else |err| {
-                if (err == nats.JetStreamError.MessageAlreadyAcknowledged) {
+                if (err == nats.AckError.AlreadyAcked) {
                     data.nak_failed = true;
                 }
             }
@@ -246,18 +246,18 @@ test "nak should fail after ack" {
     while (attempts < 30) {
         std.time.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
-        
+
         test_data.mutex.lock();
         const done = test_data.received;
         test_data.mutex.unlock();
-        
+
         if (done) break;
     }
 
     // Verify results
     test_data.mutex.lock();
     defer test_data.mutex.unlock();
-    
+
     try testing.expect(test_data.received);
     try testing.expect(test_data.ack_success);
     try testing.expect(test_data.nak_failed);
@@ -286,19 +286,19 @@ test "inProgress can be called multiple times" {
         not_acknowledged_after_progress: bool = false,
         mutex: std.Thread.Mutex = .{},
     };
-    
+
     var test_data = TestData{};
 
     // Handler that calls inProgress multiple times then acks
     const ProgressHandler = struct {
         fn handle(js_msg: *nats.JetStreamMessage, data: *TestData) void {
             defer js_msg.deinit();
-            
+
             data.mutex.lock();
             defer data.mutex.unlock();
-            
+
             data.received = true;
-            
+
             // Call inProgress multiple times
             var i: u32 = 0;
             while (i < 3) : (i += 1) {
@@ -308,12 +308,12 @@ test "inProgress can be called multiple times" {
                     return;
                 }
             }
-            
+
             // Check not acknowledged after inProgress calls
-            if (!js_msg.acked()) {
+            if (!js_msg.isAcked()) {
                 data.not_acknowledged_after_progress = true;
             }
-            
+
             // Final ack should still work
             if (js_msg.ack()) {
                 data.final_ack = true;
@@ -323,7 +323,7 @@ test "inProgress can be called multiple times" {
         }
     };
 
-    // Create consumer  
+    // Create consumer
     const consumer_config = nats.ConsumerConfig{
         .durable_name = "progress_consumer",
         .deliver_subject = "push.progress",
@@ -342,18 +342,18 @@ test "inProgress can be called multiple times" {
     while (attempts < 30) {
         std.time.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
-        
+
         test_data.mutex.lock();
         const done = test_data.received;
         test_data.mutex.unlock();
-        
+
         if (done) break;
     }
 
     // Verify results
     test_data.mutex.lock();
     defer test_data.mutex.unlock();
-    
+
     try testing.expect(test_data.received);
     try testing.expectEqual(@as(u32, 3), test_data.progress_calls);
     try testing.expect(test_data.not_acknowledged_after_progress);
