@@ -26,13 +26,13 @@ const DispatcherPool = dispatcher_mod.DispatcherPool;
 const server_pool_mod = @import("server_pool.zig");
 const ServerPool = server_pool_mod.ServerPool;
 const Server = server_pool_mod.Server;
-const net_utils = @import("net_utils.zig");
 const jetstream_mod = @import("jetstream.zig");
 const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
 const build_options = @import("build_options");
 const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
 const ResponseManager = @import("response_manager.zig").ResponseManager;
+const Socket = @import("socket.zig").Socket;
 
 const log = std.log.scoped(.connection);
 
@@ -111,9 +111,9 @@ pub const PendingBuffer = struct {
         try self.buffer.appendSlice(data);
     }
 
-    pub fn flush(self: *PendingBuffer, stream: net.Stream) !void {
+    pub fn flush(self: *PendingBuffer, socket: Socket) !void {
         if (self.buffer.items.len > 0) {
-            try stream.writeAll(self.buffer.items);
+            try socket.writeAll(self.buffer.items);
             self.buffer.clearRetainingCapacity();
         }
     }
@@ -187,7 +187,7 @@ pub const Connection = struct {
     options: ConnectionOptions,
 
     // Network
-    stream: ?net.Stream = null,
+    socket: ?Socket = null,
     status: ConnectionStatus = .disconnected,
 
     // Server management
@@ -342,7 +342,7 @@ pub const Connection = struct {
 
         // Establish TCP connection (outside mutex like C library)
         log.debug("Connecting to server: {s}:{d}", .{ selected_server.parsed_url.host, selected_server.parsed_url.port });
-        const stream = net.tcpConnectToHost(self.allocator, selected_server.parsed_url.host, selected_server.parsed_url.port) catch |err| {
+        const socket = Socket.connect(self.allocator, selected_server.parsed_url.host, selected_server.parsed_url.port) catch |err| {
             self.mutex.lock();
             selected_server.last_error = err;
             self.status = .disconnected;
@@ -350,13 +350,13 @@ pub const Connection = struct {
             return ConnectionError.ConnectionFailed;
         };
 
-        self.stream = stream;
+        self.socket = socket;
         self.should_stop.store(false, .monotonic);
 
         // Handle initial handshake (outside mutex) - before setting non-blocking
         self.processInitialHandshake() catch |err| {
-            self.stream = null;
-            stream.close();
+            self.socket = null;
+            socket.close();
             self.mutex.lock();
             selected_server.last_error = err;
             self.status = .disconnected;
@@ -397,8 +397,8 @@ pub const Connection = struct {
         self.status = .closed;
 
         // Shutdown socket to wake up reader thread (like C library)
-        if (self.stream) |stream| {
-            net_utils.shutdown(stream, .both) catch |shutdown_err| {
+        if (self.socket) |*socket| {
+            socket.shutdown(.both) catch |shutdown_err| {
                 log.debug("Socket shutdown failed: {}", .{shutdown_err});
                 // Continue anyway, not critical
             };
@@ -750,12 +750,11 @@ pub const Connection = struct {
     }
 
     fn processInitialHandshake(self: *Self) !void {
-        const stream = self.stream orelse return ConnectionError.ConnectionClosed;
-        const reader = stream.reader();
+        const socket = self.socket orelse return ConnectionError.ConnectionClosed;
 
         // Read INFO message
         var info_buffer: [4096]u8 = undefined;
-        if (try reader.readUntilDelimiterOrEof(info_buffer[0..], '\n')) |info_line| {
+        if (try socket.readUntilDelimiterOrEof(info_buffer[0..], '\n')) |info_line| {
             log.debug("Received: {s}", .{info_line});
 
             if (!std.mem.startsWith(u8, info_line, "INFO ")) {
@@ -799,18 +798,18 @@ pub const Connection = struct {
         try buffer.writer().writeAll("\r\n");
         const connect_msg = buffer.items;
 
-        try stream.writeAll(connect_msg);
-        try stream.writeAll("PING\r\n");
+        try socket.writeAll(connect_msg);
+        try socket.writeAll("PING\r\n");
 
         // Wait for PONG (or +OK then PONG if verbose)
         var response_buffer: [256]u8 = undefined;
-        if (try reader.readUntilDelimiterOrEof(response_buffer[0..], '\n')) |response| {
+        if (try socket.readUntilDelimiterOrEof(response_buffer[0..], '\n')) |response| {
             log.debug("Handshake response: {s}", .{response});
 
             // Handle +OK if verbose
             if (std.mem.startsWith(u8, response, "+OK")) {
                 // Read next line for PONG
-                if (try reader.readUntilDelimiterOrEof(response_buffer[0..], '\n')) |pong_line| {
+                if (try socket.readUntilDelimiterOrEof(response_buffer[0..], '\n')) |pong_line| {
                     if (!std.mem.startsWith(u8, pong_line, "PONG")) {
                         return ConnectionError.InvalidProtocol;
                     }
@@ -847,14 +846,14 @@ pub const Connection = struct {
                 break;
             }
 
-            const stream = self.stream orelse break;
+            const socket = self.socket orelse break;
 
             // Unlock before I/O like C _readLoop
             self.mutex.unlock();
             defer self.mutex.lock(); // Re-lock at end of iteration
 
             // Simple blocking read - shutdown() will wake us up
-            const bytes_read = stream.read(&buffer) catch |err| {
+            const bytes_read = socket.read(&buffer) catch |err| {
                 log.err("Read error: {}", .{err});
                 self.triggerReconnect(err); // Handles its own locking
                 break;
@@ -879,9 +878,9 @@ pub const Connection = struct {
         }
 
         // Cleanup stream when reader exits (like C _readLoop)
-        if (self.stream) |stream| {
-            stream.close();
-            self.stream = null;
+        if (self.socket) |socket| {
+            socket.close();
+            self.socket = null;
         }
 
         log.debug("Reader loop exited", .{});
@@ -917,7 +916,8 @@ pub const Connection = struct {
                 continue;
             }
 
-            const stream = self.stream orelse break;
+            // If we are not connected, keep looping until told to stop
+            const socket = self.socket orelse continue;
 
             // Unlock before I/O like C _readLoop
             self.mutex.unlock();
@@ -937,7 +937,7 @@ pub const Connection = struct {
                 total_size += iov.len;
             }
 
-            stream.writevAll(iovecs[0..iovec_count]) catch |err| {
+            socket.writevAll(iovecs[0..iovec_count]) catch |err| {
                 log.err("Flush error: {}", .{err});
                 self.triggerReconnect(err);
                 break;
@@ -1135,8 +1135,8 @@ pub const Connection = struct {
         self.abort_reconnect = false; // Reset abort flag when starting reconnection
 
         // Shutdown socket to interrupt any ongoing reads (like C natsSock_Shutdown)
-        if (self.stream) |stream| {
-            net_utils.shutdown(stream, .both) catch |shutdown_err| {
+        if (self.socket) |socket| {
+            socket.shutdown(.both) catch |shutdown_err| {
                 log.debug("Socket shutdown failed: {}", .{shutdown_err});
                 // Continue anyway, not critical
             };
@@ -1235,14 +1235,14 @@ pub const Connection = struct {
 
             // Establish TCP connection (outside mutex)
             log.debug("Connecting to server: {s}:{d} (reconnect attempt {})", .{ server.parsed_url.host, server.parsed_url.port, total_attempts });
-            const stream = net.tcpConnectToHost(self.allocator, server.parsed_url.host, server.parsed_url.port) catch |err| {
+            const socket = Socket.connect(self.allocator, server.parsed_url.host, server.parsed_url.port) catch |err| {
                 self.mutex.lock(); // Re-acquire for error handling
                 server.last_error = err;
                 log.debug("Reconnection attempt {} failed: {}", .{ total_attempts, err });
                 continue; // Continue loop (mutex still held)
             };
 
-            self.stream = stream;
+            self.socket = socket;
             self.should_stop.store(false, .monotonic);
 
             // Handle initial handshake (outside mutex)
@@ -1290,7 +1290,7 @@ pub const Connection = struct {
                 };
 
                 // Flush pending messages (outside mutex like C library)
-                self.pending_buffer.flush(self.stream.?) catch |err| {
+                self.pending_buffer.flush(self.socket.?) catch |err| {
                     log.warn("Failed to flush pending messages: {}", .{err});
                     // Continue anyway, connection is established
                 };
@@ -1309,8 +1309,8 @@ pub const Connection = struct {
                 return;
             } else |err| {
                 // Handshake failed, clean up and continue
-                self.stream = null;
-                stream.close();
+                self.socket = null;
+                socket.close();
                 server.last_error = err;
                 self.status = .reconnecting;
                 log.debug("Handshake failed for reconnection attempt {}: {}", .{ total_attempts, err });
@@ -1377,8 +1377,8 @@ pub const Connection = struct {
             }
 
             // Send directly (bypass buffering since we're reconnecting)
-            const stream = self.stream orelse return ConnectionError.ConnectionClosed;
-            try stream.writeAll(buffer.items);
+            const socket = self.socket orelse return ConnectionError.ConnectionClosed;
+            try socket.writeAll(buffer.items);
 
             log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
             buffer.clearRetainingCapacity();
