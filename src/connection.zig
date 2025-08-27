@@ -309,16 +309,16 @@ pub const Connection = struct {
 
         // Add server to pool if it's not already there
         if (self.server_pool.getSize() == 0) {
-            try self.server_pool.addServer(url, false); // Explicit server
+            _ = try self.server_pool.addServer(url, false); // Explicit server
         }
 
         return self.connectToServer();
     }
 
-    pub fn addServer(self: *Self, url_str: []const u8) !void {
+    pub fn addServer(self: *Self, url_str: []const u8) !bool {
         self.mutex.lock();
         defer self.mutex.unlock();
-        try self.server_pool.addServer(url_str, false); // Explicit server
+        return try self.server_pool.addServer(url_str, false); // Explicit server
     }
 
     fn connectToServer(self: *Self) !void {
@@ -1062,10 +1062,16 @@ pub const Connection = struct {
 
         // Add discovered servers to pool if any connect_urls were provided
         if (self.server_info.connect_urls) |urls| {
-            log.debug("Discovered {} servers: {s}", .{ urls.len, urls });
-            self.addDiscoveredServers(urls) catch |err| {
-                log.warn("Failed to add discovered servers: {}", .{err});
-            };
+            for (urls) |url| {
+                // Add as implicit server (discovered, not explicitly configured)
+                const was_added = self.server_pool.addServer(url, true) catch |err| {
+                    log.warn("Failed to add discovered server {s}: {}", .{ url, err });
+                    continue;
+                };
+                if (was_added) {
+                    log.info("Discovered new server: {s}", .{url});
+                }
+            }
         }
     }
 
@@ -1376,22 +1382,6 @@ pub const Connection = struct {
 
             log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
             buffer.clearRetainingCapacity();
-        }
-    }
-
-    fn addDiscoveredServers(self: *Self, urls: [][]const u8) !void {
-        log.debug("Adding {} discovered servers to pool", .{urls.len});
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        for (urls) |url| {
-            // Add as implicit server (discovered, not explicitly configured)
-            self.server_pool.addServer(url, true) catch |err| {
-                log.warn("Failed to add discovered server {s}: {}", .{ url, err });
-                continue;
-            };
-            log.debug("Added discovered server: {s}", .{url});
         }
     }
 

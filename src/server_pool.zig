@@ -86,7 +86,7 @@ pub const ServerPool = struct {
         if (self.default_pwd) |p| self.allocator.free(p);
     }
 
-    pub fn addServer(self: *ServerPool, url_str: []const u8, is_implicit: bool) !void {
+    pub fn addServer(self: *ServerPool, url_str: []const u8, is_implicit: bool) !bool {
         // Create server first to extract host:port (like C library)
         const server = try self.allocator.create(Server);
         errdefer self.allocator.destroy(server);
@@ -100,7 +100,7 @@ pub const ServerPool = struct {
             // We already have a server with the same host:port - clean up duplicate
             server.deinit(self.allocator);
             self.allocator.destroy(server);
-            return;
+            return false;
         }
 
         // Store the server
@@ -115,6 +115,8 @@ pub const ServerPool = struct {
                 self.default_pwd = try self.allocator.dupe(u8, p);
             }
         }
+
+        return true;
     }
 
     // Core server selection algorithm matching C library's natsSrvPool_GetNextServer
@@ -131,7 +133,7 @@ pub const ServerPool = struct {
             // Remove current server and move it to back (like C library)
             // Remove using the stored key and get the mutable server back
             const removed_server = self.servers.fetchSwapRemove(current_srv.key).?;
-            
+
             // Add current server back at the end - capacity guaranteed since we just removed
             self.servers.putAssumeCapacity(removed_server.key, removed_server.value);
         } else {
@@ -167,7 +169,7 @@ pub const ServerPool = struct {
             const j = offset + random.uintLessThan(usize, i + 1 - offset);
             self.servers.entries.swap(i, j);
         }
-        
+
         // Rebuild the hash index
         self.servers.reIndex(self.allocator);
     }
@@ -182,9 +184,9 @@ test "server pool basic operations" {
     defer pool.deinit();
 
     // Test adding servers
-    try pool.addServer("nats://localhost:4222", false);
-    try pool.addServer("nats://localhost:4223", false);
-    try pool.addServer("nats://localhost:4224", true);
+    _ = try pool.addServer("nats://localhost:4222", false);
+    _ = try pool.addServer("nats://localhost:4223", false);
+    _ = try pool.addServer("nats://localhost:4224", true);
 
     try std.testing.expect(pool.getSize() == 3);
 
@@ -209,21 +211,21 @@ test "server pool duplicate prevention" {
     defer pool.deinit();
 
     // Add same server twice
-    try pool.addServer("nats://localhost:4222", false);
-    try pool.addServer("nats://localhost:4222", false);
+    _ = try pool.addServer("nats://localhost:4222", false);
+    _ = try pool.addServer("nats://localhost:4222", false);
 
     // Should only have one server
     try std.testing.expect(pool.getSize() == 1);
 
     // Test C library pattern: different URLs with same host:port should be duplicates
-    try pool.addServer("nats://user:pass@localhost:4222", false);
-    try pool.addServer("nats://other:auth@localhost:4222", true);
+    _ = try pool.addServer("nats://user:pass@localhost:4222", false);
+    _ = try pool.addServer("nats://other:auth@localhost:4222", true);
 
     // Should still only have one server (same host:port)
     try std.testing.expect(pool.getSize() == 1);
 
     // Different host:port should be added
-    try pool.addServer("nats://localhost:4223", false);
+    _ = try pool.addServer("nats://localhost:4223", false);
     try std.testing.expect(pool.getSize() == 2);
 }
 
@@ -235,8 +237,8 @@ test "server removal on max reconnects" {
     var pool = ServerPool.init(allocator);
     defer pool.deinit();
 
-    try pool.addServer("nats://localhost:4222", false);
-    try pool.addServer("nats://localhost:4223", false);
+    _ = try pool.addServer("nats://localhost:4222", false);
+    _ = try pool.addServer("nats://localhost:4223", false);
 
     const server1 = try pool.getNextServer(-1, null);
     try std.testing.expect(server1 != null);
