@@ -16,11 +16,18 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 
-// Header constants (like C NATS library)
-const STATUS_HDR = "Status";
-const DESCRIPTION_HDR = "Description";
-const HDR_STATUS_NO_RESP_503 = "503";
+// Status line prefix
 const NATS_STATUS_PREFIX = "NATS/1.0";
+
+const HDR_STATUS = "Status";
+const HDR_DESCRIPTION = "Description";
+
+const HDR_STATUS_CONTROL = "100";
+const HDR_STATUS_BAD_REQUEST = "400";
+const HDR_STATUS_NOT_FOUND = "404";
+const HDR_STATUS_TIMEOUT = "408";
+const HDR_STATUS_MAX_BYTES = "409";
+const HDR_STATUS_NO_RESPONSE = "503";
 
 // Simple, idiomatic Zig message implementation using ArenaAllocator
 pub const Message = struct {
@@ -156,13 +163,13 @@ pub const Message = struct {
                 // Add Status header directly to avoid circular dependency
                 var status_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
                 status_list.appendAssumeCapacity(status);
-                try self.headers.put(arena_allocator, STATUS_HDR, status_list);
+                try self.headers.put(arena_allocator, HDR_STATUS, status_list);
 
                 // Add Description header if present
                 if (description) |desc| {
                     var desc_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
                     desc_list.appendAssumeCapacity(desc);
-                    try self.headers.put(arena_allocator, DESCRIPTION_HDR, desc_list);
+                    try self.headers.put(arena_allocator, HDR_DESCRIPTION, desc_list);
                 }
             }
         }
@@ -243,8 +250,8 @@ pub const Message = struct {
     pub fn isNoResponders(self: *Self) bool {
         if (self.data.len != 0) return false;
 
-        const status = self.headerGet(STATUS_HDR) catch return false;
-        return status != null and std.mem.eql(u8, status.?, HDR_STATUS_NO_RESP_503);
+        const status = self.headerGet(HDR_STATUS) catch return false;
+        return status != null and std.mem.eql(u8, status.?, HDR_STATUS_NO_RESPONSE);
     }
 
     // Encode headers for transmission
