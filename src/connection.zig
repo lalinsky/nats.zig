@@ -292,6 +292,9 @@ pub const Connection = struct {
 
     /// Ensure dispatcher pool is initialized (lazy initialization)
     fn ensureDispatcherPool(self: *Self) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         if (self.dispatcher_pool != null) return; // Already initialized
 
         self.dispatcher_pool = try dispatcher_mod.acquireGlobalPool(self.allocator);
@@ -550,8 +553,7 @@ pub const Connection = struct {
         }
     }
 
-    pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
-        // Lock asaply like C library
+    fn subscribeInternal(self: *Self, sub: *Subscription) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -559,36 +561,31 @@ pub const Connection = struct {
             return ConnectionError.ConnectionClosed;
         }
 
-        const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject, null);
-        errdefer sub.deinit();
-
-        // Add to subscriptions map
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
-        try self.subscriptions.put(sid, sub);
+        try self.subscriptions.put(sub.sid, sub);
         sub.retain(); // Connection takes ownership reference
 
         // Send SUB command via buffer
         var buffer = ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
-        try buffer.writer().print("SUB {s} {d}\r\n", .{ subject, sid });
+        try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
         try self.bufferWrite(buffer.items, false);
+    }
 
-        log.debug("Subscribed to {s} with sid {d} (sync)", .{ subject, sid });
+    /// Subscribe to a subject, the code is responsible for handling the fetching
+    pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
+        const sid = self.next_sid.fetchAdd(1, .monotonic);
+        const sub = try Subscription.init(self.allocator, sid, subject, null);
+        errdefer sub.deinit();
+
+        try self.subscribeInternal(sub);
+
+        log.debug("Subscribed to {s} with sid {d} (sync)", .{ sub.subject, sub.sid });
         return sub;
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
-        // Lock asaply like C library
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.status != .connected) {
-            return ConnectionError.ConnectionClosed;
-        }
-
-        // Create type-erased message handler
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
         errdefer handler.cleanup(self.allocator);
 
@@ -596,23 +593,12 @@ pub const Connection = struct {
         const sub = try Subscription.init(self.allocator, sid, subject, handler);
         errdefer sub.deinit();
 
-        // Assign dispatcher for async subscription (round-robin like C library)
         try self.ensureDispatcherPool();
         sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
 
-        // Add to subscriptions map
-        self.subs_mutex.lock();
-        defer self.subs_mutex.unlock();
-        try self.subscriptions.put(sid, sub);
-        sub.retain(); // Connection takes ownership reference
+        try self.subscribeInternal(sub);
 
-        // Send SUB command via buffer
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-        try buffer.writer().print("SUB {s} {d}\r\n", .{ subject, sid });
-        try self.bufferWrite(buffer.items, false);
-
-        log.debug("Subscribed to {s} with sid {d} (async)", .{ subject, sid });
+        log.debug("Subscribed to {s} with sid {d} (async)", .{ sub.subject, sub.sid });
         return sub;
     }
 
