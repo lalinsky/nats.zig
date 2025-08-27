@@ -22,12 +22,20 @@ const log = std.log.scoped(.subscription);
 
 
 // Message handler storage for type-erased callback
+// Error set for message handlers
+pub const MsgHandlerError = error{
+    /// Handler encountered an error processing the message
+    HandlerError,
+    /// Memory allocation error during message processing
+    OutOfMemory,
+};
+
 pub const MsgHandler = struct {
     ptr: *anyopaque,
-    callFn: *const fn (ptr: *anyopaque, msg: *Message) anyerror!void,
+    callFn: *const fn (ptr: *anyopaque, msg: *Message) MsgHandlerError!void,
     cleanupFn: *const fn (ptr: *anyopaque, allocator: Allocator) void,
 
-    pub fn call(self: *const MsgHandler, msg: *Message) anyerror!void {
+    pub fn call(self: *const MsgHandler, msg: *Message) MsgHandlerError!void {
         return self.callFn(self.ptr, msg);
     }
 
@@ -118,7 +126,7 @@ pub fn createMsgHandler(allocator: Allocator, comptime handlerFn: anytype, args:
     const Context = struct {
         args: @TypeOf(args),
 
-        pub fn call(ctx: *anyopaque, msg: *Message) anyerror!void {
+        pub fn call(ctx: *anyopaque, msg: *Message) MsgHandlerError!void {
             const self_ctx: *@This() = @ptrCast(@alignCast(ctx));
             
             // Handle both fallible and non-fallible user handler functions

@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const Subscription = @import("subscription.zig").Subscription;
 const MsgHandler = @import("subscription.zig").MsgHandler;
+const MsgHandlerError = @import("subscription.zig").MsgHandlerError;
 const inbox = @import("inbox.zig");
 const nuid = @import("nuid.zig");
 const Connection = @import("connection.zig").Connection;
@@ -187,12 +188,12 @@ pub const ResponseManager = struct {
         }
     }
 
-    fn responseHandlerWrapper(msg: *Message, manager: *ResponseManager) anyerror!void {
+    fn responseHandlerWrapper(msg: *Message, manager: *ResponseManager) MsgHandlerError!void {
         // Regular subscribe handler wrapper
         try manager.responseHandler(msg);
     }
 
-    fn responseHandler(self: *ResponseManager, msg: *Message) anyerror!void {
+    fn responseHandler(self: *ResponseManager, msg: *Message) MsgHandlerError!void {
         var own_msg = true;
         defer if (own_msg) msg.deinit();
 
