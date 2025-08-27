@@ -54,6 +54,11 @@ pub const MessageBatch = @import("jetstream.zig").MessageBatch;
 
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 
+test {
+    _ = @import("jetstream.zig");
+    _ = @import("jetstream_message.zig");
+}
+
 // Test basic functionality
 test "basic connection lifecycle" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

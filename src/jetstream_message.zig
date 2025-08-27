@@ -36,12 +36,12 @@ pub const SequencePair = struct {
 /// JetStream message metadata (matches Go NATS library MsgMetadata)
 pub const MsgMetadata = struct {
     sequence: SequencePair = .{}, // Consumer and stream sequence numbers
-    num_delivered: u64 = 1, // Number of times this message has been delivered
-    num_pending: ?u64 = null, // Number of pending messages for this consumer
-    timestamp: ?u64 = null, // Message timestamp (nanoseconds since epoch) from reply subject
-    stream: ?[]const u8 = null, // Stream name
-    consumer: ?[]const u8 = null, // Consumer name
-    domain: ?[]const u8 = null, // JetStream domain (for clustered JetStream)
+    num_delivered: u64 = 0, // Number of times this message has been delivered
+    num_pending: u64 = 0, // Number of pending messages for this consumer
+    timestamp: u64 = 0, // Message timestamp (nanoseconds since epoch) from reply subject
+    stream: []const u8 = "", // Stream name
+    consumer: []const u8 = "", // Consumer name
+    domain: []const u8 = "", // JetStream domain (for clustered JetStream)
 };
 
 pub const JetStreamMessage = struct {
@@ -105,21 +105,21 @@ pub const JetStreamMessage = struct {
 };
 
 /// Parse v1 ACK subject format: $JS.ACK.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<tm>.<pending>
-fn parseAckV1(subject: []const u8, metadata: *MsgMetadata) void {
+fn parseAckV1(subject: []const u8, metadata: *MsgMetadata) !void {
     var iter = std.mem.splitScalar(u8, subject, '.');
     var index: u8 = 0;
 
     while (iter.next()) |token| {
         switch (index) {
-            0 => if (!std.mem.eql(u8, token, "$JS")) return,
-            1 => if (!std.mem.eql(u8, token, "ACK")) return,
+            0 => if (!std.mem.eql(u8, token, "$JS")) return error.InvalidSubject,
+            1 => if (!std.mem.eql(u8, token, "ACK")) return error.InvalidSubject,
             2 => metadata.stream = token,
             3 => metadata.consumer = token,
-            4 => metadata.num_delivered = std.fmt.parseInt(u64, token, 10) catch 1,
-            5 => metadata.sequence.stream = std.fmt.parseInt(u64, token, 10) catch null,
-            6 => metadata.sequence.consumer = std.fmt.parseInt(u64, token, 10) catch null,
-            7 => metadata.timestamp = std.fmt.parseInt(u64, token, 10) catch null,
-            8 => metadata.num_pending = std.fmt.parseInt(u64, token, 10) catch null,
+            4 => metadata.num_delivered = try std.fmt.parseInt(u64, token, 10),
+            5 => metadata.sequence.stream = try std.fmt.parseInt(u64, token, 10),
+            6 => metadata.sequence.consumer = try std.fmt.parseInt(u64, token, 10),
+            7 => metadata.timestamp = try std.fmt.parseInt(u64, token, 10),
+            8 => metadata.num_pending = try std.fmt.parseInt(u64, token, 10),
             else => break,
         }
         index += 1;
@@ -127,14 +127,14 @@ fn parseAckV1(subject: []const u8, metadata: *MsgMetadata) void {
 }
 
 /// Parse v2 ACK subject format: $JS.ACK.<domain>.<account hash>.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<tm>.<pending>.<token>
-fn parseAckV2(subject: []const u8, metadata: *MsgMetadata) void {
+fn parseAckV2(subject: []const u8, metadata: *MsgMetadata) !void {
     var iter = std.mem.splitScalar(u8, subject, '.');
     var index: u8 = 0;
 
     while (iter.next()) |token| {
         switch (index) {
-            0 => if (!std.mem.eql(u8, token, "$JS")) return,
-            1 => if (!std.mem.eql(u8, token, "ACK")) return,
+            0 => if (!std.mem.eql(u8, token, "$JS")) return error.InvalidSubject,
+            1 => if (!std.mem.eql(u8, token, "ACK")) return error.InvalidSubject,
             2 => {
                 if (token.len > 0 and !std.mem.eql(u8, token, "_")) {
                     metadata.domain = token;
@@ -143,11 +143,12 @@ fn parseAckV2(subject: []const u8, metadata: *MsgMetadata) void {
             3 => {}, // Skip account hash
             4 => metadata.stream = token,
             5 => metadata.consumer = token,
-            6 => metadata.num_delivered = std.fmt.parseInt(u64, token, 10) catch 1,
-            7 => metadata.sequence.stream = std.fmt.parseInt(u64, token, 10) catch null,
-            8 => metadata.sequence.consumer = std.fmt.parseInt(u64, token, 10) catch null,
-            9 => metadata.timestamp = std.fmt.parseInt(u64, token, 10) catch null,
-            10 => metadata.num_pending = std.fmt.parseInt(u64, token, 10) catch null,
+            6 => metadata.num_delivered = try std.fmt.parseInt(u64, token, 10),
+            7 => metadata.sequence.stream = try std.fmt.parseInt(u64, token, 10),
+            8 => metadata.sequence.consumer = try std.fmt.parseInt(u64, token, 10),
+            9 => metadata.timestamp = try std.fmt.parseInt(u64, token, 10),
+            10 => metadata.num_pending = try std.fmt.parseInt(u64, token, 10),
+            11 => {}, // Skip token
             else => break,
         }
         index += 1;
@@ -159,12 +160,52 @@ pub fn parseAckSubject(subject: []const u8, metadata: *MsgMetadata) !void {
     const token_count = std.mem.count(u8, subject, ".") + 1;
 
     if (token_count == 9) {
-        parseAckV1(subject, metadata);
-    } else if (token_count == 11) {
-        parseAckV2(subject, metadata);
+        try parseAckV1(subject, metadata);
+    } else if (token_count == 12) {
+        try parseAckV2(subject, metadata);
     } else {
-        return error.InvalidAckSubject;
+        return error.InvalidSubject;
     }
+}
+
+test "parseAckSubject invalid" {
+    var m: MsgMetadata = .{};
+    try std.testing.expectError(error.InvalidSubject, parseAckSubject("", &m));
+    try std.testing.expectError(error.InvalidSubject, parseAckSubject("foo", &m));
+    try std.testing.expectError(error.InvalidCharacter, parseAckSubject("$JS.ACK.STREAM.CONSUMER.a.b.c.d.e", &m));
+    try std.testing.expectError(error.InvalidCharacter, parseAckSubject("$JS.ACK.DOMAIN.ACCOUNT_HASH.STREAM.CONSUMER.a.c.d.e.f.TOKEN", &m));
+}
+
+test "parseAckSubject v1" {
+    // $JS.ACK.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<tm>.<pending>
+    const subject = "$JS.ACK.STREAM.CONSUMER.123.456.789.10.11";
+    var meta: MsgMetadata = .{};
+    try parseAckSubject(subject, &meta);
+
+    try std.testing.expectEqualStrings("", meta.domain);
+    try std.testing.expectEqualStrings("STREAM", meta.stream);
+    try std.testing.expectEqualStrings("CONSUMER", meta.consumer);
+    try std.testing.expectEqual(123, meta.num_delivered);
+    try std.testing.expectEqual(456, meta.sequence.stream);
+    try std.testing.expectEqual(789, meta.sequence.consumer);
+    try std.testing.expectEqual(10, meta.timestamp);
+    try std.testing.expectEqual(11, meta.num_pending);
+}
+
+test "parseAckSubject v2" {
+    // $JS.ACK.<domain>.<account hash>.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<tm>.<pending>.<token>
+    const subject = "$JS.ACK.DOMAIN.ACCOUNT_HASH.STREAM.CONSUMER.123.456.789.10.11.TOKEN";
+    var meta: MsgMetadata = .{};
+    try parseAckSubject(subject, &meta);
+
+    try std.testing.expectEqualStrings("DOMAIN", meta.domain);
+    try std.testing.expectEqualStrings("STREAM", meta.stream);
+    try std.testing.expectEqualStrings("CONSUMER", meta.consumer);
+    try std.testing.expectEqual(123, meta.num_delivered);
+    try std.testing.expectEqual(456, meta.sequence.stream);
+    try std.testing.expectEqual(789, meta.sequence.consumer);
+    try std.testing.expectEqual(10, meta.timestamp);
+    try std.testing.expectEqual(11, meta.num_pending);
 }
 
 /// Parse JetStream headers from a message and create JetStreamMessage wrapper
