@@ -45,7 +45,7 @@ test "JetStream synchronous subscription basic functionality" {
 
     // Verify message content
     try testing.expectEqualStrings(test_message, js_msg.msg.data);
-    
+
     // Verify we can acknowledge the message
     try js_msg.ack();
 

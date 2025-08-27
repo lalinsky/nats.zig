@@ -29,9 +29,9 @@ test "basic push subscription" {
         fn handle(js_msg: *nats.JetStreamMessage, counter: *u32) void {
             defer js_msg.deinit();
             counter.* += 1;
-            
+
             log.info("Received message #{d}: {s}", .{ counter.*, js_msg.msg.data });
-            
+
             // Acknowledge the message
             js_msg.ack() catch |err| {
                 log.err("Failed to ack message: {}", .{err});
@@ -39,7 +39,7 @@ test "basic push subscription" {
         }
     };
 
-    // Create push consumer configuration  
+    // Create push consumer configuration
     // Note: deliver_subject must not overlap with stream subjects to avoid cycles
     const consumer_config = nats.ConsumerConfig{
         .durable_name = "test_push_consumer",
@@ -88,10 +88,10 @@ test "push subscription with flow control" {
         fn handle(js_msg: *nats.JetStreamMessage, counter: *u32) void {
             defer js_msg.deinit();
             counter.* += 1;
-            
+
             // Simulate some processing time
             std.time.sleep(10 * std.time.ns_per_ms);
-            
+
             // Acknowledge successful processing
             js_msg.ack() catch |err| {
                 log.err("Failed to ack task: {}", .{err});

@@ -1,3 +1,6 @@
 - read README.md for overview of the project
 - read files in docs/reference/*.md if you need knowledge about the NATS protocol
-- run tests (`zig build test`) to confirm your changes are working
+- run `zig build test` to confirm your changes are working
+- use the env variable `TEST_FILTER="test name"` to run specific tests, if needed
+- use the env variable `TEST_LOG_CAPTURE=0` to see log output from successful tests, if needed
+- format code using `zig fmt` before commit

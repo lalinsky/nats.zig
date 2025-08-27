@@ -26,11 +26,6 @@ test "get account info" {
     try testing.expect(result.value.streams == 0);
 }
 
-
-
-
-
-
 test "add consumer" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
@@ -233,8 +228,6 @@ test "delete consumer" {
     }
     try testing.expect(!found_after);
 }
-
-
 
 // // Test stream management functionality
 // test "jetstream stream creation and management" {
