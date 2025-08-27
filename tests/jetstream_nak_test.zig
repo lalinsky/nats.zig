@@ -278,16 +278,16 @@ test "JetStream message metadata parsing" {
             received.* = true;
             
             log.info("JetStream message metadata:", .{});
-            log.info("- Stream: {s}", .{js_msg.metadata.stream orelse "unknown"});
-            log.info("- Consumer: {s}", .{js_msg.metadata.consumer orelse "unknown"});
+            log.info("- Stream: {s}", .{js_msg.metadata.stream});
+            log.info("- Consumer: {s}", .{js_msg.metadata.consumer});
             log.info("- Consumer sequence: {?}", .{js_msg.metadata.sequence.consumer});
             log.info("- Stream sequence: {?}", .{js_msg.metadata.sequence.stream});
             log.info("- Delivered count: {}", .{js_msg.metadata.num_delivered});
             log.info("- Pending count: {?}", .{js_msg.metadata.num_pending});
             
             // Verify metadata is populated correctly
-            const stream_name = js_msg.metadata.stream orelse "";
-            const consumer_name = js_msg.metadata.consumer orelse "";
+            const stream_name = js_msg.metadata.stream;
+            const consumer_name = js_msg.metadata.consumer;
             
             if (std.mem.eql(u8, stream_name, "TEST_METADATA_STREAM") and
                 std.mem.eql(u8, consumer_name, "metadata_consumer") and
