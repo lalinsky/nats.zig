@@ -18,6 +18,7 @@ const Subscription = @import("subscription.zig").Subscription;
 const subscription_mod = @import("subscription.zig");
 const jetstream_message = @import("jetstream_message.zig");
 const inbox = @import("inbox.zig");
+const validation = @import("validation.zig");
 
 const log = std.log.scoped(.jetstream);
 
@@ -571,6 +572,9 @@ pub const JetStream = struct {
 
     /// Creates a new stream with the provided configuration.
     pub fn addStream(self: *JetStream, config: StreamConfig) !Result(StreamInfo) {
+        // Validate stream name
+        try validation.validateStreamName(config.name);
+        
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.CREATE.{s}", .{config.name});
         defer self.allocator.free(subject);
@@ -587,6 +591,8 @@ pub const JetStream = struct {
 
     /// Updates a stream with the provided configuration.
     pub fn updateStream(self: *JetStream, config: StreamConfig) !Result(StreamInfo) {
+        // Validate stream name
+        try validation.validateStreamName(config.name);
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.UPDATE.{s}", .{config.name});
         defer self.allocator.free(subject);
@@ -603,6 +609,9 @@ pub const JetStream = struct {
 
     /// Deletes a stream.
     pub fn deleteStream(self: *JetStream, stream_name: []const u8) !void {
+        // Validate stream name
+        try validation.validateStreamName(stream_name);
+        
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.DELETE.{s}", .{stream_name});
         defer self.allocator.free(subject);
@@ -616,6 +625,9 @@ pub const JetStream = struct {
 
     /// Gets information about a specific stream.
     pub fn getStreamInfo(self: *JetStream, stream_name: []const u8) !Result(StreamInfo) {
+        // Validate stream name
+        try validation.validateStreamName(stream_name);
+        
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.INFO.{s}", .{stream_name});
         defer self.allocator.free(subject);
@@ -673,6 +685,19 @@ pub const JetStream = struct {
     /// Creates a new consumer with the provided configuration.
     /// Uses DURABLE endpoint only if durable_name is provided, otherwise creates ephemeral consumer.
     pub fn addConsumer(self: *JetStream, stream_name: []const u8, config: ConsumerConfig) !Result(ConsumerInfo) {
+        // Validate stream name
+        try validation.validateStreamName(stream_name);
+        
+        // Validate consumer name if provided
+        if (config.name) |name| {
+            try validation.validateConsumerName(name);
+        }
+        
+        // Validate durable name if provided
+        if (config.durable_name) |durable_name| {
+            try validation.validateConsumerName(durable_name);
+        }
+        
         log.info("adding consumer", .{});
         const subject = if (config.durable_name) |durable_name|
             try std.fmt.allocPrint(self.allocator, "CONSUMER.DURABLE.CREATE.{s}.{s}", .{ stream_name, durable_name })
@@ -697,6 +722,10 @@ pub const JetStream = struct {
 
     /// Gets information about a specific consumer.
     pub fn getConsumerInfo(self: *JetStream, stream_name: []const u8, consumer_name: []const u8) !Result(ConsumerInfo) {
+        // Validate names
+        try validation.validateStreamName(stream_name);
+        try validation.validateConsumerName(consumer_name);
+        
         const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.INFO.{s}.{s}", .{ stream_name, consumer_name });
         defer self.allocator.free(subject);
 
@@ -708,6 +737,10 @@ pub const JetStream = struct {
 
     /// Deletes a consumer.
     pub fn deleteConsumer(self: *JetStream, stream_name: []const u8, consumer_name: []const u8) !void {
+        // Validate names
+        try validation.validateStreamName(stream_name);
+        try validation.validateConsumerName(consumer_name);
+        
         const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.DELETE.{s}.{s}", .{ stream_name, consumer_name });
         defer self.allocator.free(subject);
 
@@ -720,6 +753,9 @@ pub const JetStream = struct {
 
     /// Purges messages from a stream.
     pub fn purgeStream(self: *JetStream, stream_name: []const u8, request: StreamPurgeRequest) !Result(StreamPurgeResponse) {
+        // Validate stream name
+        try validation.validateStreamName(stream_name);
+        
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.PURGE.{s}", .{stream_name});
         defer self.allocator.free(subject);
 
