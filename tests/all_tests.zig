@@ -1,32 +1,20 @@
 const std = @import("std");
-const net = std.net;
-const time = std.time;
 const nats = @import("nats");
-
-// Import all test modules
-pub const minimal_tests = @import("minimal_test.zig");
-pub const headers_tests = @import("headers_test.zig");
-pub const core_request_reply_tests = @import("core_request_reply_test.zig");
-// pub const reconnection_tests = @import("reconnection_test.zig");
-pub const jetstream_tests = @import("jetstream_test.zig");
-pub const jetstream_stream_tests = @import("jetstream_stream_test.zig");
-pub const jetstream_push_tests = @import("jetstream_push_test.zig");
-pub const jetstream_nak_tests = @import("jetstream_nak_test.zig");
-pub const jetstream_sync_tests = @import("jetstream_sync_test.zig");
-pub const jetstream_stream_purge_tests = @import("jetstream_stream_purge_test.zig");
-pub const jetstream_pull_tests = @import("jetstream_pull_test.zig");
-pub const jetstream_msg_tests = @import("jetstream_msg_test.zig");
-pub const jetstream_duplicate_ack_tests = @import("jetstream_duplicate_ack_test.zig");
-
 const utils = @import("utils.zig");
 
-test "tests:beforeAll" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    try utils.runDockerCompose(allocator, &.{ "up", "-d" });
-    try utils.waitForHealthyServices(allocator, 10_000);
+test {
+    _ = @import("minimal_test.zig");
+    _ = @import("headers_test.zig");
+    _ = @import("core_request_reply_test.zig");
+    _ = @import("jetstream_test.zig");
+    _ = @import("jetstream_stream_test.zig");
+    _ = @import("jetstream_push_test.zig");
+    _ = @import("jetstream_nak_test.zig");
+    _ = @import("jetstream_sync_test.zig");
+    _ = @import("jetstream_stream_purge_test.zig");
+    _ = @import("jetstream_pull_test.zig");
+    _ = @import("jetstream_msg_test.zig");
+    _ = @import("jetstream_duplicate_ack_test.zig");
 }
 
 test "tests:beforeEach" {
@@ -46,15 +34,19 @@ test "tests:beforeEach" {
     }
 }
 
+test "tests:beforeAll" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try utils.runDockerCompose(allocator, &.{ "up", "-d" });
+    try utils.waitForHealthyServices(allocator, 10_000);
+}
+
 test "tests:afterAll" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     try utils.runDockerCompose(allocator, &.{"down"});
-}
-
-// Re-export test declarations so they run
-test {
-    std.testing.refAllDecls(@This());
 }
