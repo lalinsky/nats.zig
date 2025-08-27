@@ -182,7 +182,6 @@ pub const ConnectionOptions = struct {
     no_responders: bool = true,
 };
 
-
 pub const Connection = struct {
     allocator: Allocator,
     options: ConnectionOptions,
@@ -277,7 +276,6 @@ pub const Connection = struct {
 
         // Clean up write buffer
         self.write_buffer.deinit();
-
 
         // Clean up response manager
         self.response_manager.deinit();
@@ -646,38 +644,38 @@ pub const Connection = struct {
     pub fn flush(self: *Self) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         if (self.status != .connected) {
             return ConnectionError.ConnectionClosed;
         }
-        
+
         // Buffer the PING first (can fail on allocation)
         try self.bufferWrite("PING\r\n", true); // ASAP=true for immediate flush
-        
+
         // Only increment counter after successful buffering
         self.outgoing_pings += 1;
         const our_ping_id = self.outgoing_pings;
-        
-        log.debug("Sent PING for flush, ping_id={}, waiting for PONG", .{our_ping_id});
-        
+
+        log.debug("Sent PING with ping_id={}, waiting for PONG", .{our_ping_id});
+
         const timeout_ns = self.options.timeout_ms * std.time.ns_per_ms;
         var timer = try std.time.Timer.start();
-        
+
         while (self.incoming_pongs < our_ping_id) {
             if (self.status != .connected) {
                 return ConnectionError.ConnectionClosed;
             }
-            
+
             const elapsed_ns = timer.read();
             if (elapsed_ns >= timeout_ns) {
                 log.warn("Flush timeout waiting for PONG", .{});
                 return ConnectionError.Timeout;
             }
-            
+
             const remaining_ns = timeout_ns - elapsed_ns;
             self.pong_condition.timedWait(&self.mutex, remaining_ns) catch {};
         }
-        
+
         log.debug("Flush completed, received PONG for ping_id={}", .{our_ping_id});
     }
 
@@ -1050,29 +1048,18 @@ pub const Connection = struct {
     pub fn processPong(self: *Self) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         self.incoming_pongs += 1;
         self.pong_condition.broadcast();
-        
-        log.debug("Received PONG for ping_id={}, incoming_pongs now {}", .{self.incoming_pongs, self.incoming_pongs});
+
+        log.debug("Received PONG for ping_id={}", .{self.incoming_pongs});
     }
 
     pub fn processPing(self: *Self) !void {
-        std.debug.print("processPing: status={}, stream={}\n", .{ self.status, self.stream != null });
-        const ping_start = std.time.nanoTimestamp();
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
-        if (self.status == .connected) {
-            const stream = self.stream orelse return ConnectionError.ConnectionClosed;
-            std.debug.print("processPing: about to writeAll PONG\n", .{});
-            stream.writeAll("PONG\r\n") catch |err| {
-                std.debug.print("processPing: writeAll failed: {}\n", .{err});
-                log.err("Failed to send PONG: {}", .{err});
-            };
-            std.debug.print("processPing: PONG write took {d}ms\n", .{@divTrunc(std.time.nanoTimestamp() - ping_start, std.time.ns_per_ms)});
-            log.debug("Sent PONG in response to PING", .{});
-        } else {
-            std.debug.print("processPing: skipped (not connected or no stream)\n", .{});
-        }
+        try self.bufferWrite("PONG\r\n", true);
     }
 
     // Reconnection Logic
