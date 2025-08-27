@@ -563,8 +563,15 @@ pub const Connection = struct {
 
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
+
         try self.subscriptions.put(sub.sid, sub);
         sub.retain(); // Connection takes ownership reference
+
+        errdefer {
+            if (self.subscriptions.remove(sub.sid)) {
+                sub.release();
+            }
+        }
 
         // Send SUB command via buffer
         var buffer = ArrayList(u8).init(self.allocator);
