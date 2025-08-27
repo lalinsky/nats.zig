@@ -37,6 +37,11 @@ pub const MsgMetadata = struct {
     domain: ?[]const u8 = null,           // JetStream domain (for clustered JetStream)
 };
 
+/// JetStream errors
+pub const JetStreamError = error{
+    MessageAlreadyAcknowledged,
+};
+
 pub const JetStreamMessage = struct {
     /// Underlying NATS message
     msg: *Message,
@@ -49,6 +54,8 @@ pub const JetStreamMessage = struct {
     subject: ?[]const u8 = null,
     /// Reply subject for ACK/NAK
     reply: ?[]const u8 = null,
+    /// Atomic flag to track acknowledgment status (prevents duplicate ack/nak)
+    ack_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     
     pub fn deinit(self: *JetStreamMessage) void {
         self.msg.deinit();
@@ -56,20 +63,36 @@ pub const JetStreamMessage = struct {
     
     /// Acknowledge successful processing
     pub fn ack(self: *JetStreamMessage) !void {
+        // Check if already acknowledged using atomic compare-and-swap
+        const was_acknowledged = self.ack_done.cmpxchgStrong(false, true, .acquire, .monotonic);
+        if (was_acknowledged != null) {
+            return JetStreamError.MessageAlreadyAcknowledged;
+        }
         try self.sendAck(.ack);
     }
     
     /// Negative acknowledge - request redelivery
     pub fn nak(self: *JetStreamMessage) !void {
+        // Check if already acknowledged using atomic compare-and-swap
+        const was_acknowledged = self.ack_done.cmpxchgStrong(false, true, .acquire, .monotonic);
+        if (was_acknowledged != null) {
+            return JetStreamError.MessageAlreadyAcknowledged;
+        }
         try self.sendAck(.nak);
     }
     
     /// Terminate delivery - don't redeliver this message
     pub fn term(self: *JetStreamMessage) !void {
+        // Check if already acknowledged using atomic compare-and-swap
+        const was_acknowledged = self.ack_done.cmpxchgStrong(false, true, .acquire, .monotonic);
+        if (was_acknowledged != null) {
+            return JetStreamError.MessageAlreadyAcknowledged;
+        }
         try self.sendAck(.term);
     }
     
     /// Indicate work in progress - extend ack wait timer
+    /// Note: inProgress can be called multiple times per NATS specification
     pub fn inProgress(self: *JetStreamMessage) !void {
         try self.sendAck(.progress);
     }
@@ -153,6 +176,11 @@ pub fn parseAckSubject(subject: []const u8, metadata: *MsgMetadata) void {
         parseAckV2(subject, metadata);
     }
     // Invalid token counts are silently ignored
+}
+
+/// Check if message has been acknowledged  
+pub fn isAcknowledged(self: *JetStreamMessage) bool {
+    return self.ack_done.load(.acquire);
 }
 
 /// Parse JetStream headers from a message and create JetStreamMessage wrapper
