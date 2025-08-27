@@ -970,6 +970,9 @@ pub const JetStream = struct {
     }
 
     pub fn subscribe(self: *JetStream, stream_name: []const u8, consumer_config: ConsumerConfig, comptime handlerFn: anytype, args: anytype) !*JetStreamSubscription {
+        // Validate that this is a push consumer configuration
+        const deliver_subject = consumer_config.deliver_subject orelse return error.MissingDeliverSubject;
+
         // Create push consumer config by removing pull-only fields
         var push_config = consumer_config;
         push_config.max_waiting = 0; // Push consumers don't support max_waiting
@@ -979,8 +982,6 @@ pub const JetStream = struct {
         // Create the push consumer first
         var consumer_info = try self.addConsumer(stream_name, push_config);
         errdefer consumer_info.deinit();
-
-        const deliver_subject = consumer_config.deliver_subject orelse return error.MissingDeliverSubject;
 
         // Define the handler inline to avoid the two-level context issue
         const JSHandler = struct {
@@ -1033,6 +1034,9 @@ pub const JetStream = struct {
 
     /// Create a synchronous push subscription for manual message consumption
     pub fn subscribeSync(self: *JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*JetStreamSubscription {
+        // Validate that this is a push consumer configuration with deliver_subject
+        const deliver_subject = consumer_config.deliver_subject orelse return error.MissingDeliverSubject;
+
         // Create push consumer config
         var push_config = consumer_config;
         push_config.max_waiting = 0; // Push consumers don't support max_waiting
@@ -1042,8 +1046,6 @@ pub const JetStream = struct {
         // Create the push consumer
         var consumer_info = try self.addConsumer(stream_name, push_config);
         errdefer consumer_info.deinit();
-
-        const deliver_subject = consumer_config.deliver_subject orelse return error.MissingDeliverSubject;
 
         // Create synchronous subscription (no callback handler)
         const subscription = try self.nc.subscribeSync(deliver_subject);
