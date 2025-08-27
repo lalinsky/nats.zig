@@ -902,7 +902,7 @@ pub const JetStream = struct {
 
         // Define the handler inline to avoid the two-level context issue
         const JSHandler = struct {
-            fn wrappedHandler(msg: *Message, js: *JetStream, user_args: @TypeOf(args)) void {
+            fn wrappedHandler(msg: *Message, js: *JetStream, user_args: @TypeOf(args)) subscription_mod.MsgHandlerError!void {
                 // Check for status messages (heartbeats and flow control)
                 if (msg.headers.get("Status")) |status_values| {
                     if (status_values.items.len > 0) {

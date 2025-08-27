@@ -124,7 +124,10 @@ pub const Dispatcher = struct {
 
         // Call the subscription's handler in this dispatcher thread context
         if (subscription.handler) |handler| {
-            handler.call(message);
+            handler.call(message) catch |err| {
+                log.err("Message handler failed for subscription {}: {}", .{ subscription.sid, err });
+                // For now, just continue - message will be cleaned up
+            };
         } else {
             // No handler - this shouldn't happen for async subscriptions
             log.warn("Received message for subscription {} without handler", .{subscription.sid});
