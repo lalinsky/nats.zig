@@ -1042,6 +1042,9 @@ pub const Connection = struct {
     pub fn processInfo(self: *Self, info_json: []const u8) !void {
         log.debug("Received INFO: {s}", .{info_json});
 
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         // Reset arena to clear any previous server info strings
         _ = self.server_info_arena.reset(.retain_capacity);
         const arena = self.server_info_arena.allocator();
