@@ -20,15 +20,6 @@ const Dispatcher = @import("dispatcher.zig").Dispatcher;
 
 const log = std.log.scoped(.subscription);
 
-// Error set for message handlers
-pub const MsgHandlerError = error{
-    /// Handler encountered an error processing the message
-    HandlerError,
-    /// Memory allocation error during message processing
-    OutOfMemory,
-    /// Any other error that might occur during message handling
-    Unexpected,
-};
 
 // Message handler storage for type-erased callback
 pub const MsgHandler = struct {
