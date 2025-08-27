@@ -20,7 +20,6 @@ const Dispatcher = @import("dispatcher.zig").Dispatcher;
 
 const log = std.log.scoped(.subscription);
 
-
 // Message handler storage for type-erased callback
 // Error set for message handlers
 
@@ -41,6 +40,7 @@ pub const MsgHandler = struct {
 pub const Subscription = struct {
     sid: u64,
     subject: []const u8,
+    queue_group: ?[]const u8 = null,
     messages: MessageQueue,
     allocator: Allocator,
 
@@ -49,22 +49,26 @@ pub const Subscription = struct {
 
     // Callback support
     handler: ?MsgHandler = null,
-    
+
     // Assigned dispatcher (for async subscriptions only)
     dispatcher: ?*Dispatcher = null,
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
-    pub fn init(allocator: Allocator, sid: u64, subject: []const u8, handler: ?MsgHandler) !*Subscription {
+    pub fn init(allocator: Allocator, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
         const sub = try allocator.create(Subscription);
         errdefer allocator.destroy(sub);
 
         const subject_copy = try allocator.dupe(u8, subject);
         errdefer allocator.free(subject_copy);
 
+        const queue_group_copy = if (queue_group) |group| try allocator.dupe(u8, group) else null;
+        errdefer if (queue_group_copy) |group| allocator.free(group);
+
         sub.* = Subscription{
             .sid = sid,
             .subject = subject_copy,
+            .queue_group = queue_group_copy,
             .messages = MessageQueue.init(allocator, .{}),
             .allocator = allocator,
             .handler = handler,
@@ -86,6 +90,10 @@ pub const Subscription = struct {
     fn deinitInternal(self: *Subscription) void {
         self.allocator.free(self.subject);
 
+        if (self.queue_group) |queue_group| {
+            self.allocator.free(queue_group);
+        }
+
         // Clean up handler context if present
         if (self.handler) |handler| {
             handler.cleanup(self.allocator);
@@ -97,10 +105,10 @@ pub const Subscription = struct {
             msg.deinit();
         }
         self.messages.deinit();
-        
+
         // Clear dispatcher reference (no explicit unsubscription needed - reference counting handles it)
         self.dispatcher = null;
-        
+
         self.allocator.destroy(self);
     }
 
@@ -122,7 +130,7 @@ pub fn createMsgHandler(allocator: Allocator, comptime handlerFn: anytype, args:
 
         pub fn call(ctx: *anyopaque, msg: *Message) anyerror!void {
             const self_ctx: *@This() = @ptrCast(@alignCast(ctx));
-            
+
             // Handle both fallible and non-fallible user handler functions
             const ReturnType = @typeInfo(@TypeOf(handlerFn)).@"fn".return_type.?;
             if (ReturnType == void) {
