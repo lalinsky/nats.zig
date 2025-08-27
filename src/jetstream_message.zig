@@ -64,30 +64,36 @@ pub const JetStreamMessage = struct {
     /// Acknowledge successful processing
     pub fn ack(self: *JetStreamMessage) !void {
         // Check if already acknowledged using atomic compare-and-swap
-        const was_acknowledged = self.acknowledged.cmpxchgStrong(false, true, .acquire, .monotonic);
+        const was_acknowledged = self.acknowledged.cmpxchgStrong(false, true, .acq_rel, .acquire);
         if (was_acknowledged != null) {
             return JetStreamError.MessageAlreadyAcknowledged;
         }
+        // If sendAck fails, revert the acknowledged flag to allow retry
+        errdefer self.acknowledged.store(false, .release);
         try self.sendAck(.ack);
     }
     
     /// Negative acknowledge - request redelivery
     pub fn nak(self: *JetStreamMessage) !void {
         // Check if already acknowledged using atomic compare-and-swap
-        const was_acknowledged = self.acknowledged.cmpxchgStrong(false, true, .acquire, .monotonic);
+        const was_acknowledged = self.acknowledged.cmpxchgStrong(false, true, .acq_rel, .acquire);
         if (was_acknowledged != null) {
             return JetStreamError.MessageAlreadyAcknowledged;
         }
+        // If sendAck fails, revert the acknowledged flag to allow retry
+        errdefer self.acknowledged.store(false, .release);
         try self.sendAck(.nak);
     }
     
     /// Terminate delivery - don't redeliver this message
     pub fn term(self: *JetStreamMessage) !void {
         // Check if already acknowledged using atomic compare-and-swap
-        const was_acknowledged = self.acknowledged.cmpxchgStrong(false, true, .acquire, .monotonic);
+        const was_acknowledged = self.acknowledged.cmpxchgStrong(false, true, .acq_rel, .acquire);
         if (was_acknowledged != null) {
             return JetStreamError.MessageAlreadyAcknowledged;
         }
+        // If sendAck fails, revert the acknowledged flag to allow retry
+        errdefer self.acknowledged.store(false, .release);
         try self.sendAck(.term);
     }
     
