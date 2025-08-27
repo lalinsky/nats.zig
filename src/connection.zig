@@ -791,6 +791,7 @@ pub const Connection = struct {
             .name = client_name,
             .lang = build_options.lang,
             .version = build_options.version,
+            .protocol = 1,
         };
 
         try buffer.writer().writeAll("CONNECT ");
