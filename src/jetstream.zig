@@ -744,9 +744,8 @@ pub const JetStream = struct {
     /// Uses DURABLE endpoint only if durable_name is provided, otherwise creates ephemeral consumer.
     pub fn addConsumer(self: *JetStream, stream_name: []const u8, config: ConsumerConfig) !Result(ConsumerInfo) {
         try validateStreamName(stream_name);
-        if (config.durable_name) |name| {
-            try validateConsumerName(name);
-        }
+        if (config.name) |n| try validateConsumerName(n);
+        if (config.durable_name) |n| try validateConsumerName(n);
 
         log.info("adding consumer", .{});
         const subject = if (config.durable_name) |durable_name|
