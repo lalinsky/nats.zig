@@ -569,20 +569,12 @@ pub const Connection = struct {
         // Send SUB command via buffer
         var buffer = ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
-        try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
+        if (sub.queue_group) |group| {
+            try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, group, sub.sid });
+        } else {
+            try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
+        }
         try self.bufferWrite(buffer.items, false);
-    }
-
-    /// Subscribe to a subject, the code is responsible for handling the fetching
-    pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
-        const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject, null);
-        errdefer sub.deinit();
-
-        try self.subscribeInternal(sub);
-
-        log.debug("Subscribed to {s} with sid {d} (sync)", .{ sub.subject, sub.sid });
-        return sub;
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
@@ -590,7 +582,7 @@ pub const Connection = struct {
         errdefer handler.cleanup(self.allocator);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject, handler);
+        const sub = try Subscription.init(self.allocator, sid, subject, null, handler);
         errdefer sub.deinit();
 
         try self.ensureDispatcherPool();
@@ -599,6 +591,47 @@ pub const Connection = struct {
         try self.subscribeInternal(sub);
 
         log.debug("Subscribed to {s} with sid {d} (async)", .{ sub.subject, sub.sid });
+        return sub;
+    }
+
+    /// Subscribe to a subject, the code is responsible for handling the fetching
+    pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
+        const sid = self.next_sid.fetchAdd(1, .monotonic);
+        const sub = try Subscription.init(self.allocator, sid, subject, null, null);
+        errdefer sub.deinit();
+
+        try self.subscribeInternal(sub);
+
+        log.debug("Subscribed to {s} with sid {d} (sync)", .{ sub.subject, sub.sid });
+        return sub;
+    }
+
+    pub fn queueSubscribe(self: *Self, subject: []const u8, queue_group: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
+        const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
+        errdefer handler.cleanup(self.allocator);
+
+        const sid = self.next_sid.fetchAdd(1, .monotonic);
+        const sub = try Subscription.init(self.allocator, sid, subject, queue_group, handler);
+        errdefer sub.deinit();
+
+        try self.ensureDispatcherPool();
+        sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
+
+        try self.subscribeInternal(sub);
+
+        log.debug("Subscribed to {s} with sid {d} (async)", .{ sub.subject, sub.sid });
+        return sub;
+    }
+
+    /// Subscribe to a subject, the code is responsible for handling the fetching
+    pub fn queueSubscribeSync(self: *Self, subject: []const u8, queue_group: []const u8) !*Subscription {
+        const sid = self.next_sid.fetchAdd(1, .monotonic);
+        const sub = try Subscription.init(self.allocator, sid, subject, queue_group, null);
+        errdefer sub.deinit();
+
+        try self.subscribeInternal(sub);
+
+        log.debug("Subscribed to {s} with sid {d} (sync)", .{ sub.subject, sub.sid });
         return sub;
     }
 
