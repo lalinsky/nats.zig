@@ -502,11 +502,6 @@ pub const Connection = struct {
 
         const total_payload = headers_len + msg.data.len;
 
-        // Validate payload size against server limit (like C library)
-        if (self.server_info.max_payload > 0 and total_payload > @as(usize, @intCast(self.server_info.max_payload))) {
-            return PublishError.MaxPayload;
-        }
-
         const reply_to_use = reply_override orelse msg.reply;
 
         var buffer = ArrayList(u8).init(self.allocator);
@@ -535,6 +530,11 @@ pub const Connection = struct {
 
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        // Validate payload size against server limit
+        if (self.server_info.max_payload > 0 and total_payload > @as(usize, @intCast(self.server_info.max_payload))) {
+            return PublishError.MaxPayload;
+        }
 
         // Allow publishes when connected or reconnecting (buffered).
         // Reject when not usable for sending.
@@ -615,7 +615,7 @@ pub const Connection = struct {
 
     pub fn queueSubscribe(self: *Self, subject: []const u8, queue_group: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
         if (queue_group.len == 0) return error.EmptyQueueGroupName;
-        
+
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
         errdefer handler.cleanup(self.allocator);
 
@@ -635,7 +635,7 @@ pub const Connection = struct {
     /// Subscribe to a subject, the code is responsible for handling the fetching
     pub fn queueSubscribeSync(self: *Self, subject: []const u8, queue_group: []const u8) !*Subscription {
         if (queue_group.len == 0) return error.EmptyQueueGroupName;
-        
+
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.init(self.allocator, sid, subject, queue_group, null);
         errdefer sub.deinit();
