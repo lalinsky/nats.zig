@@ -107,9 +107,9 @@ test "server pool management" {
     defer conn.deinit();
 
     // Add multiple servers
-    try conn.addServer("nats://localhost:4222");
-    try conn.addServer("nats://localhost:4223");
-    try conn.addServer("nats://localhost:4224");
+    _ = try conn.addServer("nats://localhost:4222");
+    _ = try conn.addServer("nats://localhost:4223");
+    _ = try conn.addServer("nats://localhost:4224");
 
     // Test server pool has correct number of servers
     try std.testing.expect(conn.server_pool.getSize() == 3);
