@@ -1,0 +1,9 @@
+[
+  {
+    "label": "zig build test",
+    "command": "zig",
+    "args": ["build", "test"],
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  }
+]
