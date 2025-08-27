@@ -29,6 +29,64 @@ pub const SequencePair = jetstream_message.SequencePair;
 const default_api_prefix = "$JS.API.";
 const default_request_timeout_ms = 5000;
 
+fn isProhibitedChar(c: u8) bool {
+    // Explicit prohibited characters
+    if (c == '.' or c == '>' or c == '*' or c == '/' or c == '\\') {
+        return true;
+    }
+
+    // Any whitespace or control character
+    if (std.ascii.isWhitespace(c) or std.ascii.isControl(c)) {
+        return true;
+    }
+
+    return false;
+}
+
+pub fn validateStreamName(name: []const u8) !void {
+    if (name.len == 0) {
+        return error.InvalidStreamName;
+    }
+    for (name) |c| {
+        if (isProhibitedChar(c)) {
+            return error.InvalidStreamName;
+        }
+    }
+}
+
+test "validateStreamName" {
+    try validateStreamName("valid-stream-name");
+    try std.testing.expectError(error.InvalidStreamName, validateStreamName(""));
+    try std.testing.expectError(error.InvalidStreamName, validateStreamName("foo bar"));
+    try std.testing.expectError(error.InvalidStreamName, validateStreamName("foo.bar"));
+    try std.testing.expectError(error.InvalidStreamName, validateStreamName("foo*"));
+    try std.testing.expectError(error.InvalidStreamName, validateStreamName("foo>"));
+    try std.testing.expectError(error.InvalidStreamName, validateStreamName("foo/"));
+    try std.testing.expectError(error.InvalidStreamName, validateStreamName("foo\\"));
+}
+
+pub fn validateConsumerName(name: []const u8) !void {
+    if (name.len == 0) {
+        return error.InvalidConsumerName;
+    }
+    for (name) |c| {
+        if (isProhibitedChar(c)) {
+            return error.InvalidConsumerName;
+        }
+    }
+}
+
+test "validateConsumerName" {
+    try validateConsumerName("valid-consumer-name");
+    try std.testing.expectError(error.InvalidConsumerName, validateConsumerName(""));
+    try std.testing.expectError(error.InvalidConsumerName, validateConsumerName("foo bar"));
+    try std.testing.expectError(error.InvalidConsumerName, validateConsumerName("foo.bar"));
+    try std.testing.expectError(error.InvalidConsumerName, validateConsumerName("foo*"));
+    try std.testing.expectError(error.InvalidConsumerName, validateConsumerName("foo>"));
+    try std.testing.expectError(error.InvalidConsumerName, validateConsumerName("foo/"));
+    try std.testing.expectError(error.InvalidConsumerName, validateConsumerName("foo\\"));
+}
+
 const ErrorResponse = struct {
     @"error": struct {
         /// HTTP like error code in the 300 to 500 range
@@ -571,6 +629,8 @@ pub const JetStream = struct {
 
     /// Creates a new stream with the provided configuration.
     pub fn addStream(self: *JetStream, config: StreamConfig) !Result(StreamInfo) {
+        try validateStreamName(config.name);
+
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.CREATE.{s}", .{config.name});
         defer self.allocator.free(subject);
@@ -587,6 +647,8 @@ pub const JetStream = struct {
 
     /// Updates a stream with the provided configuration.
     pub fn updateStream(self: *JetStream, config: StreamConfig) !Result(StreamInfo) {
+        try validateStreamName(config.name);
+
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.UPDATE.{s}", .{config.name});
         defer self.allocator.free(subject);
@@ -603,6 +665,8 @@ pub const JetStream = struct {
 
     /// Deletes a stream.
     pub fn deleteStream(self: *JetStream, stream_name: []const u8) !void {
+        try validateStreamName(stream_name);
+
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.DELETE.{s}", .{stream_name});
         defer self.allocator.free(subject);
@@ -616,6 +680,8 @@ pub const JetStream = struct {
 
     /// Gets information about a specific stream.
     pub fn getStreamInfo(self: *JetStream, stream_name: []const u8) !Result(StreamInfo) {
+        try validateStreamName(stream_name);
+
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.INFO.{s}", .{stream_name});
         defer self.allocator.free(subject);
@@ -628,6 +694,8 @@ pub const JetStream = struct {
 
     /// Retrieves a list of consumer names for a stream.
     pub fn listConsumerNames(self: *JetStream, stream_name: []const u8) !Result([]const []const u8) {
+        try validateStreamName(stream_name);
+
         const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.NAMES.{s}", .{stream_name});
         defer self.allocator.free(subject);
 
@@ -650,6 +718,8 @@ pub const JetStream = struct {
 
     /// Retrieves a list of consumers with full information for a stream.
     pub fn listConsumers(self: *JetStream, stream_name: []const u8) !Result([]const ConsumerInfo) {
+        try validateStreamName(stream_name);
+
         const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.LIST.{s}", .{stream_name});
         defer self.allocator.free(subject);
 
@@ -673,6 +743,11 @@ pub const JetStream = struct {
     /// Creates a new consumer with the provided configuration.
     /// Uses DURABLE endpoint only if durable_name is provided, otherwise creates ephemeral consumer.
     pub fn addConsumer(self: *JetStream, stream_name: []const u8, config: ConsumerConfig) !Result(ConsumerInfo) {
+        try validateStreamName(stream_name);
+        if (config.durable_name) |name| {
+            try validateConsumerName(name);
+        }
+
         log.info("adding consumer", .{});
         const subject = if (config.durable_name) |durable_name|
             try std.fmt.allocPrint(self.allocator, "CONSUMER.DURABLE.CREATE.{s}.{s}", .{ stream_name, durable_name })
@@ -697,6 +772,9 @@ pub const JetStream = struct {
 
     /// Gets information about a specific consumer.
     pub fn getConsumerInfo(self: *JetStream, stream_name: []const u8, consumer_name: []const u8) !Result(ConsumerInfo) {
+        try validateStreamName(stream_name);
+        try validateConsumerName(consumer_name);
+
         const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.INFO.{s}.{s}", .{ stream_name, consumer_name });
         defer self.allocator.free(subject);
 
@@ -708,6 +786,9 @@ pub const JetStream = struct {
 
     /// Deletes a consumer.
     pub fn deleteConsumer(self: *JetStream, stream_name: []const u8, consumer_name: []const u8) !void {
+        try validateStreamName(stream_name);
+        try validateConsumerName(consumer_name);
+
         const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.DELETE.{s}.{s}", .{ stream_name, consumer_name });
         defer self.allocator.free(subject);
 
@@ -720,6 +801,8 @@ pub const JetStream = struct {
 
     /// Purges messages from a stream.
     pub fn purgeStream(self: *JetStream, stream_name: []const u8, request: StreamPurgeRequest) !Result(StreamPurgeResponse) {
+        try validateStreamName(stream_name);
+
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.PURGE.{s}", .{stream_name});
         defer self.allocator.free(subject);
 
@@ -734,6 +817,8 @@ pub const JetStream = struct {
 
     /// Internal function for getting messages from the stream
     fn getMsgInternal(self: *JetStream, stream_name: []const u8, request: GetMsgRequest) !*Message {
+        try validateStreamName(stream_name);
+
         // Validate request - must specify either seq or last_by_subj, but not both
         if (request.seq == null and request.last_by_subj == null) {
             return error.InvalidGetMessageRequest;
@@ -809,6 +894,8 @@ pub const JetStream = struct {
 
     /// Internal function for deleting messages from the stream
     fn deleteMsgInternal(self: *JetStream, stream_name: []const u8, request: DeleteMsgRequest) !bool {
+        try validateStreamName(stream_name);
+
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.MSG.DELETE.{s}", .{stream_name});
         defer self.allocator.free(subject);
@@ -883,11 +970,6 @@ pub const JetStream = struct {
     }
 
     pub fn subscribe(self: *JetStream, stream_name: []const u8, consumer_config: ConsumerConfig, comptime handlerFn: anytype, args: anytype) !*JetStreamSubscription {
-        // Validate that this is a push consumer configuration
-        if (consumer_config.deliver_subject == null) {
-            return error.MissingDeliverSubject;
-        }
-
         // Create push consumer config by removing pull-only fields
         var push_config = consumer_config;
         push_config.max_waiting = 0; // Push consumers don't support max_waiting
@@ -898,7 +980,7 @@ pub const JetStream = struct {
         var consumer_info = try self.addConsumer(stream_name, push_config);
         errdefer consumer_info.deinit();
 
-        const deliver_subject = consumer_config.deliver_subject.?;
+        const deliver_subject = consumer_config.deliver_subject orelse return error.MissingDeliverSubject;
 
         // Define the handler inline to avoid the two-level context issue
         const JSHandler = struct {
@@ -951,11 +1033,6 @@ pub const JetStream = struct {
 
     /// Create a synchronous push subscription for manual message consumption
     pub fn subscribeSync(self: *JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*JetStreamSubscription {
-        // Validate that this is a push consumer configuration with deliver_subject
-        if (consumer_config.deliver_subject == null) {
-            return error.MissingDeliverSubject;
-        }
-
         // Create push consumer config
         var push_config = consumer_config;
         push_config.max_waiting = 0; // Push consumers don't support max_waiting
@@ -966,7 +1043,7 @@ pub const JetStream = struct {
         var consumer_info = try self.addConsumer(stream_name, push_config);
         errdefer consumer_info.deinit();
 
-        const deliver_subject = consumer_config.deliver_subject.?;
+        const deliver_subject = consumer_config.deliver_subject orelse return error.MissingDeliverSubject;
 
         // Create synchronous subscription (no callback handler)
         const subscription = try self.nc.subscribeSync(deliver_subject);
