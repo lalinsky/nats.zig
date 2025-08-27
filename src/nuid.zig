@@ -53,7 +53,7 @@ const Nuid = struct {
 
         const inc_random = std.mem.readInt(u64, random_bytes[0..8], .little);
         self.increment = MIN_INCREMENT + (inc_random % (MAX_INCREMENT - MIN_INCREMENT + 1));
-        
+
         // Ensure sequence + increment doesn't overflow MAX_SEQUENCE
         const seq_random = std.mem.readInt(u64, random_bytes[8..16], .little);
         const max_safe_sequence = MAX_SEQUENCE - self.increment;
@@ -274,17 +274,17 @@ test "thread safety" {
 
 test "nuid overflow safety" {
     const testing = std.testing;
-    
+
     // Test that resetSequence ensures sequence + increment never overflows
     var nuid = Nuid{};
-    
+
     // Force many resets to test different random combinations
     for (0..1000) |_| {
         nuid.resetSequence();
-        
+
         // Verify sequence + increment is always < MAX_SEQUENCE
         try testing.expect(nuid.sequence + nuid.increment < MAX_SEQUENCE);
-        
+
         // Verify increment is within expected bounds
         try testing.expect(nuid.increment >= MIN_INCREMENT);
         try testing.expect(nuid.increment <= MAX_INCREMENT);

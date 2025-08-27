@@ -42,7 +42,7 @@ pub const ResponseManager = struct {
     resp_sub_prefix: []u8 = &.{},
 
     resp_mux: ?*Subscription = null,
-    
+
     // Single shared sync primitives instead of per-request
     // NOTE: If the shared condition variable becomes a performance bottleneck due to
     // "thundering herd" effects with many concurrent requests, we can optimize by
@@ -51,7 +51,7 @@ pub const ResponseManager = struct {
     pending_mutex: std.Thread.Mutex = .{},
     pending_condition: std.Thread.Condition = .{},
     is_closed: bool = false,
-    
+
     // Map of rid -> result (null means still pending)
     pending_responses: std.AutoHashMapUnmanaged(u64, ?ResponseResult) = .{},
 
@@ -68,16 +68,16 @@ pub const ResponseManager = struct {
         // Signal shutdown and wake up all waiters
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
-        
+
         // Explicitly release the resp_mux subscription to reduce callback races
         if (self.resp_mux) |subscription| {
             subscription.deinit();
         }
         self.resp_mux = null;
-        
+
         self.is_closed = true;
         self.pending_condition.broadcast(); // Wake up all waiters
-        
+
         // Clean up any remaining pending responses
         if (self.pending_responses.count() > 0) {
             log.warn("Cleaning up {} remaining pending responses during shutdown", .{self.pending_responses.count()});
@@ -93,7 +93,7 @@ pub const ResponseManager = struct {
                 }
             }
         }
-        
+
         self.pending_responses.deinit(self.allocator);
     }
 
@@ -122,14 +122,14 @@ pub const ResponseManager = struct {
     pub fn createRequest(self: *ResponseManager) !RequestHandle {
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
-        
+
         if (self.is_closed) return error.ConnectionClosed;
-        
+
         const rid = self.rid_counter;
         self.rid_counter += 1;
-        
+
         try self.pending_responses.put(self.allocator, rid, null);
-        
+
         return RequestHandle{ .rid = rid };
     }
 
@@ -140,10 +140,10 @@ pub const ResponseManager = struct {
     pub fn cleanupRequest(self: *ResponseManager, handle: RequestHandle) void {
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
-        
+
         if (self.pending_responses.fetchRemove(handle.rid)) |entry| {
             log.debug("Cleaned up request map entry with rid: {d}", .{handle.rid});
-            
+
             // If there's a pending message, clean it up
             if (entry.value) |result| {
                 if (result) |msg| {
@@ -152,7 +152,7 @@ pub const ResponseManager = struct {
                     // Error result, nothing to clean up
                 }
             }
-            
+
             // Wake any threads waiting for this response
             self.pending_condition.broadcast();
         }
@@ -161,27 +161,27 @@ pub const ResponseManager = struct {
     pub fn waitForResponse(self: *ResponseManager, handle: RequestHandle, timeout_ns: u64) !*Message {
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
-        
+
         if (self.is_closed) return error.ConnectionClosed;
-        
+
         var timer = std.time.Timer.start() catch unreachable;
         while (true) {
             // Look up entry fresh each iteration - previous pointers may be invalid after timedWait
             const entry = self.pending_responses.getEntry(handle.rid) orelse {
                 return error.UnknownRequest;
             };
-            
+
             if (entry.value_ptr.*) |result| {
                 // Got response - remove entry and transfer ownership to caller
                 self.pending_responses.removeByPtr(entry.key_ptr);
                 return result;
             }
-            
+
             if (self.is_closed) return error.ConnectionClosed;
-            
+
             const elapsed = timer.read();
             if (elapsed >= timeout_ns) return error.Timeout;
-            
+
             // After this call, any entry pointers become invalid due to potential HashMap modifications
             try self.pending_condition.timedWait(&self.pending_mutex, timeout_ns - elapsed);
         }
@@ -203,7 +203,7 @@ pub const ResponseManager = struct {
 
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
-        
+
         // Don't process responses after shutdown
         if (self.is_closed) return;
 
@@ -219,7 +219,7 @@ pub const ResponseManager = struct {
             entry.value_ptr.* = msg;
             own_msg = false; // Message ownership transferred to response
         }
-        
+
         self.pending_condition.broadcast(); // Wake up waiting threads
     }
 
@@ -247,7 +247,7 @@ test "response manager basic functionality" {
     // Test that we can create request handles with different rids
     const handle1 = try manager.createRequest();
     defer manager.cleanupRequest(handle1);
-    
+
     const handle2 = try manager.createRequest();
     defer manager.cleanupRequest(handle2);
 

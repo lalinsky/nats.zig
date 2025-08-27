@@ -123,7 +123,7 @@ pub const Buffer = struct {
         }
 
         const allocator = self.allocator orelse return BufferError.OutOfMemory;
-        
+
         if (self.own_data and self.buffer.len > 0) {
             // We own the data, we can resize it
             const new_data = try allocator.realloc(self.buffer, new_size);
@@ -146,7 +146,7 @@ pub const Buffer = struct {
         if (bytes.len == 0) return; // Nothing to do
 
         const new_len = self.len + bytes.len;
-        
+
         // Check for overflow
         if (new_len < self.len) {
             return BufferError.BufferOverflow;
@@ -157,17 +157,17 @@ pub const Buffer = struct {
             // Calculate new size with 10% growth + minimum 64 bytes
             const extra = @max(new_len / 10, 64);
             const new_size = new_len + extra;
-            
+
             // Check for overflow again
             if (new_size < new_len) {
                 return BufferError.BufferOverflow;
             }
-            
+
             try self.expand(new_size);
         }
 
         // Copy the data
-        @memcpy(self.buffer[self.pos..self.pos + bytes.len], bytes);
+        @memcpy(self.buffer[self.pos .. self.pos + bytes.len], bytes);
         self.pos += bytes.len;
         self.len += bytes.len;
     }
@@ -175,15 +175,15 @@ pub const Buffer = struct {
     /// Append a single byte to the buffer
     pub fn appendByte(self: *Self, byte: u8) !void {
         if (self.len == self.capacity) {
-            // Calculate new size with 10% growth + minimum 64 bytes  
+            // Calculate new size with 10% growth + minimum 64 bytes
             const extra = @max(self.capacity / 10, 64);
             const new_size = self.capacity + extra;
-            
+
             // Check for overflow
             if (new_size < self.capacity) {
                 return BufferError.BufferOverflow;
             }
-            
+
             try self.expand(new_size);
         }
 
@@ -204,7 +204,7 @@ pub const Buffer = struct {
         const remaining = self.len - n;
         // Move remaining data to the front
         std.mem.copyForwards(u8, self.buffer[0..remaining], self.buffer[n..self.len]);
-        
+
         self.len = remaining;
         self.pos = remaining;
     }
@@ -243,9 +243,9 @@ pub const Buffer = struct {
         // Estimate needed space
         var counting_writer = std.io.countingWriter(std.io.null_writer);
         try std.fmt.format(counting_writer.writer(), format, args);
-        
+
         const needed = counting_writer.bytes_written;
-        
+
         // Ensure we have enough space
         const new_len = self.len + needed;
         if (new_len > self.capacity) {

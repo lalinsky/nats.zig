@@ -68,10 +68,10 @@ pub const Parser = struct {
     drop: usize = 0,
     hdr: i32 = -1,
     ma: MsgArg = .{},
-    arg_buf_rec: std.ArrayList(u8),  // The actual arg buffer storage
-    arg_buf: ?*std.ArrayList(u8) = null,  // Nullable pointer, null = fast path
-    msg_buf_rec: std.ArrayList(u8),  // The actual msg buffer storage
-    msg_buf: ?*std.ArrayList(u8) = null,  // Nullable pointer, null = fast path
+    arg_buf_rec: std.ArrayList(u8), // The actual arg buffer storage
+    arg_buf: ?*std.ArrayList(u8) = null, // Nullable pointer, null = fast path
+    msg_buf_rec: std.ArrayList(u8), // The actual msg buffer storage
+    msg_buf: ?*std.ArrayList(u8) = null, // Nullable pointer, null = fast path
 
     const Self = @This();
 
@@ -86,15 +86,15 @@ pub const Parser = struct {
         self.arg_buf_rec.deinit();
         self.msg_buf_rec.deinit();
     }
-    
+
     pub fn reset(self: *Self) void {
         self.state = .OP_START;
         self.after_space = 0;
         self.drop = 0;
         self.hdr = -1;
         self.ma = .{};
-        self.arg_buf = null;  // Reset to fast path
-        self.msg_buf = null;  // Reset to fast path
+        self.arg_buf = null; // Reset to fast path
+        self.msg_buf = null; // Reset to fast path
         self.arg_buf_rec.clearRetainingCapacity();
         self.msg_buf_rec.clearRetainingCapacity();
     }
@@ -173,16 +173,16 @@ pub const Parser = struct {
                         '\n' => {
                             // Process message arguments using C-style two-mode approach
                             const arg_start = if (self.arg_buf) |arg_buf|
-                                arg_buf.items  // Slow path: accumulated from split buffer
+                                arg_buf.items // Slow path: accumulated from split buffer
                             else
-                                buf[self.after_space..i - self.drop];  // Fast path: direct slice
+                                buf[self.after_space .. i - self.drop]; // Fast path: direct slice
 
                             try self.processMsgArgs(arg_start);
 
                             self.drop = 0;
                             self.after_space = i + 1;
                             self.state = .MSG_PAYLOAD;
-                            
+
                             // Clear split buffer mode
                             if (self.arg_buf) |_| {
                                 self.arg_buf = null;
@@ -212,7 +212,7 @@ pub const Parser = struct {
                     const total_msg_size = @as(usize, @intCast(self.ma.size));
 
                     if (self.msg_buf) |msg_buf| {
-                        // Slow path: using accumulated buffer  
+                        // Slow path: using accumulated buffer
                         if (msg_buf.items.len >= total_msg_size) {
                             // Pass full message buffer to processMsg (like C parser)
                             const message_data = msg_buf.items[0..total_msg_size];
@@ -225,14 +225,14 @@ pub const Parser = struct {
                             const to_copy = @min(needed, available);
 
                             if (to_copy > 0) {
-                                try msg_buf.appendSlice(buf[i..i + to_copy]);
+                                try msg_buf.appendSlice(buf[i .. i + to_copy]);
                                 i += to_copy - 1;
                             }
                         }
                     } else if (i - self.after_space >= total_msg_size) {
                         // Fast path: process message directly from buffer (like C parser)
                         const msg_start = self.after_space;
-                        const message_data = buf[msg_start..msg_start + total_msg_size];
+                        const message_data = buf[msg_start .. msg_start + total_msg_size];
                         try conn.processMsg(message_data);
                         done = true;
                     }
@@ -401,16 +401,16 @@ pub const Parser = struct {
                         '\n' => {
                             // Process error message using C-style two-mode approach
                             const err_msg = if (self.arg_buf) |arg_buf|
-                                arg_buf.items  // Slow path: accumulated from split buffer
+                                arg_buf.items // Slow path: accumulated from split buffer
                             else
-                                buf[self.after_space..i - self.drop];  // Fast path: direct slice
+                                buf[self.after_space .. i - self.drop]; // Fast path: direct slice
 
                             try conn.processErr(err_msg);
-                            
+
                             self.drop = 0;
                             self.after_space = i + 1;
                             self.state = .OP_START;
-                            
+
                             // Clear split buffer mode
                             if (self.arg_buf) |_| {
                                 self.arg_buf = null;
@@ -474,16 +474,16 @@ pub const Parser = struct {
                         '\n' => {
                             // Process INFO JSON using C-style two-mode approach
                             const info_json = if (self.arg_buf) |arg_buf|
-                                arg_buf.items  // Slow path: accumulated from split buffer
+                                arg_buf.items // Slow path: accumulated from split buffer
                             else
-                                buf[self.after_space..i - self.drop];  // Fast path: direct slice
+                                buf[self.after_space .. i - self.drop]; // Fast path: direct slice
 
                             try conn.processInfo(info_json);
-                            
+
                             self.drop = 0;
                             self.after_space = i + 1;
                             self.state = .OP_START;
-                            
+
                             // Clear split buffer mode
                             if (self.arg_buf) |_| {
                                 self.arg_buf = null;
@@ -502,19 +502,20 @@ pub const Parser = struct {
 
             i += 1;
         }
-        
+
         // Check for split buffer scenarios (like C parser)
-        if ((self.state == .MSG_ARG or 
-             self.state == .MINUS_ERR_ARG or 
-             self.state == .INFO_ARG) and 
-            self.arg_buf == null) {
+        if ((self.state == .MSG_ARG or
+            self.state == .MINUS_ERR_ARG or
+            self.state == .INFO_ARG) and
+            self.arg_buf == null)
+        {
             // We're in argument parsing state but haven't finished parsing
             // Set up arg_buf for next parse() call
             try self.setupArgBuf();
-            const remaining_args = buf[self.after_space..i - self.drop];
+            const remaining_args = buf[self.after_space .. i - self.drop];
             try self.arg_buf.?.appendSlice(remaining_args);
         }
-        
+
         // Check for split message scenarios (like C parser)
         if (self.state == .MSG_PAYLOAD and self.msg_buf == null) {
             // We're in MSG_PAYLOAD state but haven't finished parsing the message
@@ -529,7 +530,7 @@ pub const Parser = struct {
         self.arg_buf_rec.clearRetainingCapacity();
         self.arg_buf = &self.arg_buf_rec;
     }
-    
+
     fn setupMsgBuf(self: *Self) !void {
         self.msg_buf_rec.clearRetainingCapacity();
         self.msg_buf = &self.msg_buf_rec;
@@ -590,7 +591,7 @@ pub const Parser = struct {
             .sid = sid,
             .reply = reply,
             .hdr = hdr_len,
-            .size = size,  // Store total size like C parser
+            .size = size, // Store total size like C parser
         };
 
         // Update parser hdr field to match ma.hdr for consistency
@@ -599,67 +600,67 @@ pub const Parser = struct {
 };
 
 const MockConnection = struct {
-        ping_count: u32 = 0,
-        pong_count: u32 = 0,
-        ok_count: u32 = 0,
-        err_count: u32 = 0,
-        info_count: u32 = 0,
-        msg_count: u32 = 0,
-        last_msg: []const u8 = "",
-        last_err: []const u8 = "",
-        last_info: []const u8 = "",
-        parser_ref: ?*Parser = null,
+    ping_count: u32 = 0,
+    pong_count: u32 = 0,
+    ok_count: u32 = 0,
+    err_count: u32 = 0,
+    info_count: u32 = 0,
+    msg_count: u32 = 0,
+    last_msg: []const u8 = "",
+    last_err: []const u8 = "",
+    last_info: []const u8 = "",
+    parser_ref: ?*Parser = null,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub fn processPing(self: *Self) !void {
-            self.ping_count += 1;
+    pub fn processPing(self: *Self) !void {
+        self.ping_count += 1;
+    }
+
+    pub fn processPong(self: *Self) !void {
+        self.pong_count += 1;
+    }
+
+    pub fn processMsg(self: *Self, message_buffer: []const u8) !void {
+        self.msg_count += 1;
+        // Extract payload like the real processMsg would do
+        // For testing, assume we want just the payload part (like the test expects)
+        if (self.parser_ref) |parser| {
+            const msg_arg = parser.ma;
+            const payload = if (msg_arg.hdr >= 0) blk: {
+                // HMSG: extract payload from full message buffer
+                const hdr_len = @as(usize, @intCast(msg_arg.hdr));
+                break :blk message_buffer[hdr_len..];
+            } else blk: {
+                // MSG: full buffer is payload
+                break :blk message_buffer;
+            };
+            self.last_msg = try std.testing.allocator.dupe(u8, payload);
+        } else {
+            // Fallback for tests that don't set parser_ref
+            self.last_msg = try std.testing.allocator.dupe(u8, message_buffer);
         }
+    }
 
-        pub fn processPong(self: *Self) !void {
-            self.pong_count += 1;
-        }
+    pub fn processOK(self: *Self) !void {
+        self.ok_count += 1;
+    }
 
-        pub fn processMsg(self: *Self, message_buffer: []const u8) !void {
-            self.msg_count += 1;
-            // Extract payload like the real processMsg would do
-            // For testing, assume we want just the payload part (like the test expects)
-            if (self.parser_ref) |parser| {
-                const msg_arg = parser.ma;
-                const payload = if (msg_arg.hdr >= 0) blk: {
-                    // HMSG: extract payload from full message buffer
-                    const hdr_len = @as(usize, @intCast(msg_arg.hdr));
-                    break :blk message_buffer[hdr_len..];
-                } else blk: {
-                    // MSG: full buffer is payload
-                    break :blk message_buffer;
-                };
-                self.last_msg = try std.testing.allocator.dupe(u8, payload);
-            } else {
-                // Fallback for tests that don't set parser_ref
-                self.last_msg = try std.testing.allocator.dupe(u8, message_buffer);
-            }
-        }
+    pub fn processErr(self: *Self, err_msg: []const u8) !void {
+        self.err_count += 1;
+        self.last_err = try std.testing.allocator.dupe(u8, err_msg);
+    }
 
-        pub fn processOK(self: *Self) !void {
-            self.ok_count += 1;
-        }
+    pub fn processInfo(self: *Self, info_json: []const u8) !void {
+        self.info_count += 1;
+        self.last_info = try std.testing.allocator.dupe(u8, info_json);
+    }
 
-        pub fn processErr(self: *Self, err_msg: []const u8) !void {
-            self.err_count += 1;
-            self.last_err = try std.testing.allocator.dupe(u8, err_msg);
-        }
-
-        pub fn processInfo(self: *Self, info_json: []const u8) !void {
-            self.info_count += 1;
-            self.last_info = try std.testing.allocator.dupe(u8, info_json);
-        }
-
-        pub fn deinit(self: *Self) void {
-            if (self.last_msg.len > 0) std.testing.allocator.free(self.last_msg);
-            if (self.last_err.len > 0) std.testing.allocator.free(self.last_err);
-            if (self.last_info.len > 0) std.testing.allocator.free(self.last_info);
-        }
+    pub fn deinit(self: *Self) void {
+        if (self.last_msg.len > 0) std.testing.allocator.free(self.last_msg);
+        if (self.last_err.len > 0) std.testing.allocator.free(self.last_err);
+        if (self.last_info.len > 0) std.testing.allocator.free(self.last_info);
+    }
 };
 
 test "parser ping pong" {
@@ -767,8 +768,8 @@ test "parser hmsg" {
     try testing.expectEqualStrings("hello", mock_conn.last_msg);
 
     // Verify internal state matches C parser expectations
-    try testing.expectEqual(@as(i32, 22), parser.ma.hdr);  // Header size
-    try testing.expectEqual(@as(i32, 27), parser.ma.size);  // Total size (like C parser)
+    try testing.expectEqual(@as(i32, 22), parser.ma.hdr); // Header size
+    try testing.expectEqual(@as(i32, 27), parser.ma.size); // Total size (like C parser)
 }
 
 test "parser split msg arguments" {
@@ -856,4 +857,3 @@ test "parser split info message" {
     try testing.expectEqual(1, mock_conn.info_count);
     try testing.expectEqualStrings("{\"server_id\":\"test\",\"version\":\"2.0.0\"}", mock_conn.last_info);
 }
-

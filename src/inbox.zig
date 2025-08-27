@@ -31,18 +31,18 @@ test "inbox generation" {
 
     const inbox1 = try newInbox(allocator);
     defer allocator.free(inbox1);
-    
+
     const inbox2 = try newInbox(allocator);
     defer allocator.free(inbox2);
 
     // Should start with _INBOX.
     try testing.expect(std.mem.startsWith(u8, inbox1, INBOX_PREFIX));
     try testing.expect(std.mem.startsWith(u8, inbox2, INBOX_PREFIX));
-    
+
     // Should be 29 characters total (7 + 22)
     try testing.expectEqual(@as(usize, 29), inbox1.len);
     try testing.expectEqual(@as(usize, 29), inbox2.len);
-    
+
     // Should be unique
     try testing.expect(!std.mem.eql(u8, inbox1, inbox2));
 }
@@ -50,11 +50,11 @@ test "inbox generation" {
 test "nuid generation" {
     const nuid1 = nuid.next();
     const nuid2 = nuid.next();
-    
+
     // Should be 22 characters
     try std.testing.expectEqual(@as(usize, 22), nuid1.len);
     try std.testing.expectEqual(@as(usize, 22), nuid2.len);
-    
+
     // Should be unique (very high probability)
     try std.testing.expect(!std.mem.eql(u8, &nuid1, &nuid2));
 }
