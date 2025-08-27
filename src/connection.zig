@@ -614,6 +614,8 @@ pub const Connection = struct {
     }
 
     pub fn queueSubscribe(self: *Self, subject: []const u8, queue_group: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
+        if (queue_group.len == 0) return error.EmptyQueueGroupName;
+        
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
         errdefer handler.cleanup(self.allocator);
 
@@ -626,19 +628,21 @@ pub const Connection = struct {
 
         try self.subscribeInternal(sub);
 
-        log.debug("Subscribed to {s} with sid {d} (async)", .{ sub.subject, sub.sid });
+        log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (async)", .{ sub.subject, queue_group, sub.sid });
         return sub;
     }
 
     /// Subscribe to a subject, the code is responsible for handling the fetching
     pub fn queueSubscribeSync(self: *Self, subject: []const u8, queue_group: []const u8) !*Subscription {
+        if (queue_group.len == 0) return error.EmptyQueueGroupName;
+        
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.init(self.allocator, sid, subject, queue_group, null);
         errdefer sub.deinit();
 
         try self.subscribeInternal(sub);
 
-        log.debug("Subscribed to {s} with sid {d} (sync)", .{ sub.subject, sub.sid });
+        log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (sync)", .{ sub.subject, queue_group, sub.sid });
         return sub;
     }
 
