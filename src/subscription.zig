@@ -20,14 +20,17 @@ const Dispatcher = @import("dispatcher.zig").Dispatcher;
 
 const log = std.log.scoped(.subscription);
 
+
 // Message handler storage for type-erased callback
+// Error set for message handlers
+
 pub const MsgHandler = struct {
     ptr: *anyopaque,
-    callFn: *const fn (ptr: *anyopaque, msg: *Message) void,
+    callFn: *const fn (ptr: *anyopaque, msg: *Message) anyerror!void,
     cleanupFn: *const fn (ptr: *anyopaque, allocator: Allocator) void,
 
-    pub fn call(self: *const MsgHandler, msg: *Message) void {
-        self.callFn(self.ptr, msg);
+    pub fn call(self: *const MsgHandler, msg: *Message) anyerror!void {
+        return self.callFn(self.ptr, msg);
     }
 
     pub fn cleanup(self: *const MsgHandler, allocator: Allocator) void {
@@ -117,9 +120,18 @@ pub fn createMsgHandler(allocator: Allocator, comptime handlerFn: anytype, args:
     const Context = struct {
         args: @TypeOf(args),
 
-        pub fn call(ctx: *anyopaque, msg: *Message) void {
+        pub fn call(ctx: *anyopaque, msg: *Message) anyerror!void {
             const self_ctx: *@This() = @ptrCast(@alignCast(ctx));
-            @call(.auto, handlerFn, .{msg} ++ self_ctx.args);
+            
+            // Handle both fallible and non-fallible user handler functions
+            const ReturnType = @typeInfo(@TypeOf(handlerFn)).@"fn".return_type.?;
+            if (ReturnType == void) {
+                // Non-fallible handler - just call it
+                @call(.auto, handlerFn, .{msg} ++ self_ctx.args);
+            } else {
+                // Fallible handler - propagate error directly
+                try @call(.auto, handlerFn, .{msg} ++ self_ctx.args);
+            }
         }
 
         pub fn cleanup(ctx: *anyopaque, alloc: Allocator) void {

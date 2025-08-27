@@ -902,7 +902,7 @@ pub const JetStream = struct {
 
         // Define the handler inline to avoid the two-level context issue
         const JSHandler = struct {
-            fn wrappedHandler(msg: *Message, js: *JetStream, user_args: @TypeOf(args)) void {
+            fn wrappedHandler(msg: *Message, js: *JetStream, user_args: @TypeOf(args)) anyerror!void {
                 // Check for status messages (heartbeats and flow control)
                 if (msg.headers.get("Status")) |status_values| {
                     if (status_values.items.len > 0) {
@@ -923,10 +923,15 @@ pub const JetStream = struct {
                     msg.deinit(); // Clean up on error
                     return;
                 };
-                // No need for manual cleanup - the arena handles everything
 
-                // Call user handler with JetStream message
-                @call(.auto, handlerFn, .{js_msg} ++ user_args);
+                // Call user handler with JetStream message - handler owns cleanup responsibility
+                // Support both void and fallible handlers  
+                const ReturnType = @typeInfo(@TypeOf(handlerFn)).@"fn".return_type.?;
+                if (ReturnType == void) {
+                    @call(.auto, handlerFn, .{js_msg} ++ user_args);
+                } else {
+                    try @call(.auto, handlerFn, .{js_msg} ++ user_args);
+                }
             }
         };
 
