@@ -25,6 +25,7 @@ const log = std.log.scoped(.jetstream);
 pub const JetStreamMessage = jetstream_message.JetStreamMessage;
 pub const MsgMetadata = jetstream_message.MsgMetadata;
 pub const SequencePair = jetstream_message.SequencePair;
+pub const JetStreamError = jetstream_message.JetStreamError;
 
 const default_api_prefix = "$JS.API.";
 const default_request_timeout_ms = 5000;

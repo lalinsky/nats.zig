@@ -55,7 +55,7 @@ pub const JetStreamMessage = struct {
     /// Reply subject for ACK/NAK
     reply: ?[]const u8 = null,
     /// Atomic flag to track acknowledgment status (prevents duplicate ack/nak)
-    ack_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    acknowledged: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     
     pub fn deinit(self: *JetStreamMessage) void {
         self.msg.deinit();
@@ -64,7 +64,7 @@ pub const JetStreamMessage = struct {
     /// Acknowledge successful processing
     pub fn ack(self: *JetStreamMessage) !void {
         // Check if already acknowledged using atomic compare-and-swap
-        const was_acknowledged = self.ack_done.cmpxchgStrong(false, true, .acquire, .monotonic);
+        const was_acknowledged = self.acknowledged.cmpxchgStrong(false, true, .acquire, .monotonic);
         if (was_acknowledged != null) {
             return JetStreamError.MessageAlreadyAcknowledged;
         }
@@ -74,7 +74,7 @@ pub const JetStreamMessage = struct {
     /// Negative acknowledge - request redelivery
     pub fn nak(self: *JetStreamMessage) !void {
         // Check if already acknowledged using atomic compare-and-swap
-        const was_acknowledged = self.ack_done.cmpxchgStrong(false, true, .acquire, .monotonic);
+        const was_acknowledged = self.acknowledged.cmpxchgStrong(false, true, .acquire, .monotonic);
         if (was_acknowledged != null) {
             return JetStreamError.MessageAlreadyAcknowledged;
         }
@@ -84,7 +84,7 @@ pub const JetStreamMessage = struct {
     /// Terminate delivery - don't redeliver this message
     pub fn term(self: *JetStreamMessage) !void {
         // Check if already acknowledged using atomic compare-and-swap
-        const was_acknowledged = self.ack_done.cmpxchgStrong(false, true, .acquire, .monotonic);
+        const was_acknowledged = self.acknowledged.cmpxchgStrong(false, true, .acquire, .monotonic);
         if (was_acknowledged != null) {
             return JetStreamError.MessageAlreadyAcknowledged;
         }
@@ -95,6 +95,11 @@ pub const JetStreamMessage = struct {
     /// Note: inProgress can be called multiple times per NATS specification
     pub fn inProgress(self: *JetStreamMessage) !void {
         try self.sendAck(.progress);
+    }
+    
+    /// Check if message has been acknowledged  
+    pub fn acked(self: *JetStreamMessage) bool {
+        return self.acknowledged.load(.acquire);
     }
     
     /// Send acknowledgment to JetStream
@@ -178,10 +183,6 @@ pub fn parseAckSubject(subject: []const u8, metadata: *MsgMetadata) void {
     // Invalid token counts are silently ignored
 }
 
-/// Check if message has been acknowledged  
-pub fn isAcknowledged(self: *JetStreamMessage) bool {
-    return self.ack_done.load(.acquire);
-}
 
 /// Parse JetStream headers from a message and create JetStreamMessage wrapper
 pub fn createJetStreamMessage(js: *anyopaque, msg: *Message) !*JetStreamMessage {
