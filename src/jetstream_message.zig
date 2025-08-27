@@ -47,15 +47,10 @@ pub const MsgMetadata = struct {
 pub const JetStreamMessage = struct {
     /// Underlying NATS message
     msg: *Message,
-    /// Connection for acknowledgments
+    /// Connection for sending acknowledgments
     nc: *Connection,
-
-    /// JetStream metadata (parsed from headers and reply subject)
+    /// JetStream metadata (parsed from the reply subject)
     metadata: MsgMetadata = .{},
-    /// Original subject (from Nats-Subject header)
-    subject: ?[]const u8 = null,
-    /// Reply subject for ACK/NAK
-    reply: ?[]const u8 = null,
     /// Atomic flag to track acknowledgment status (prevents duplicate ack/nak)
     acked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
@@ -91,7 +86,7 @@ pub const JetStreamMessage = struct {
 
     /// Send acknowledgment to JetStream
     fn sendAck(self: *JetStreamMessage, ack_type: AckType) !void {
-        if (self.reply) |reply_subject| {
+        if (self.msg.reply) |reply_subject| {
             if (ack_type.isFinal()) {
                 // Check if already acknowledged using atomic compare-and-swap
                 const was_acked = self.acked.cmpxchgStrong(false, true, .acq_rel, .acquire);
@@ -179,24 +174,7 @@ pub fn createJetStreamMessage(nc: *Connection, msg: *Message) !*JetStreamMessage
     js_msg.* = JetStreamMessage{
         .msg = msg,
         .nc = nc,
-        .reply = msg.reply,
     };
-
-    try msg.ensureHeadersParsed();
-
-    // Parse JetStream headers if present
-    if (msg.headers.get("Nats-Stream")) |stream_values| {
-        if (stream_values.items.len > 0) js_msg.metadata.stream = stream_values.items[0];
-    }
-    if (msg.headers.get("Nats-Subject")) |subject_values| {
-        if (subject_values.items.len > 0) js_msg.subject = subject_values.items[0];
-    }
-    if (msg.headers.get("Nats-Sequence")) |seq_values| {
-        if (seq_values.items.len > 0) {
-            // This is typically the stream sequence, but could be consumer sequence in some contexts
-            js_msg.metadata.sequence.stream = try std.fmt.parseInt(u64, seq_values.items[0], 10);
-        }
-    }
 
     // Parse JetStream metadata from reply subject
     if (msg.reply) |reply_subject| {
