@@ -1341,21 +1341,26 @@ pub const Connection = struct {
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
 
+        var buffer = ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+
         var iter = self.subscriptions.iterator();
         while (iter.next()) |entry| {
             const sub = entry.value_ptr.*;
 
             // Send SUB command
-            var buffer = ArrayList(u8).init(self.allocator);
-            defer buffer.deinit();
-
-            try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
+            if (sub.queue_group) |queue_group| {
+                try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, queue_group, sub.sid });
+            } else {
+                try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
+            }
 
             // Send directly (bypass buffering since we're reconnecting)
             const stream = self.stream orelse return ConnectionError.ConnectionClosed;
             try stream.writeAll(buffer.items);
 
             log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
+            buffer.clearRetainingCapacity();
         }
     }
 
