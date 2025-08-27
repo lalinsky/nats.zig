@@ -187,12 +187,12 @@ pub const ResponseManager = struct {
         }
     }
 
-    fn responseHandlerWrapper(msg: *Message, manager: *ResponseManager) void {
+    fn responseHandlerWrapper(msg: *Message, manager: *ResponseManager) anyerror!void {
         // Regular subscribe handler wrapper
-        manager.responseHandler(msg);
+        try manager.responseHandler(msg);
     }
 
-    fn responseHandler(self: *ResponseManager, msg: *Message) void {
+    fn responseHandler(self: *ResponseManager, msg: *Message) anyerror!void {
         var own_msg = true;
         defer if (own_msg) msg.deinit();
 

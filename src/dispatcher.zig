@@ -123,12 +123,16 @@ pub const Dispatcher = struct {
         const message = dispatch_msg.message;
 
         // Call the subscription's handler in this dispatcher thread context
+        // Message ownership is transferred to the handler - handler is responsible for cleanup
         if (subscription.handler) |handler| {
-            handler.call(message);
+            handler.call(message) catch |err| {
+                log.err("Message handler failed for subscription {}: {}", .{ subscription.sid, err });
+                // Handler owns the message even on error - no cleanup here
+            };
         } else {
             // No handler - this shouldn't happen for async subscriptions
             log.warn("Received message for subscription {} without handler", .{subscription.sid});
-            message.deinit(); // Clean up orphaned message
+            message.deinit(); // Clean up orphaned message (no handler to transfer ownership to)
         }
     }
 };
