@@ -32,13 +32,13 @@ const ParsedComponents = struct {
 };
 
 pub const Url = struct {
-    full_url: []const u8,  // Owned string
-    scheme: []const u8,    // Slice into full_url or static string
-    host: []const u8,      // Slice into full_url
+    full_url: []const u8, // Owned string
+    scheme: []const u8, // Slice into full_url or static string
+    host: []const u8, // Slice into full_url
     port: u16,
     username: ?[]const u8, // Slice into full_url if present
-    password: ?[]const u8, // Slice into full_url if present  
-    path: ?[]const u8,     // Slice into full_url if present
+    password: ?[]const u8, // Slice into full_url if present
+    path: ?[]const u8, // Slice into full_url if present
     allocator: Allocator,
 
     fn parseComponents(url_str: []const u8) ParsedComponents {
@@ -84,7 +84,7 @@ pub const Url = struct {
 
         // Parse host and port (handle IPv6 addresses)
         var host_end = components.host.len;
-        
+
         // Search for end of IPv6 address (if applicable)
         var search_start: usize = 0;
         if (std.mem.lastIndexOf(u8, components.host, "]")) |ipv6_end| {
@@ -95,7 +95,7 @@ pub const Url = struct {
         if (std.mem.lastIndexOfScalar(u8, components.host[search_start..], ':')) |relative_pos| {
             const port_start = search_start + relative_pos;
             const port_str = components.host[port_start + 1 ..];
-            
+
             // Check if there's a path after the port
             if (std.mem.indexOf(u8, port_str, "/")) |path_start| {
                 const port_only = port_str[0..path_start];
@@ -126,7 +126,7 @@ pub const Url = struct {
         if (components.scheme.len == 0) {
             return UrlError.InvalidUrl;
         }
-        
+
         // Only accept "nats" scheme
         if (!std.mem.eql(u8, components.scheme, "nats")) {
             return UrlError.InvalidUrlScheme;
@@ -164,7 +164,6 @@ pub const Url = struct {
         self.allocator.free(self.full_url);
     }
 };
-
 
 test "url parsing without scheme" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

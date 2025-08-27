@@ -113,7 +113,7 @@ pub fn ReadView(comptime T: type, comptime chunk_size: usize) type {
         /// Consume items after processing
         pub fn consume(self: *@This(), items_consumed: usize) void {
             if (items_consumed > self.data.len) {
-                std.debug.panic("Attempting to consume {} items but only {} available", .{items_consumed, self.data.len});
+                std.debug.panic("Attempting to consume {} items but only {} available", .{ items_consumed, self.data.len });
             }
             self.queue.consumeItems(self.chunk, items_consumed);
         }
@@ -580,7 +580,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
 
             // Validate that we're not consuming more than available
             if (total_bytes > self.queue.items_available) {
-                std.debug.panic("Attempting to consume {} bytes but only {} available", .{total_bytes, self.queue.items_available});
+                std.debug.panic("Attempting to consume {} bytes but only {} available", .{ total_bytes, self.queue.items_available });
             }
 
             var remaining = total_bytes;
@@ -756,7 +756,7 @@ test "blocking pop handles queue closure" {
     };
 
     const closer = try std.Thread.spawn(.{}, Closer.run, .{&queue});
-    
+
     // This should return QueueClosed when the queue is closed
     const result = queue.pop(1000);
     try std.testing.expectError(PopError.QueueClosed, result);
@@ -780,7 +780,7 @@ test "getSlice handles queue closure with indefinite wait" {
     };
 
     const closer = try std.Thread.spawn(.{}, Closer.run, .{&queue});
-    
+
     // This should return QueueClosed when the queue is closed
     const result = queue.getSlice(std.math.maxInt(u64));
     try std.testing.expectError(PopError.QueueClosed, result);
