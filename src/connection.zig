@@ -148,12 +148,8 @@ pub const ConnectionError = error{
 pub const ConnectionStatus = enum {
     disconnected,
     connecting,
-    handshake,
     connected,
-    reconnecting,
-    closed,
-    draining_subs,
-    draining_pubs,
+    closed, // explicitly closed, can't be automatically reconnected
 };
 
 pub const ReconnectOptions = struct {
@@ -386,6 +382,9 @@ pub const Connection = struct {
             return error.AlreadyConnected;
         }
 
+        self.status = .connecting;
+        self.status_changed.broadcast();
+
         errdefer {
             self.status = .closed;
             self.status_changed.broadcast();
@@ -455,7 +454,6 @@ pub const Connection = struct {
         log.debug("Starting handshake", .{});
         self.in_handshake = true;
         self.handshake.reset();
-        self.status = .handshake;
     }
 
     pub fn close(self: *Self) void {
@@ -613,7 +611,7 @@ pub const Connection = struct {
         // Allow publishes when connected or reconnecting (buffered).
         // Reject when not usable for sending.
         switch (self.status) {
-            .connected, .reconnecting => {},
+            .connected => {},
             else => {
                 return ConnectionError.ConnectionClosed;
             },
@@ -1018,7 +1016,7 @@ pub const Connection = struct {
         // Assume mutex is already held by caller
 
         // If we're reconnecting, buffer the message for later
-        if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
+        if (self.status == .connecting and self.in_reconnect > 0 and self.options.reconnect.allow_reconnect) {
             return self.pending_buffer.addMessage(data);
         }
 
@@ -1284,7 +1282,7 @@ pub const Connection = struct {
             server.reconnects += 1;
         }
 
-        self.status = .reconnecting;
+        self.status = .connecting;
         self.abort_reconnect = false; // Reset abort flag when starting reconnection
 
         // Shutdown socket to interrupt any ongoing reads (like C natsSock_Shutdown)
@@ -1465,7 +1463,7 @@ pub const Connection = struct {
                 self.socket = null;
                 socket.close();
                 server.last_error = err;
-                self.status = .reconnecting;
+                self.status = .connecting;
                 log.debug("Handshake failed for reconnection attempt {}: {}", .{ total_attempts, err });
 
                 // Check if connection closed or should abort after error (like C library)
