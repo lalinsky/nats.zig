@@ -4,9 +4,11 @@ const utils = @import("utils.zig");
 
 const log = std.log.scoped(.testing);
 
-test "connect" {
+test "connect and exit" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
+
+    try std.testing.expect(conn.isConnected());
 }
 
 test "connect wrong port" {
