@@ -161,6 +161,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     c_echo_server.addCSourceFile(.{ .file = b.path("benchmarks/echo_server.c"), .flags = &.{} });
+    c_echo_server.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
     c_echo_server.linkLibC();
     c_echo_server.linkSystemLibrary("nats");
 
@@ -171,6 +172,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     c_echo_client.addCSourceFile(.{ .file = b.path("benchmarks/echo_client.c"), .flags = &.{} });
+    c_echo_client.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
     c_echo_client.linkLibC();
     c_echo_client.linkSystemLibrary("nats");
 
@@ -181,6 +183,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     c_publisher.addCSourceFile(.{ .file = b.path("benchmarks/publisher.c"), .flags = &.{} });
+    c_publisher.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
     c_publisher.linkLibC();
     c_publisher.linkSystemLibrary("nats");
 
@@ -191,6 +194,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     c_subscriber.addCSourceFile(.{ .file = b.path("benchmarks/subscriber.c"), .flags = &.{} });
+    c_subscriber.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
     c_subscriber.linkLibC();
     c_subscriber.linkSystemLibrary("nats");
 

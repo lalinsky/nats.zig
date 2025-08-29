@@ -1,72 +1,46 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <signal.h>
-#include <time.h>
-#include <unistd.h>
-#include <nats.h>
+#include "bench_util.h"
 
-static volatile bool keep_running = true;
-static uint64_t msg_count = 0;
-static uint64_t success_count = 0;
-static uint64_t error_count = 0;
-static clock_t start_time;
-
-void signal_handler(int sig) {
-    (void)sig;
-    keep_running = false;
-}
+#define REPORT_INTERVAL 1000
+#define REQUEST_TIMEOUT_MS 5000
 
 int main() {
     natsConnection *conn = NULL;
     natsStatus status;
+    bench_stats_t stats;
     
     printf("Starting NATS echo-client benchmark (C/libnats)\n");
     
-    // Install signal handler for graceful shutdown
-    signal(SIGINT, signal_handler);
+    // Setup signal handlers
+    bench_setup_signals();
     
-    // Initialize NATS library
-    status = nats_Open(-1);
+    // Initialize statistics
+    bench_stats_init(&stats);
+    
+    // Connect to NATS server
+    status = bench_connect(&conn, NULL);
     if (status != NATS_OK) {
-        printf("Failed to initialize NATS library: %s\n", natsStatus_GetText(status));
         return 1;
     }
     
-    // Connect to NATS server
-    status = natsConnection_ConnectTo(&conn, NATS_DEFAULT_URL);
-    if (status != NATS_OK) {
-        printf("Failed to connect to NATS server: %s\n", natsStatus_GetText(status));
-        printf("Make sure NATS server is running at %s\n", NATS_DEFAULT_URL);
-        nats_Close();
-        return 2;
-    }
-    
     const char *message_data = "Hello, NATS Echo Server!";
-    const int64_t timeout_ms = 5000; // 5 second timeout
-    
-    start_time = clock();
     
     printf("Sending echo requests to subject 'echo'...\n");
     printf("Press Ctrl+C to stop\n");
     
     // Continuous loop sending requests as fast as possible
     while (keep_running) {
-        msg_count++;
-        
         natsMsg *reply = NULL;
         
+        stats.msg_count++;
+        
         // Send request and wait for echo reply
-        status = natsConnection_RequestString(&reply, conn, "echo", message_data, timeout_ms);
+        status = natsConnection_RequestString(&reply, conn, "echo", message_data, REQUEST_TIMEOUT_MS);
         if (status != NATS_OK) {
-            error_count++;
-            if (error_count % 1000 == 0) {
-                printf("Error #%lu: %s\n", error_count, natsStatus_GetText(status));
-            }
+            bench_print_error(&stats, status);
             continue;
         }
         
-        success_count++;
+        stats.success_count++;
         
         // Verify echo (optional - could be removed for pure performance test)
         const char *reply_data = natsMsg_GetData(reply);
@@ -80,25 +54,36 @@ int main() {
         
         natsMsg_Destroy(reply);
         
-        // Print stats every 1000 successful messages
-        if (success_count % 1000 == 0) {
-            clock_t current_time = clock();
-            double elapsed_s = ((double)(current_time - start_time)) / CLOCKS_PER_SEC;
-            double msg_per_s = (double)success_count / elapsed_s;
-            double error_rate = ((double)error_count / (double)msg_count) * 100.0;
-            printf("Sent %lu requests, %lu successful, %.2f req/s, %.2f%% errors\n", 
-                   msg_count, success_count, msg_per_s, error_rate);
+        // Print stats every REPORT_INTERVAL successful messages
+        if (stats.success_count % REPORT_INTERVAL == 0) {
+            double interval_s = bench_elapsed_s(&stats.last_report_time);
+            uint64_t interval_requests = stats.msg_count - stats.last_msg_count;
+            uint64_t interval_success = stats.success_count - stats.last_success_count;
+            uint64_t interval_errors = stats.error_count - stats.last_error_count;
+            double req_per_s = (double)interval_success / interval_s;
+            double interval_error_rate = ((double)interval_errors / (double)interval_requests) * 100.0;
+            printf("Sent %" PRIu64 " requests, %" PRIu64 " successful in %.1fs, %.2f req/s, %.2f%% errors\n", 
+                   interval_requests, interval_success, interval_s, req_per_s, interval_error_rate);
+            
+            stats.last_msg_count = stats.msg_count;
+            stats.last_success_count = stats.success_count;
+            stats.last_error_count = stats.error_count;
+            clock_gettime(CLOCK_MONOTONIC, &stats.last_report_time);
         }
     }
     
+    // Print final statistics
     printf("\nShutting down...\n");
-    printf("Total requests sent: %lu\n", msg_count);
-    printf("Successful requests: %lu\n", success_count);
-    printf("Failed requests: %lu\n", error_count);
+    printf("Total requests sent: %" PRIu64 "\n", stats.msg_count);
+    printf("Successful requests: %" PRIu64 "\n", stats.success_count);
+    printf("Failed requests: %" PRIu64 "\n", stats.error_count);
+    
+    double total_elapsed = bench_elapsed_s(&stats.start_time);
+    double avg_rate = (double)stats.success_count / total_elapsed;
+    printf("Average rate: %.2f req/s\n", avg_rate);
     
     // Cleanup
-    natsConnection_Destroy(conn);
-    nats_Close();
+    bench_cleanup(conn);
     
     return 0;
 }
