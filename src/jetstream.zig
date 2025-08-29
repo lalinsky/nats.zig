@@ -846,7 +846,7 @@ pub const JetStream = struct {
         const stored_msg = parsed_resp.value.message;
 
         // Create empty message and populate it
-        const msg = try Message.initEmpty(self.allocator);
+        const msg = try self.nc.newMsg();
         errdefer msg.deinit();
 
         const arena_allocator = msg.arena.allocator();
