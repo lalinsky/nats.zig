@@ -37,26 +37,6 @@ signal_handler(int sig)
     keep_running = false;
 }
 
-void on_msg(natsConnection *nc, natsSubscription *sub, natsMsg *msg, void *closure) {
-    (void)nc;
-    (void)sub;
-    (void)closure;
-    
-    msg_count++;
-    
-    // Print stats every 10000 messages
-    if (msg_count % 10000 == 0) {
-        double interval_s = monotonic_elapsed_s(&last_report_time);
-        uint64_t interval_msgs = msg_count - last_msg_count;
-        double msg_per_s = (double)interval_msgs / interval_s;
-        printf("Received %" PRIu64 " messages, %.2f msg/s\n", msg_count, msg_per_s);
-        
-        last_msg_count = msg_count;
-        clock_gettime(CLOCK_MONOTONIC, &last_report_time);
-    }
-    
-    natsMsg_Destroy(msg);
-}
 
 int main() {
     natsConnection *conn = NULL;
@@ -93,8 +73,8 @@ int main() {
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     last_report_time = start_time;
     
-    // Subscribe to subject with async callback
-    status = natsConnection_Subscribe(&sub, conn, subject, on_msg, NULL);
+    // Subscribe to subject synchronously
+    status = natsConnection_SubscribeSync(&sub, conn, subject);
     if (status != NATS_OK) {
         printf("Failed to subscribe: %s\n", natsStatus_GetText(status));
         natsConnection_Destroy(conn);
@@ -105,9 +85,34 @@ int main() {
     printf("Subscriber listening on subject '%s'...\n", subject);
     printf("Press Ctrl+C to stop\n");
     
-    // Keep the main thread alive while processing messages
+    // Synchronous message loop
     while (keep_running) {
-        nats_Sleep(1000);
+        natsMsg *msg = NULL;
+        
+        // Wait for next message with 1 second timeout
+        status = natsSubscription_NextMsg(&msg, sub, 1000);
+        if (status == NATS_TIMEOUT) {
+            continue; // Timeout is expected, just continue
+        }
+        if (status != NATS_OK) {
+            printf("Error receiving message: %s\n", natsStatus_GetText(status));
+            continue;
+        }
+        
+        msg_count++;
+        
+        // Print stats every 10000 messages
+        if (msg_count % 10000 == 0) {
+            double interval_s = monotonic_elapsed_s(&last_report_time);
+            uint64_t interval_msgs = msg_count - last_msg_count;
+            double msg_per_s = (double)interval_msgs / interval_s;
+            printf("Received %" PRIu64 " messages, %.2f msg/s\n", msg_count, msg_per_s);
+            
+            last_msg_count = msg_count;
+            clock_gettime(CLOCK_MONOTONIC, &last_report_time);
+        }
+        
+        natsMsg_Destroy(msg);
     }
     
     printf("\nShutting down...\n");
