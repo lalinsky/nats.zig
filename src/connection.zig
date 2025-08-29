@@ -91,47 +91,12 @@ pub const ServerInfo = struct {
     parsed_version: ServerVersion = .{},
 };
 
-pub const PendingBuffer = struct {
-    buffer: ArrayList(u8),
-    max_size: usize,
-
-    pub fn init(allocator: Allocator, max_size: usize) PendingBuffer {
-        return PendingBuffer{
-            .buffer = ArrayList(u8).init(allocator),
-            .max_size = max_size,
-        };
-    }
-
-    pub fn deinit(self: *PendingBuffer) void {
-        self.buffer.deinit();
-    }
-
-    pub fn addMessage(self: *PendingBuffer, data: []const u8) !void {
-        if (self.buffer.items.len + data.len > self.max_size) {
-            return PublishError.InsufficientBuffer;
-        }
-        try self.buffer.appendSlice(data);
-    }
-
-    pub fn flush(self: *PendingBuffer, stream: net.Stream) !void {
-        if (self.buffer.items.len > 0) {
-            try stream.writeAll(self.buffer.items);
-            self.buffer.clearRetainingCapacity();
-        }
-    }
-
-    pub fn clear(self: *PendingBuffer) void {
-        self.buffer.clearRetainingCapacity();
-    }
-};
-
 pub const ConnectionClosedError = error{
     ConnectionClosed,
 };
 
 pub const PublishError = error{
     MaxPayload,
-    InsufficientBuffer,
     InvalidSubject,
 } || ConnectionClosedError || std.mem.Allocator.Error;
 
@@ -203,7 +168,7 @@ pub const Connection = struct {
     reconnect_thread: ?std.Thread = null,
     in_reconnect: i32 = 0, // Regular int like C library, protected by mutex
     abort_reconnect: bool = false, // Like C library's nc->ar flag, protected by mutex
-    pending_buffer: PendingBuffer,
+    pending_buffer: WriteBuffer,
 
     // Reconnection coordination
     reconnect_condition: std.Thread.Condition = .{},
@@ -255,7 +220,7 @@ pub const Connection = struct {
             .options = options,
             .server_pool = ServerPool.init(allocator),
             .server_info_arena = std.heap.ArenaAllocator.init(allocator),
-            .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
+            .pending_buffer = WriteBuffer.init(allocator, .{ .max_size = options.reconnect.reconnect_buf_size }),
             .write_buffer = WriteBuffer.init(allocator, .{}),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .response_manager = ResponseManager.init(allocator),
@@ -1011,7 +976,7 @@ pub const Connection = struct {
 
         // If we're reconnecting, buffer the message for later
         if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
-            return self.pending_buffer.addMessage(data);
+            return self.pending_buffer.append(data);
         }
 
         // Buffer and signal flusher (mutex already held)
@@ -1332,7 +1297,7 @@ pub const Connection = struct {
                 };
 
                 // Flush pending messages (outside mutex like C library)
-                self.pending_buffer.flush(self.stream.?) catch |err| {
+                self.pending_buffer.moveToBuffer(&self.write_buffer) catch |err| {
                     log.warn("Failed to flush pending messages: {}", .{err});
                     // Continue anyway, connection is established
                 };
