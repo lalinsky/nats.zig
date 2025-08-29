@@ -19,7 +19,7 @@ jobs:
         version: 0.14.1
 
     - name: Install libnats
-      run: apt-get update && apt-get install libnats-dev
+      run: sudo apt-get update && sudo apt-get install libnats-dev
 
     - name: Check code formatting
       run: zig fmt --check .
