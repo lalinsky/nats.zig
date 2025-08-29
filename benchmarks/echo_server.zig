@@ -19,9 +19,7 @@ pub fn main() !void {
     var stats = bench_util.BenchStats.init();
 
     // Creates a connection to the default NATS URL
-    var conn = bench_util.connect(allocator, null) catch |err| {
-        return err;
-    };
+    var conn = try bench_util.connect(allocator, null);
     defer bench_util.cleanup(conn);
 
     // Creates a synchronous subscription on subject "echo",
@@ -48,21 +46,19 @@ pub fn main() !void {
 
             // Send echo reply if there's a reply subject
             if (msg.reply) |reply_subject| {
-                conn.publish(reply_subject, msg.data) catch |err| {
+                const result = conn.publish(reply_subject, msg.data);
+                if (result) {
+                    stats.success_count += 1;
+                } else |err| {
                     std.debug.print("Failed to send echo reply: {}\n", .{err});
                     stats.error_count += 1;
-                    continue;
-                };
-                stats.success_count += 1;
+                }
             }
 
             // Print stats every REPORT_INTERVAL messages
             if (stats.msg_count % REPORT_INTERVAL == 0) {
                 stats.printThroughput("Processed");
             }
-        } else {
-            // Sleep a bit if no message
-            std.time.sleep(10 * std.time.ns_per_ms);
         }
     }
 

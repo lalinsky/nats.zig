@@ -49,9 +49,6 @@ pub fn main() !void {
             if (stats.msg_count % REPORT_INTERVAL == 0) {
                 stats.printThroughput("Received");
             }
-        } else {
-            // Sleep a bit if no message (timeout occurred)
-            std.time.sleep(10 * std.time.ns_per_ms);
         }
     }
 
