@@ -46,15 +46,3 @@ test "inbox generation" {
     // Should be unique
     try testing.expect(!std.mem.eql(u8, inbox1, inbox2));
 }
-
-test "nuid generation" {
-    const nuid1 = nuid.next();
-    const nuid2 = nuid.next();
-
-    // Should be 22 characters
-    try std.testing.expectEqual(@as(usize, 22), nuid1.len);
-    try std.testing.expectEqual(@as(usize, 22), nuid2.len);
-
-    // Should be unique (very high probability)
-    try std.testing.expect(!std.mem.eql(u8, &nuid1, &nuid2));
-}
