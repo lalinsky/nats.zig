@@ -29,6 +29,34 @@ const HDR_STATUS_TIMEOUT = "408";
 const HDR_STATUS_MAX_BYTES = "409";
 const HDR_STATUS_NO_RESPONSE = "503";
 
+pub const MessageList = struct {
+    head: ?*Message = null,
+    tail: ?*Message = null,
+    len: usize = 0,
+
+    pub fn push(self: *MessageList, msg: *Message) void {
+        msg.next = null;
+        if (self.head == null) {
+            self.head = msg;
+            self.tail = msg;
+        } else {
+            self.tail.?.next = msg;
+            self.tail = msg;
+        }
+        self.len += 1;
+    }
+
+    pub fn pop(self: *MessageList) ?*Message {
+        if (self.head == null) return null;
+        const msg = self.head.?;
+        self.head = msg.next;
+        if (self.head == null) self.tail = null;
+        self.len -= 1;
+        msg.next = null;
+        return msg;
+    }
+};
+
 // Simple, idiomatic Zig message implementation using ArenaAllocator
 pub const Message = struct {
     // Core data - stored as slices
@@ -50,81 +78,44 @@ pub const Message = struct {
     // Memory management - much simpler with arena
     arena: std.heap.ArenaAllocator,
 
+    // Linked list for message queue
+    next: ?*Message = null,
+    pool: ?*MessagePool = null,
+
     const Self = @This();
 
-    // Create message copying all data into an arena
-    pub fn init(
-        allocator: Allocator,
-        subject: []const u8,
-        reply: ?[]const u8,
-        data: []const u8,
-    ) !*Self {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        errdefer arena.deinit();
-
-        const arena_allocator = arena.allocator();
-
-        const msg = try arena_allocator.create(Self);
-
-        // Copy all data using arena - much simpler!
-        msg.* = .{
-            .subject = try arena_allocator.dupe(u8, subject),
-            .reply = if (reply) |r| try arena_allocator.dupe(u8, r) else null,
-            .data = try arena_allocator.dupe(u8, data),
-            .arena = arena,
-        };
-
-        return msg;
-    }
-
-    // Create message with header support
-    pub fn initWithHeaders(
-        allocator: Allocator,
-        subject: []const u8,
-        reply: ?[]const u8,
-        data: []const u8,
-        raw_headers: []const u8,
-    ) !*Self {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        errdefer arena.deinit();
-
-        const arena_allocator = arena.allocator();
-
-        const msg = try arena_allocator.create(Self);
-
-        // Copy all data using arena
-        msg.* = .{
-            .subject = try arena_allocator.dupe(u8, subject),
-            .reply = if (reply) |r| try arena_allocator.dupe(u8, r) else null,
-            .data = try arena_allocator.dupe(u8, data),
-            .raw_headers = try arena_allocator.dupe(u8, raw_headers),
-            .needs_header_parsing = true,
-            .arena = arena,
-        };
-
-        return msg;
-    }
-
     // Create empty message with just arena allocation
-    pub fn initEmpty(allocator: Allocator) !*Self {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        errdefer arena.deinit();
-
-        const arena_allocator = arena.allocator();
-        const msg = try arena_allocator.create(Self);
-
-        msg.* = .{
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return .{
             .subject = &[_]u8{},
             .data = &[_]u8{},
-            .arena = arena,
+            .arena = std.heap.ArenaAllocator.init(allocator),
         };
-
-        return msg;
     }
 
     pub fn deinit(self: *Self) void {
-        // Arena takes care of ALL allocations including the message struct itself!
-        self.arena.deinit();
+        if (self.pool) |pool| {
+            pool.release(self);
+        } else {
+            self.arena.deinit();
+        }
+    }
+
+    pub fn setSubject(self: *Self, subject: []const u8) !void {
+        self.subject = try self.arena.allocator().dupe(u8, subject);
+    }
+
+    pub fn setReply(self: *Self, reply: []const u8) !void {
+        self.reply = try self.arena.allocator().dupe(u8, reply);
+    }
+
+    pub fn setPayload(self: *Self, payload: []const u8) !void {
+        self.data = try self.arena.allocator().dupe(u8, payload);
+    }
+
+    pub fn setRawHeaders(self: *Self, headers: []const u8) !void {
+        self.raw_headers = try self.arena.allocator().dupe(u8, headers);
+        self.needs_header_parsing = true;
     }
 
     // Lazy header parsing
@@ -273,5 +264,78 @@ pub const Message = struct {
         }
 
         try writer.writeAll("\r\n");
+    }
+
+    // Reset message for reuse in pool
+    pub fn reset(self: *Self) void {
+        // Clear all fields except arena and pool
+        self.subject = &[_]u8{};
+        self.reply = null;
+        self.data = &[_]u8{};
+        self.sid = 0;
+        self.seq = 0;
+        self.headers.clearRetainingCapacity();
+        self.raw_headers = null;
+        self.needs_header_parsing = false;
+        self.next = null;
+        // Note: pool and arena are intentionally preserved
+    }
+};
+
+pub const MessagePool = struct {
+    allocator: std.mem.Allocator,
+    messages: MessageList = .{},
+    mutex: std.Thread.Mutex = .{},
+    max_size: usize = 100,
+    max_arena_size: usize = 1024 * 1024,
+
+    pub const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator) MessagePool {
+        return .{
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        while (self.messages.pop()) |msg| {
+            msg.pool = null;
+            msg.deinit();
+            self.allocator.destroy(msg);
+        }
+    }
+
+    pub fn acquire(self: *Self) !*Message {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.messages.pop()) |msg| {
+            return msg;
+        }
+
+        const msg = try self.allocator.create(Message);
+        errdefer self.allocator.destroy(msg);
+
+        msg.* = Message.init(self.allocator);
+        msg.pool = self;
+        return msg;
+    }
+
+    pub fn release(self: *Self, msg: *Message) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.messages.len < self.max_size) {
+            msg.reset();
+            _ = msg.arena.reset(.{ .retain_with_limit = self.max_arena_size });
+            self.messages.push(msg);
+        } else {
+            msg.pool = null;
+            msg.deinit();
+            self.allocator.destroy(msg);
+        }
     }
 };

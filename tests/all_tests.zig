@@ -17,6 +17,7 @@ test {
     _ = @import("jetstream_msg_test.zig");
     _ = @import("jetstream_duplicate_ack_test.zig");
     _ = @import("reconnection_test.zig");
+    _ = @import("jetstream_large_list_test.zig");
 }
 
 test "tests:beforeEach" {

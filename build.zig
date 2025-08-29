@@ -43,7 +43,7 @@ pub fn build(b: *std.Build) void {
     // This creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Every executable or library we compile will be based on one or more modules.
-    const lib_mod = b.createModule(.{
+    const lib_mod = b.addModule("nats", .{
         // `root_source_file` is the Zig "entry point" of the module. If a module
         // only contains e.g. external object files, you can make this `null`.
         // In this case the main source file is merely a path, however, in more
@@ -128,4 +128,83 @@ pub fn build(b: *std.Build) void {
         const install_exe = b.addInstallArtifact(exe, .{});
         examples_step.dependOn(&install_exe.step);
     }
+
+    // Create benchmark executables
+    const benchmark_files = [_]struct { name: []const u8, file: []const u8 }{
+        .{ .name = "echo_server", .file = "benchmarks/echo_server.zig" },
+        .{ .name = "echo_client", .file = "benchmarks/echo_client.zig" },
+        .{ .name = "publisher", .file = "benchmarks/publisher.zig" },
+        .{ .name = "subscriber", .file = "benchmarks/subscriber.zig" },
+    };
+
+    const benchmarks_step = b.step("benchmarks", "Build all benchmarks");
+
+    for (benchmark_files) |benchmark_info| {
+        const exe = b.addExecutable(.{
+            .name = benchmark_info.name,
+            .root_source_file = b.path(benchmark_info.file),
+            .target = target,
+            .optimize = optimize,
+        });
+        exe.root_module.addImport("nats", lib_mod);
+
+        // Only install benchmarks when explicitly building benchmarks step
+        const install_exe = b.addInstallArtifact(exe, .{});
+        benchmarks_step.dependOn(&install_exe.step);
+    }
+
+    // C benchmarks (require libnats)
+    const c_echo_server = b.addExecutable(.{
+        .name = "echo_server_c",
+        .root_source_file = null,
+        .target = target,
+        .optimize = optimize,
+    });
+    c_echo_server.addCSourceFile(.{ .file = b.path("benchmarks/echo_server.c"), .flags = &.{} });
+    c_echo_server.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
+    c_echo_server.linkLibC();
+    c_echo_server.linkSystemLibrary("nats");
+
+    const c_echo_client = b.addExecutable(.{
+        .name = "echo_client_c",
+        .root_source_file = null,
+        .target = target,
+        .optimize = optimize,
+    });
+    c_echo_client.addCSourceFile(.{ .file = b.path("benchmarks/echo_client.c"), .flags = &.{} });
+    c_echo_client.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
+    c_echo_client.linkLibC();
+    c_echo_client.linkSystemLibrary("nats");
+
+    const c_publisher = b.addExecutable(.{
+        .name = "publisher_c",
+        .root_source_file = null,
+        .target = target,
+        .optimize = optimize,
+    });
+    c_publisher.addCSourceFile(.{ .file = b.path("benchmarks/publisher.c"), .flags = &.{} });
+    c_publisher.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
+    c_publisher.linkLibC();
+    c_publisher.linkSystemLibrary("nats");
+
+    const c_subscriber = b.addExecutable(.{
+        .name = "subscriber_c",
+        .root_source_file = null,
+        .target = target,
+        .optimize = optimize,
+    });
+    c_subscriber.addCSourceFile(.{ .file = b.path("benchmarks/subscriber.c"), .flags = &.{} });
+    c_subscriber.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
+    c_subscriber.linkLibC();
+    c_subscriber.linkSystemLibrary("nats");
+
+    const install_c_echo_server = b.addInstallArtifact(c_echo_server, .{});
+    const install_c_echo_client = b.addInstallArtifact(c_echo_client, .{});
+    const install_c_publisher = b.addInstallArtifact(c_publisher, .{});
+    const install_c_subscriber = b.addInstallArtifact(c_subscriber, .{});
+
+    benchmarks_step.dependOn(&install_c_echo_server.step);
+    benchmarks_step.dependOn(&install_c_echo_client.step);
+    benchmarks_step.dependOn(&install_c_publisher.step);
+    benchmarks_step.dependOn(&install_c_subscriber.step);
 }

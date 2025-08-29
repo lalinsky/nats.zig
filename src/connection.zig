@@ -18,6 +18,7 @@ const ArrayList = std.ArrayList;
 const Parser = @import("parser.zig").Parser;
 const inbox = @import("inbox.zig");
 const Message = @import("message.zig").Message;
+const MessageList = @import("message.zig").MessageList;
 const subscription_mod = @import("subscription.zig");
 const Subscription = subscription_mod.Subscription;
 const MsgHandler = subscription_mod.MsgHandler;
@@ -33,6 +34,7 @@ const build_options = @import("build_options");
 const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
 const ResponseManager = @import("response_manager.zig").ResponseManager;
 const Socket = @import("socket.zig").Socket;
+const MAX_CONTROL_LINE_SIZE = @import("parser.zig").MAX_CONTROL_LINE_SIZE;
 
 const log = std.log.scoped(.connection);
 
@@ -90,47 +92,12 @@ pub const ServerInfo = struct {
     parsed_version: ServerVersion = .{},
 };
 
-pub const PendingBuffer = struct {
-    buffer: ArrayList(u8),
-    max_size: usize,
-
-    pub fn init(allocator: Allocator, max_size: usize) PendingBuffer {
-        return PendingBuffer{
-            .buffer = ArrayList(u8).init(allocator),
-            .max_size = max_size,
-        };
-    }
-
-    pub fn deinit(self: *PendingBuffer) void {
-        self.buffer.deinit();
-    }
-
-    pub fn addMessage(self: *PendingBuffer, data: []const u8) !void {
-        if (self.buffer.items.len + data.len > self.max_size) {
-            return PublishError.InsufficientBuffer;
-        }
-        try self.buffer.appendSlice(data);
-    }
-
-    pub fn flush(self: *PendingBuffer, socket: Socket) !void {
-        if (self.buffer.items.len > 0) {
-            try socket.writeAll(self.buffer.items);
-            self.buffer.clearRetainingCapacity();
-        }
-    }
-
-    pub fn clear(self: *PendingBuffer) void {
-        self.buffer.clearRetainingCapacity();
-    }
-};
-
 pub const ConnectionClosedError = error{
     ConnectionClosed,
 };
 
 pub const PublishError = error{
     MaxPayload,
-    InsufficientBuffer,
     InvalidSubject,
 } || ConnectionClosedError || std.mem.Allocator.Error;
 
@@ -180,6 +147,7 @@ pub const ConnectionOptions = struct {
     no_responders: bool = true,
     // Internal wait time in connection threads
     idle_wait_ms: u64 = 60000,
+    max_scratch_size: usize = 1024 * 1024 * 10,
 };
 
 const HandshakeState = packed struct(u4) {
@@ -226,7 +194,7 @@ pub const Connection = struct {
     reconnect_thread: ?std.Thread = null,
     in_reconnect: i32 = 0, // Regular int like C library, protected by mutex
     abort_reconnect: bool = false, // Like C library's nc->ar flag, protected by mutex
-    pending_buffer: PendingBuffer,
+    pending_buffer: WriteBuffer,
 
     // Reconnection coordination
     reconnect_condition: std.Thread.Condition = .{},
@@ -267,6 +235,8 @@ pub const Connection = struct {
     // Response management (shared subscription for request/reply)
     response_manager: ResponseManager,
 
+    scratch: std.heap.ArenaAllocator,
+
     // Parser
     parser: Parser,
 
@@ -279,11 +249,12 @@ pub const Connection = struct {
             .options = options,
             .server_pool = ServerPool.init(allocator),
             .server_info_arena = std.heap.ArenaAllocator.init(allocator),
-            .pending_buffer = PendingBuffer.init(allocator, options.reconnect.reconnect_buf_size),
+            .pending_buffer = WriteBuffer.init(allocator, .{ .max_size = options.reconnect.reconnect_buf_size }),
             .write_buffer = WriteBuffer.init(allocator, .{}),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .response_manager = ResponseManager.init(allocator),
             .parser = Parser.init(allocator),
+            .scratch = std.heap.ArenaAllocator.init(allocator),
         };
     }
 
@@ -317,10 +288,19 @@ pub const Connection = struct {
         self.server_info_arena.deinit();
 
         self.parser.deinit();
+        self.scratch.deinit();
 
         if (self.last_received_error) |err_msg| {
             self.allocator.free(err_msg);
         }
+    }
+
+    fn resetScratch(self: *Self) void {
+        _ = self.scratch.reset(.{ .retain_with_limit = self.options.max_scratch_size });
+    }
+
+    pub fn newMsg(self: *Self) !*Message {
+        return self.parser.msg_pool.acquire();
     }
 
     /// Ensure dispatcher pool is initialized (lazy initialization)
@@ -546,6 +526,7 @@ pub const Connection = struct {
         var msg = Message{
             .subject = subject,
             .data = data,
+            .pool = null,
             .arena = undefined, // we don't need a fully constructed arena for this
         };
         return self.publishMsgInternal(&msg, null, false);
@@ -562,6 +543,7 @@ pub const Connection = struct {
             .subject = subject,
             .reply = reply,
             .data = data,
+            .pool = null,
             .arena = undefined, // we don't need a fully constructed arena for this
         };
         return self.publishMsgInternal(&msg, null, true);
@@ -577,54 +559,51 @@ pub const Connection = struct {
             return error.InvalidSubject;
         }
 
-        // Check if message has headers
-        try msg.ensureHeadersParsed();
-        const has_headers = msg.headers.count() > 0;
-
-        // Calculate total payload size (headers + data) like C library
-        var headers_len: usize = 0;
-        var headers_buffer = ArrayList(u8).init(self.allocator);
-        defer headers_buffer.deinit();
-
-        if (has_headers) {
-            try msg.encodeHeaders(headers_buffer.writer());
-            headers_len = headers_buffer.items.len;
-        }
-
-        const total_payload = headers_len + msg.data.len;
-
-        const reply_to_use = reply_override orelse msg.reply;
-
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-
-        if (has_headers) {
-            // HPUB <subject> [reply] <headers_len> <total_len>\r\n<headers><data>\r\n
-            if (reply_to_use) |reply| {
-                try buffer.writer().print("HPUB {s} {s} {d} {d}\r\n", .{ msg.subject, reply, headers_len, total_payload });
-            } else {
-                try buffer.writer().print("HPUB {s} {d} {d}\r\n", .{ msg.subject, headers_len, total_payload });
-            }
-            try buffer.appendSlice(headers_buffer.items);
-            try buffer.appendSlice(msg.data);
-            try buffer.appendSlice("\r\n");
-        } else {
-            // PUB <subject> [reply] <size>\r\n<data>\r\n
-            if (reply_to_use) |reply| {
-                try buffer.writer().print("PUB {s} {s} {d}\r\n", .{ msg.subject, reply, msg.data.len });
-            } else {
-                try buffer.writer().print("PUB {s} {d}\r\n", .{ msg.subject, msg.data.len });
-            }
-            try buffer.appendSlice(msg.data);
-            try buffer.appendSlice("\r\n");
-        }
-
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Validate payload size against server limit
+        const allocator = self.scratch.allocator();
+        defer self.resetScratch();
+
+        // TODO pre-allocate headers_buffer
+        var headers_buffer = ArrayList(u8).init(allocator);
+        defer headers_buffer.deinit();
+
+        try msg.encodeHeaders(headers_buffer.writer());
+        const headers_len = headers_buffer.items.len;
+
+        const total_payload = headers_len + msg.data.len;
+
         if (self.server_info.max_payload > 0 and total_payload > @as(usize, @intCast(self.server_info.max_payload))) {
             return PublishError.MaxPayload;
+        }
+
+        const reply_to_use = reply_override orelse msg.reply;
+
+        var buffer = try std.ArrayListUnmanaged(u8).initCapacity(allocator, MAX_CONTROL_LINE_SIZE + total_payload);
+        defer buffer.deinit(allocator);
+
+        var buffer_writer = buffer.fixedWriter();
+
+        if (headers_len > 0) {
+            // HPUB <subject> [reply] <headers_len> <total_len>\r\n<headers><data>\r\n
+            if (reply_to_use) |reply| {
+                try buffer_writer.print("HPUB {s} {s} {d} {d}\r\n", .{ msg.subject, reply, headers_len, total_payload });
+            } else {
+                try buffer_writer.print("HPUB {s} {d} {d}\r\n", .{ msg.subject, headers_len, total_payload });
+            }
+            try buffer_writer.writeAll(headers_buffer.items);
+            try buffer_writer.writeAll(msg.data);
+            try buffer_writer.writeAll("\r\n");
+        } else {
+            // PUB <subject> [reply] <size>\r\n<data>\r\n
+            if (reply_to_use) |reply| {
+                try buffer_writer.print("PUB {s} {s} {d}\r\n", .{ msg.subject, reply, msg.data.len });
+            } else {
+                try buffer_writer.print("PUB {s} {d}\r\n", .{ msg.subject, msg.data.len });
+            }
+            try buffer_writer.writeAll(msg.data);
+            try buffer_writer.writeAll("\r\n");
         }
 
         // Allow publishes when connected or reconnecting (buffered).
@@ -634,10 +613,11 @@ pub const Connection = struct {
         }
 
         try self.bufferWrite(buffer.items, asap);
+
         if (reply_to_use) |reply| {
-            log.debug("Published message to {s} with reply {s}: has_headers={}, data_len={d}, total_payload={d}", .{ msg.subject, reply, has_headers, msg.data.len, total_payload });
+            log.debug("Published message to {s} with reply {s}", .{ msg.subject, reply });
         } else {
-            log.debug("Published message to {s}: has_headers={}, data_len={d}, total_payload={d}", .{ msg.subject, has_headers, msg.data.len, total_payload });
+            log.debug("Published message to {s}", .{msg.subject});
         }
     }
 
@@ -805,6 +785,7 @@ pub const Connection = struct {
         var msg = Message{
             .subject = subject,
             .data = data,
+            .pool = null,
             .arena = undefined,
         };
         return self.requestMsg(&msg, timeout_ms);
@@ -841,6 +822,46 @@ pub const Connection = struct {
         return reply_msg;
     }
 
+    pub const RequestManyOptions = ResponseManager.WaitForMultiResponseOptions;
+
+    pub fn requestMany(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64, options: RequestManyOptions) !MessageList {
+        var msg = Message{
+            .subject = subject,
+            .data = data,
+            .pool = null,
+            .arena = undefined,
+        };
+        return self.requestManyMsg(&msg, timeout_ms, options);
+    }
+
+    pub fn requestManyMsg(self: *Self, msg: *Message, timeout_ms: u64, options: RequestManyOptions) !MessageList {
+        if (self.options.trace) {
+            log.debug("Sending request-many message to {s} with timeout {d}ms", .{ msg.subject, timeout_ms });
+        }
+
+        // Ensure response system is initialized (without mutex held)
+        try self.response_manager.ensureInitialized(self);
+
+        // Create multi-request handle
+        const handle = try self.response_manager.createMultiRequest();
+        defer self.response_manager.cleanupRequest(handle);
+
+        // Get reply subject for the request
+        const reply_subject = try self.response_manager.getReplySubject(self.allocator, handle);
+        defer self.allocator.free(reply_subject);
+
+        // Publish the request message
+        try self.publishRequestMsg(msg, reply_subject);
+
+        // Wait for multiple responses
+        const messages = try self.response_manager.waitForMultiResponse(handle, timeout_ms * std.time.ns_per_ms, options);
+
+        if (self.options.trace) {
+            log.debug("Received {} responses for request-many to {s}", .{ messages.len, msg.subject });
+        }
+
+        return messages;
+    }
     fn readerLoop(self: *Self) void {
         log.debug("Reader thread started", .{});
 
@@ -954,6 +975,11 @@ pub const Connection = struct {
     fn bufferWrite(self: *Self, data: []const u8, asap: bool) !void {
         // Assume mutex is already held by caller
 
+        // If we're reconnecting, buffer the message for later
+        if (self.status == .connecting and self.options.reconnect.allow_reconnect) {
+            return self.pending_buffer.append(data);
+        }
+
         // Buffer and signal flusher (mutex already held)
         try self.write_buffer.append(data);
 
@@ -967,71 +993,59 @@ pub const Connection = struct {
         }
     }
 
-    // Process MSG and HMSG commands
-    // This is the most executed method in the connection
-    // Called from the parser in the reader thread
-    pub fn processMsg(self: *Self, message_buffer: []const u8) !void {
-        const msg_arg = self.parser.ma;
+    // Parser callback methods
+    pub fn processMsg(self: *Self, message: *Message) !void {
 
         // Retain subscription while holding lock, then release lock
-        const sub = blk: {
-            self.subs_mutex.lock();
-            defer self.subs_mutex.unlock();
-
-            var s = self.subscriptions.get(msg_arg.sid) orelse return;
+        self.subs_mutex.lock();
+        const sub = self.subscriptions.get(message.sid);
+        if (sub) |s| {
             s.retain(); // Keep subscription alive
-            break :blk s;
-        };
-        defer sub.release();
+        }
+        self.subs_mutex.unlock();
 
-        // Handle full message buffer like C parser (splits headers internally)
-        const message = if (msg_arg.hdr >= 0) blk: {
-            // HMSG - message_buffer contains headers + payload
-            const hdr_len = @as(usize, @intCast(msg_arg.hdr));
-            const headers_data = message_buffer[0..hdr_len];
-            const msg_data = message_buffer[hdr_len..];
-            break :blk try Message.initWithHeaders(self.allocator, msg_arg.subject, msg_arg.reply, msg_data, headers_data);
-        } else blk: {
-            // Regular MSG - message_buffer is just payload
-            break :blk try Message.init(self.allocator, msg_arg.subject, msg_arg.reply, message_buffer);
-        };
+        if (sub) |s| {
+            defer s.release(); // Release when done
 
-        message.sid = msg_arg.sid;
+            // Log before consuming message (to avoid use-after-free)
+            log.debug("Delivering message to subscription {d}: {s}", .{ message.sid, message.data });
 
-        // Log before consuming message (to avoid use-after-free)
-        log.debug("Delivering message to subscription {d}: {s}", .{ msg_arg.sid, message.data });
-
-        if (sub.handler) |_| {
-            // Async subscription - dispatch to assigned dispatcher
-            if (sub.dispatcher) |dispatcher| {
-                dispatcher.enqueue(sub, message) catch |err| {
-                    log.err("Failed to dispatch message for sid {d}: {}", .{ msg_arg.sid, err });
-                    message.deinit();
-                    return;
-                };
-            } else {
-                log.err("Async subscription {} has no assigned dispatcher", .{msg_arg.sid});
-                message.deinit();
-                return;
-            }
-        } else {
-            // Sync subscription - queue message
-            sub.messages.push(message) catch |err| {
-                switch (err) {
-                    error.QueueClosed => {
-                        // Queue is closed; drop gracefully.
-                        log.debug("Queue closed for sid {d}; dropping message", .{msg_arg.sid});
+            if (s.handler) |_| {
+                // Async subscription - dispatch to assigned dispatcher
+                if (s.dispatcher) |dispatcher| {
+                    dispatcher.enqueue(s, message) catch |err| {
+                        log.err("Failed to dispatch message for sid {d}: {}", .{ message.sid, err });
                         message.deinit();
                         return;
-                    },
-                    else => {
-                        // Allocation or unexpected push failure; log and tear down the connection.
-                        log.err("Failed to enqueue message for sid {d}: {}", .{ msg_arg.sid, err });
-                        message.deinit();
-                        return err;
-                    },
+                    };
+                } else {
+                    log.err("Async subscription {} has no assigned dispatcher", .{message.sid});
+                    message.deinit();
+                    return;
                 }
-            };
+            } else {
+                // Sync subscription - queue message
+                s.messages.push(message) catch |err| {
+                    switch (err) {
+                        error.QueueClosed => {
+                            // Queue is closed; drop gracefully.
+                            log.debug("Queue closed for sid {d}; dropping message", .{message.sid});
+                            message.deinit();
+                            return;
+                        },
+                        else => {
+                            // Allocation or unexpected push failure; log and tear down the connection.
+                            log.err("Failed to enqueue message for sid {d}: {}", .{ message.sid, err });
+                            message.deinit();
+                            return err;
+                        },
+                    }
+                };
+            }
+        } else {
+            // No subscription found, discard message
+            log.debug("No subscription found for sid {d}; dropping message", .{message.sid});
+            message.deinit();
         }
     }
 
@@ -1443,7 +1457,7 @@ pub const Connection = struct {
                 };
 
                 // Flush pending messages (outside mutex like C library)
-                self.pending_buffer.flush(self.socket.?) catch |err| {
+                self.pending_buffer.moveToBuffer(&self.write_buffer) catch |err| {
                     log.warn("Failed to flush pending messages: {}", .{err});
                     // Continue anyway, connection is established
                 };

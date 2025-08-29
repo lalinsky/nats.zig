@@ -35,6 +35,9 @@ jobs:
         with:
           version: 0.14.1
 
+      - name: Install libnats
+        run: sudo apt-get update && sudo apt-get install libnats-dev
+      
       - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@beta
@@ -55,7 +58,7 @@ jobs:
           # assignee_trigger: "claude-bot"
           
           # Optional: Allow Claude to run specific commands
-          allowed_tools: "Bash(zig build:*),Bash(zig test:*),Bash(zig run:*),WebSearch,WebFetch"
+          allowed_tools: "Bash(zig build:*),Bash(zig test:*),Bash(zig run:*),Bash(zig fmt:*),WebSearch,WebFetch"
           
           # Optional: Add custom instructions for Claude to customize its behavior for your project
           # custom_instructions: |

@@ -18,6 +18,9 @@ jobs:
       with:
         version: 0.14.1
 
+    - name: Install libnats
+      run: sudo apt-get update && sudo apt-get install libnats-dev
+
     - name: Check code formatting
       run: zig fmt --check .
 
@@ -26,3 +29,9 @@ jobs:
 
     - name: Run integration tests
       run: zig build test-e2e
+
+    - name: Build examples
+      run: zig build examples
+
+    - name: Build benchmarks
+      run: zig build benchmarks
