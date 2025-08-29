@@ -35,6 +35,7 @@ pub const MessageList = struct {
     len: usize = 0,
 
     pub fn push(self: *MessageList, msg: *Message) void {
+        msg.next = null;
         if (self.head == null) {
             self.head = msg;
             self.tail = msg;
