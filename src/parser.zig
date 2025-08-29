@@ -170,7 +170,7 @@ pub const Parser = struct {
                         '\n' => {
                             // Process message arguments using C-style two-mode approach
                             const arg_start = if (self.arg_buf_active)
-                                self.arg_buf_writer.buffer[0..self.arg_buf_writer.pos] // Slow path: accumulated from split buffer
+                                self.arg_buf_writer.getWritten() // Slow path: accumulated from split buffer
                             else
                                 buf[self.after_space .. i - self.drop]; // Fast path: direct slice
 
@@ -186,7 +186,8 @@ pub const Parser = struct {
                         else => {
                             // Only accumulate if we're in split buffer mode
                             if (self.arg_buf_active) {
-                                _ = try self.arg_buf_writer.write(&[_]u8{b});
+                                const written = try self.arg_buf_writer.write(&[_]u8{b});
+                                if (written != 1) return error.BufferOverflow;
                             }
                         },
                     }
@@ -363,7 +364,7 @@ pub const Parser = struct {
                         '\n' => {
                             // Process error message using C-style two-mode approach
                             const err_msg = if (self.arg_buf_active)
-                                self.arg_buf_writer.buffer[0..self.arg_buf_writer.pos] // Slow path: accumulated from split buffer
+                                self.arg_buf_writer.getWritten() // Slow path: accumulated from split buffer
                             else
                                 buf[self.after_space .. i - self.drop]; // Fast path: direct slice
 
@@ -379,7 +380,8 @@ pub const Parser = struct {
                         else => {
                             // Only accumulate if we're in split buffer mode
                             if (self.arg_buf_active) {
-                                _ = try self.arg_buf_writer.write(&[_]u8{b});
+                                const written = try self.arg_buf_writer.write(&[_]u8{b});
+                                if (written != 1) return error.BufferOverflow;
                             }
                         },
                     }
@@ -433,7 +435,7 @@ pub const Parser = struct {
                         '\n' => {
                             // Process INFO JSON using C-style two-mode approach
                             const info_json = if (self.arg_buf_active)
-                                self.arg_buf_writer.buffer[0..self.arg_buf_writer.pos] // Slow path: accumulated from split buffer
+                                self.arg_buf_writer.getWritten() // Slow path: accumulated from split buffer
                             else
                                 buf[self.after_space .. i - self.drop]; // Fast path: direct slice
 
@@ -449,7 +451,8 @@ pub const Parser = struct {
                         else => {
                             // Only accumulate if we're in split buffer mode
                             if (self.arg_buf_active) {
-                                _ = try self.arg_buf_writer.write(&[_]u8{b});
+                                const written = try self.arg_buf_writer.write(&[_]u8{b});
+                                if (written != 1) return error.BufferOverflow;
                             }
                         },
                     }
@@ -469,7 +472,8 @@ pub const Parser = struct {
             // Set up arg_buf for next parse() call
             self.setupArgBuf();
             const remaining_args = buf[self.after_space .. i - self.drop];
-            _ = try self.arg_buf_writer.write(remaining_args);
+            const written = try self.arg_buf_writer.write(remaining_args);
+            if (written != remaining_args.len) return error.BufferOverflow;
         }
     }
 
