@@ -701,6 +701,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.head = null;
             self.queue.tail = null;
             self.queue.items_available = 0;
+            self.queue.total_chunks = 0;
         }
 
         /// Clear all data from the buffer
