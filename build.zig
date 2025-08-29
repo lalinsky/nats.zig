@@ -133,6 +133,8 @@ pub fn build(b: *std.Build) void {
     const benchmark_files = [_]struct { name: []const u8, file: []const u8 }{
         .{ .name = "echo_server", .file = "benchmarks/echo_server.zig" },
         .{ .name = "echo_client", .file = "benchmarks/echo_client.zig" },
+        .{ .name = "publisher", .file = "benchmarks/publisher.zig" },
+        .{ .name = "subscriber", .file = "benchmarks/subscriber.zig" },
     };
 
     const benchmarks_step = b.step("benchmarks", "Build all benchmarks");
@@ -172,9 +174,33 @@ pub fn build(b: *std.Build) void {
     c_echo_client.linkLibC();
     c_echo_client.linkSystemLibrary("nats");
 
+    const c_publisher = b.addExecutable(.{
+        .name = "publisher_c",
+        .root_source_file = null,
+        .target = target,
+        .optimize = optimize,
+    });
+    c_publisher.addCSourceFile(.{ .file = b.path("benchmarks/publisher.c"), .flags = &.{} });
+    c_publisher.linkLibC();
+    c_publisher.linkSystemLibrary("nats");
+
+    const c_subscriber = b.addExecutable(.{
+        .name = "subscriber_c",
+        .root_source_file = null,
+        .target = target,
+        .optimize = optimize,
+    });
+    c_subscriber.addCSourceFile(.{ .file = b.path("benchmarks/subscriber.c"), .flags = &.{} });
+    c_subscriber.linkLibC();
+    c_subscriber.linkSystemLibrary("nats");
+
     const install_c_echo_server = b.addInstallArtifact(c_echo_server, .{});
     const install_c_echo_client = b.addInstallArtifact(c_echo_client, .{});
+    const install_c_publisher = b.addInstallArtifact(c_publisher, .{});
+    const install_c_subscriber = b.addInstallArtifact(c_subscriber, .{});
 
     benchmarks_step.dependOn(&install_c_echo_server.step);
     benchmarks_step.dependOn(&install_c_echo_client.step);
+    benchmarks_step.dependOn(&install_c_publisher.step);
+    benchmarks_step.dependOn(&install_c_subscriber.step);
 }
