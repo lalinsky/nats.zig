@@ -660,8 +660,11 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             if (dest.queue.max_chunks > 0 and dest.queue.total_chunks + moved_chunk_count > dest.queue.max_chunks) {
                 return PushError.ChunkLimitExceeded;
             }
-            if (dest.queue.max_size > 0 and (dest.queue.items_available + self.queue.items_available) * @sizeOf(u8) > dest.queue.max_size) {
-                return PushError.OutOfMemory;
+            if (dest.queue.max_size > 0) {
+                const max_items = dest.queue.max_size / @sizeOf(u8);
+                if (self.queue.items_available > max_items - dest.queue.items_available) {
+                    return PushError.OutOfMemory;
+                }
             }
 
             // Splice self's list onto dest's list.
