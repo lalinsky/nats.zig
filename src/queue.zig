@@ -270,11 +270,16 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 return PushError.QueueClosed;
             }
 
-            // Check size limit before adding
-            if (self.max_size > 0 and (self.items_available + items.len) * @sizeOf(T) > self.max_size) {
-                return PushError.OutOfMemory;
+            // Check size limit before adding (overflow-safe)
+            if (self.max_size > 0) {
+                const max_items = self.max_size / @sizeOf(T);
+                if (self.items_available >= max_items) {
+                    return PushError.OutOfMemory;
+                }
+                if (items.len > max_items - self.items_available) {
+                    return PushError.OutOfMemory;
+                }
             }
-
             var remaining = items;
             var total_written: usize = 0;
 
