@@ -684,6 +684,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.tail = null;
             self.queue.items_available = 0;
             self.queue.total_chunks -= moved_chunk_count;
+            std.debug.assert(self.queue.total_chunks == 0); // Catch accounting bugs
         }
 
         /// Clear all data from the buffer (internal, assumes mutex is held)
