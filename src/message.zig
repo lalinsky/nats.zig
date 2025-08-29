@@ -265,6 +265,21 @@ pub const Message = struct {
 
         try writer.writeAll("\r\n");
     }
+
+    // Reset message for reuse in pool
+    pub fn reset(self: *Self) void {
+        // Clear all fields except arena and pool
+        self.subject = &[_]u8{};
+        self.reply = null;
+        self.data = &[_]u8{};
+        self.sid = 0;
+        self.seq = 0;
+        self.headers.clearRetainingCapacity();
+        self.raw_headers = null;
+        self.needs_header_parsing = false;
+        self.next = null;
+        // Note: pool and arena are intentionally preserved
+    }
 };
 
 pub const MessagePool = struct {
@@ -314,6 +329,7 @@ pub const MessagePool = struct {
         defer self.mutex.unlock();
 
         if (self.messages.len < self.max_size) {
+            msg.reset();
             _ = msg.arena.reset(.{ .retain_with_limit = self.max_arena_size });
             self.messages.push(msg);
         } else {
