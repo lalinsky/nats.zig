@@ -35,6 +35,9 @@ jobs:
         with:
           version: 0.14.1
 
+      - name: Install libnats
+        run: sudo apt-get update && sudo apt-get install libnats-dev
+      
       - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@beta
