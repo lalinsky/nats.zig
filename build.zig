@@ -128,4 +128,53 @@ pub fn build(b: *std.Build) void {
         const install_exe = b.addInstallArtifact(exe, .{});
         examples_step.dependOn(&install_exe.step);
     }
+
+    // Create benchmark executables
+    const benchmark_files = [_]struct { name: []const u8, file: []const u8 }{
+        .{ .name = "echo_server", .file = "benchmarks/echo_server.zig" },
+        .{ .name = "echo_client", .file = "benchmarks/echo_client.zig" },
+    };
+
+    const benchmarks_step = b.step("benchmarks", "Build all benchmarks");
+
+    for (benchmark_files) |benchmark_info| {
+        const exe = b.addExecutable(.{
+            .name = benchmark_info.name,
+            .root_source_file = b.path(benchmark_info.file),
+            .target = target,
+            .optimize = optimize,
+        });
+        exe.root_module.addImport("nats", lib_mod);
+
+        // Only install benchmarks when explicitly building benchmarks step
+        const install_exe = b.addInstallArtifact(exe, .{});
+        benchmarks_step.dependOn(&install_exe.step);
+    }
+
+    // C benchmarks (require libnats)
+    const c_echo_server = b.addExecutable(.{
+        .name = "echo_server_c",
+        .root_source_file = null,
+        .target = target,
+        .optimize = optimize,
+    });
+    c_echo_server.addCSourceFile(.{ .file = b.path("benchmarks/echo_server.c"), .flags = &.{} });
+    c_echo_server.linkLibC();
+    c_echo_server.linkSystemLibrary("nats");
+
+    const c_echo_client = b.addExecutable(.{
+        .name = "echo_client_c",
+        .root_source_file = null,
+        .target = target,
+        .optimize = optimize,
+    });
+    c_echo_client.addCSourceFile(.{ .file = b.path("benchmarks/echo_client.c"), .flags = &.{} });
+    c_echo_client.linkLibC();
+    c_echo_client.linkSystemLibrary("nats");
+
+    const install_c_echo_server = b.addInstallArtifact(c_echo_server, .{});
+    const install_c_echo_client = b.addInstallArtifact(c_echo_client, .{});
+    
+    benchmarks_step.dependOn(&install_c_echo_server.step);
+    benchmarks_step.dependOn(&install_c_echo_client.step);
 }
