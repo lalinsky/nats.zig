@@ -670,6 +670,8 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             dest.queue.tail = self.queue.tail;
             dest.queue.items_available += self.queue.items_available;
             dest.queue.total_chunks += moved_chunk_count;
+            // Wake a waiting reader on dest (consistent with push/pushSlice)
+            dest.queue.data_cond.signal();
 
             // Reset source queue state (we transferred ownership).
             self.queue.head = null;
