@@ -180,6 +180,8 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         total_chunks: usize,
         /// Maximum chunks allowed (0 = unlimited)
         max_chunks: usize,
+        /// Maximum total bytes allowed (0 = unlimited)
+        max_size: usize,
 
         /// Pool of reusable chunks (protected by mutex)
         chunk_pool: Pool,
@@ -197,6 +199,8 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             max_pool_size: usize = 8,
             /// Maximum total chunks allowed (0 = unlimited)
             max_chunks: usize = 0,
+            /// Maximum total bytes allowed (0 = unlimited)
+            max_size: usize = 0,
         };
 
         pub fn init(allocator: Allocator, config: Config) Self {
@@ -209,6 +213,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 .items_available = 0,
                 .total_chunks = 0,
                 .max_chunks = config.max_chunks,
+                .max_size = config.max_size,
                 .chunk_pool = Pool.init(allocator, config.max_pool_size),
                 .is_closed = false,
             };
@@ -236,6 +241,14 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 return PushError.QueueClosed;
             }
 
+            // Check size limit before adding (overflow-safe)
+            if (self.max_size > 0) {
+                const max_items = self.max_size / @sizeOf(T);
+                if (self.items_available >= max_items) {
+                    return PushError.OutOfMemory;
+                }
+            }
+
             const chunk = try self.ensureWritableChunk();
             const success = chunk.pushItem(item);
             std.debug.assert(success);
@@ -257,6 +270,16 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 return PushError.QueueClosed;
             }
 
+            // Check size limit before adding (overflow-safe)
+            if (self.max_size > 0) {
+                const max_items = self.max_size / @sizeOf(T);
+                if (self.items_available >= max_items) {
+                    return PushError.OutOfMemory;
+                }
+                if (items.len > max_items - self.items_available) {
+                    return PushError.OutOfMemory;
+                }
+            }
             var remaining = items;
             var total_written: usize = 0;
 
@@ -466,12 +489,11 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         }
 
         fn allocateChunk(self: *Self) PushError!*Chunk {
-            if (self.max_chunks > 0 and self.total_chunks >= self.max_chunks) {
-                return PushError.ChunkLimitExceeded;
-            }
-
             if (self.chunk_pool.get()) |chunk| {
                 return chunk;
+            }
+            if (self.max_chunks > 0 and self.total_chunks >= self.max_chunks) {
+                return PushError.ChunkLimitExceeded;
             }
 
             const chunk = self.allocator.create(Chunk) catch return PushError.OutOfMemory;
@@ -610,6 +632,96 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
                     break;
                 }
             }
+        }
+
+        /// Move all data from this buffer to another buffer atomically (no copy).
+        pub fn moveToBuffer(self: *Self, dest: *Self) PushError!void {
+            if (self == dest) return; // no-op
+
+            // Lock both buffers in a stable order to avoid deadlocks.
+            const self_addr = @intFromPtr(self);
+            const dest_addr = @intFromPtr(dest);
+            var first: *Self = if (self_addr <= dest_addr) self else dest;
+            var second: *Self = if (self_addr <= dest_addr) dest else self;
+
+            first.queue.mutex.lock();
+            defer first.queue.mutex.unlock();
+            second.queue.mutex.lock();
+            defer second.queue.mutex.unlock();
+
+            // Use direct fields (don't call methods that relock).
+            if (self.queue.items_available == 0) return;
+            if (dest.queue.is_closed) return PushError.QueueClosed;
+
+            // Count chunks to enforce dest.max_chunks if needed.
+            var moved_chunk_count: usize = 0;
+            var cur = self.queue.head;
+            while (cur) |ch| : (cur = ch.next) {
+                moved_chunk_count += 1;
+            }
+
+            // Enforce dest limits before splicing (overflow-safe).
+            if (dest.queue.max_chunks > 0) {
+                if (dest.queue.total_chunks >= dest.queue.max_chunks) {
+                    return PushError.ChunkLimitExceeded;
+                }
+                if (moved_chunk_count > dest.queue.max_chunks - dest.queue.total_chunks) {
+                    return PushError.ChunkLimitExceeded;
+                }
+            }
+            if (dest.queue.max_size > 0) {
+                const max_items = dest.queue.max_size / @sizeOf(u8);
+                if (dest.queue.items_available >= max_items) {
+                    return PushError.OutOfMemory;
+                }
+                if (self.queue.items_available > max_items - dest.queue.items_available) {
+                    return PushError.OutOfMemory;
+                }
+            }
+
+            // Splice self's list onto dest's list.
+            if (dest.queue.tail) |tail| {
+                tail.next = self.queue.head;
+            } else {
+                dest.queue.head = self.queue.head;
+            }
+            dest.queue.tail = self.queue.tail;
+            dest.queue.items_available += self.queue.items_available;
+            dest.queue.total_chunks += moved_chunk_count;
+            // Wake a waiting reader on dest (consistent with push/pushSlice)
+            dest.queue.data_cond.signal();
+
+            // Reset source queue state (we transferred ownership).
+            self.queue.head = null;
+            self.queue.tail = null;
+            self.queue.items_available = 0;
+            // Sanity: we only subtract list-chunks; pooled chunks remain accounted.
+            std.debug.assert(self.queue.total_chunks >= moved_chunk_count);
+            self.queue.total_chunks -= moved_chunk_count;
+        }
+
+        /// Clear all data from the buffer (internal, assumes mutex is held)
+        fn clearInternal(self: *Self) void {
+            // Free all chunks in the linked list
+            var current = self.queue.head;
+            while (current) |chunk| {
+                const next = chunk.next;
+                self.queue.recycleChunk(chunk);
+                current = next;
+            }
+
+            // Reset queue state
+            self.queue.head = null;
+            self.queue.tail = null;
+            self.queue.items_available = 0;
+            self.queue.total_chunks = 0;
+        }
+
+        /// Clear all data from the buffer
+        pub fn clear(self: *Self) void {
+            self.queue.mutex.lock();
+            defer self.queue.mutex.unlock();
+            self.clearInternal();
         }
     };
 }
@@ -813,4 +925,135 @@ test "buffer close functionality" {
 
     // Verify closed state
     try std.testing.expect(buffer.isClosed());
+}
+
+test "buffer moveToBuffer functionality" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(32);
+    var source = Buffer.init(allocator, .{});
+    defer source.deinit();
+
+    var dest = Buffer.init(allocator, .{});
+    defer dest.deinit();
+
+    // Add data to source buffer
+    try source.append("Hello, ");
+    try source.append("World!");
+
+    // Verify source has data
+    try std.testing.expectEqual(@as(usize, 13), source.getBytesAvailable());
+
+    // Move data from source to destination
+    try source.moveToBuffer(&dest);
+
+    // Verify source is now empty
+    try std.testing.expectEqual(@as(usize, 0), source.getBytesAvailable());
+
+    // Verify destination has the data
+    try std.testing.expectEqual(@as(usize, 13), dest.getBytesAvailable());
+
+    // Read and verify the moved data
+    var view_opt = dest.tryGetSlice();
+    if (view_opt) |*view| {
+        try std.testing.expectEqualStrings("Hello, World!", view.data);
+        view.consume(view.data.len);
+    }
+}
+
+test "buffer moveToBuffer with multiple chunks" {
+    const allocator = std.testing.allocator;
+
+    // Use small chunk size to force multiple chunks
+    const Buffer = ConcurrentWriteBuffer(8);
+    var source = Buffer.init(allocator, .{});
+    defer source.deinit();
+
+    var dest = Buffer.init(allocator, .{});
+    defer dest.deinit();
+
+    // Add data that spans multiple chunks
+    try source.append("First chunk "); // 12 bytes, spans 2 chunks
+    try source.append("Second chunk "); // 13 bytes, spans 2 more chunks
+    try source.append("Third"); // 5 bytes
+
+    const total_bytes = 12 + 13 + 5; // 30 bytes
+    try std.testing.expectEqual(total_bytes, source.getBytesAvailable());
+
+    // Move all data to destination
+    try source.moveToBuffer(&dest);
+
+    // Verify source is empty
+    try std.testing.expectEqual(@as(usize, 0), source.getBytesAvailable());
+
+    // Verify destination has all the data
+    try std.testing.expectEqual(total_bytes, dest.getBytesAvailable());
+
+    // Read and verify the moved data by consuming all chunks
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+
+    while (dest.getBytesAvailable() > 0) {
+        var view_opt = dest.tryGetSlice();
+        if (view_opt) |*view| {
+            try result.appendSlice(view.data);
+            view.consume(view.data.len);
+        } else {
+            break;
+        }
+    }
+
+    try std.testing.expectEqualStrings("First chunk Second chunk Third", result.items);
+}
+
+test "buffer moveToBuffer empty source" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(64);
+    var source = Buffer.init(allocator, .{});
+    defer source.deinit();
+
+    var dest = Buffer.init(allocator, .{});
+    defer dest.deinit();
+
+    // Add some data to destination first
+    try dest.append("Already here");
+
+    // Move from empty source (should be no-op)
+    try source.moveToBuffer(&dest);
+
+    // Verify destination still has original data
+    try std.testing.expectEqual(@as(usize, 12), dest.getBytesAvailable());
+
+    var view_opt = dest.tryGetSlice();
+    if (view_opt) |*view| {
+        try std.testing.expectEqualStrings("Already here", view.data);
+        view.consume(view.data.len);
+    }
+}
+
+test "buffer max_size limit" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(64);
+    var buffer = Buffer.init(allocator, .{ .max_size = 10 });
+    defer buffer.deinit();
+
+    // Should be able to add up to max_size
+    try buffer.append("Hello");
+    try std.testing.expectEqual(@as(usize, 5), buffer.getBytesAvailable());
+
+    // Should be able to add exactly to the limit
+    try buffer.append("World");
+    try std.testing.expectEqual(@as(usize, 10), buffer.getBytesAvailable());
+
+    // Should fail when exceeding the limit
+    try std.testing.expectError(PushError.OutOfMemory, buffer.append("!"));
+
+    // Verify data is still intact
+    var view_opt = buffer.tryGetSlice();
+    if (view_opt) |*view| {
+        try std.testing.expectEqualStrings("HelloWorld", view.data);
+        view.consume(view.data.len);
+    }
 }
