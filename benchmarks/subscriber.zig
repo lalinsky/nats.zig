@@ -58,7 +58,7 @@ pub fn main() !void {
                 const interval_s = @as(f64, @floatFromInt(interval_ns)) / std.time.ns_per_s;
                 const msg_per_s = @as(f64, @floatFromInt(interval_msgs)) / interval_s;
                 std.debug.print("Received {} messages, {d:.2} msg/s\n", .{ msg_count, msg_per_s });
-                
+
                 last_msg_count = msg_count;
                 last_report_time = current_time;
             }

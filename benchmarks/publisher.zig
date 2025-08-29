@@ -56,7 +56,7 @@ pub fn main() !void {
             const msg_per_s = @as(f64, @floatFromInt(interval_msgs)) / interval_s;
             const error_rate = @as(f64, @floatFromInt(error_count)) / @as(f64, @floatFromInt(msg_count)) * 100.0;
             std.debug.print("Published {} messages, {d:.2} msg/s, {d:.2}% errors\n", .{ msg_count, msg_per_s, error_rate });
-            
+
             last_msg_count = msg_count;
             last_report_time = current_time;
         }
