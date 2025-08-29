@@ -33,6 +33,7 @@ const JetStreamOptions = jetstream_mod.JetStreamOptions;
 const build_options = @import("build_options");
 const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
 const ResponseManager = @import("response_manager.zig").ResponseManager;
+const MAX_CONTROL_LINE_SIZE = @import("parser.zig").MAX_CONTROL_LINE_SIZE;
 
 const log = std.log.scoped(.connection);
 
@@ -180,6 +181,7 @@ pub const ConnectionOptions = struct {
     callbacks: ConnectionCallbacks = .{},
     trace: bool = false,
     no_responders: bool = true,
+    max_scratch_size: usize = 1024 * 1024 * 10,
 };
 
 pub const Connection = struct {
@@ -238,6 +240,8 @@ pub const Connection = struct {
     // Response management (shared subscription for request/reply)
     response_manager: ResponseManager,
 
+    scratch: std.heap.ArenaAllocator,
+
     // Parser
     parser: Parser,
 
@@ -255,6 +259,7 @@ pub const Connection = struct {
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .response_manager = ResponseManager.init(allocator),
             .parser = Parser.init(allocator),
+            .scratch = std.heap.ArenaAllocator.init(allocator),
         };
     }
 
@@ -288,6 +293,11 @@ pub const Connection = struct {
         self.server_info_arena.deinit();
 
         self.parser.deinit();
+        self.scratch.deinit();
+    }
+
+    fn resetScratch(self: *Self) void {
+        _ = self.scratch.reset(.{ .retain_with_limit = self.options.max_scratch_size });
     }
 
     /// Ensure dispatcher pool is initialized (lazy initialization)
@@ -486,54 +496,51 @@ pub const Connection = struct {
             return error.InvalidSubject;
         }
 
-        // Check if message has headers
-        try msg.ensureHeadersParsed();
-        const has_headers = msg.headers.count() > 0;
-
-        // Calculate total payload size (headers + data) like C library
-        var headers_len: usize = 0;
-        var headers_buffer = ArrayList(u8).init(self.allocator);
-        defer headers_buffer.deinit();
-
-        if (has_headers) {
-            try msg.encodeHeaders(headers_buffer.writer());
-            headers_len = headers_buffer.items.len;
-        }
-
-        const total_payload = headers_len + msg.data.len;
-
-        const reply_to_use = reply_override orelse msg.reply;
-
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-
-        if (has_headers) {
-            // HPUB <subject> [reply] <headers_len> <total_len>\r\n<headers><data>\r\n
-            if (reply_to_use) |reply| {
-                try buffer.writer().print("HPUB {s} {s} {d} {d}\r\n", .{ msg.subject, reply, headers_len, total_payload });
-            } else {
-                try buffer.writer().print("HPUB {s} {d} {d}\r\n", .{ msg.subject, headers_len, total_payload });
-            }
-            try buffer.appendSlice(headers_buffer.items);
-            try buffer.appendSlice(msg.data);
-            try buffer.appendSlice("\r\n");
-        } else {
-            // PUB <subject> [reply] <size>\r\n<data>\r\n
-            if (reply_to_use) |reply| {
-                try buffer.writer().print("PUB {s} {s} {d}\r\n", .{ msg.subject, reply, msg.data.len });
-            } else {
-                try buffer.writer().print("PUB {s} {d}\r\n", .{ msg.subject, msg.data.len });
-            }
-            try buffer.appendSlice(msg.data);
-            try buffer.appendSlice("\r\n");
-        }
-
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Validate payload size against server limit
+        const allocator = self.scratch.allocator();
+        defer self.resetScratch();
+
+        // TODO pre-allocate headers_buffer
+        var headers_buffer = ArrayList(u8).init(allocator);
+        defer headers_buffer.deinit();
+
+        try msg.encodeHeaders(headers_buffer.writer());
+        const headers_len = headers_buffer.items.len;
+
+        const total_payload = headers_len + msg.data.len;
+
         if (self.server_info.max_payload > 0 and total_payload > @as(usize, @intCast(self.server_info.max_payload))) {
             return PublishError.MaxPayload;
+        }
+
+        const reply_to_use = reply_override orelse msg.reply;
+
+        var buffer = try std.ArrayListUnmanaged(u8).initCapacity(allocator, MAX_CONTROL_LINE_SIZE + total_payload);
+        defer buffer.deinit(allocator);
+
+        var buffer_writer = buffer.fixedWriter();
+
+        if (headers_len > 0) {
+            // HPUB <subject> [reply] <headers_len> <total_len>\r\n<headers><data>\r\n
+            if (reply_to_use) |reply| {
+                try buffer_writer.print("HPUB {s} {s} {d} {d}\r\n", .{ msg.subject, reply, headers_len, total_payload });
+            } else {
+                try buffer_writer.print("HPUB {s} {d} {d}\r\n", .{ msg.subject, headers_len, total_payload });
+            }
+            try buffer_writer.writeAll(headers_buffer.items);
+            try buffer_writer.writeAll(msg.data);
+            try buffer_writer.writeAll("\r\n");
+        } else {
+            // PUB <subject> [reply] <size>\r\n<data>\r\n
+            if (reply_to_use) |reply| {
+                try buffer_writer.print("PUB {s} {s} {d}\r\n", .{ msg.subject, reply, msg.data.len });
+            } else {
+                try buffer_writer.print("PUB {s} {d}\r\n", .{ msg.subject, msg.data.len });
+            }
+            try buffer_writer.writeAll(msg.data);
+            try buffer_writer.writeAll("\r\n");
         }
 
         // Allow publishes when connected or reconnecting (buffered).
@@ -546,10 +553,11 @@ pub const Connection = struct {
         }
 
         try self.bufferWrite(buffer.items, asap);
+
         if (reply_to_use) |reply| {
-            log.debug("Published message to {s} with reply {s}: has_headers={}, data_len={d}, total_payload={d}", .{ msg.subject, reply, has_headers, msg.data.len, total_payload });
+            log.debug("Published message to {s} with reply {s}", .{ msg.subject, reply });
         } else {
-            log.debug("Published message to {s}: has_headers={}, data_len={d}, total_payload={d}", .{ msg.subject, has_headers, msg.data.len, total_payload });
+            log.debug("Published message to {s}", .{msg.subject});
         }
     }
 
