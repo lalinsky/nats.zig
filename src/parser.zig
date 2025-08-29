@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const Message = @import("message.zig").Message;
+const MessagePool = @import("message.zig").MessagePool;
 
 /// Maximum size for control line operations (MSG arguments, INFO, ERR, etc.)
 pub const MAX_CONTROL_LINE_SIZE = 4096;
@@ -70,6 +71,7 @@ pub const Parser = struct {
     headers: bool = false,
     arg_buf_rec: std.ArrayList(u8), // The actual arg buffer storage
     arg_buf: ?*std.ArrayList(u8) = null, // Nullable pointer, null = fast path
+    msg_pool: MessagePool,
 
     const Self = @This();
 
@@ -77,6 +79,7 @@ pub const Parser = struct {
         return Self{
             .allocator = allocator,
             .arg_buf_rec = std.ArrayList(u8).init(allocator),
+            .msg_pool = MessagePool.init(allocator),
         };
     }
 
@@ -85,6 +88,7 @@ pub const Parser = struct {
         if (self.ma.msg) |msg| {
             msg.deinit();
         }
+        self.msg_pool.deinit();
     }
 
     pub fn reset(self: *Self) void {
@@ -544,7 +548,7 @@ pub const Parser = struct {
             return error.InvalidProtocol;
         }
 
-        var msg = try Message.initEmpty(self.allocator);
+        var msg = try self.msg_pool.acquire();
         errdefer msg.deinit();
 
         const allocator = msg.arena.allocator();
