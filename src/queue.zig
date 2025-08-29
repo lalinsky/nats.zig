@@ -489,12 +489,11 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         }
 
         fn allocateChunk(self: *Self) PushError!*Chunk {
-            if (self.max_chunks > 0 and self.total_chunks >= self.max_chunks) {
-                return PushError.ChunkLimitExceeded;
-            }
-
             if (self.chunk_pool.get()) |chunk| {
                 return chunk;
+            }
+            if (self.max_chunks > 0 and self.total_chunks >= self.max_chunks) {
+                return PushError.ChunkLimitExceeded;
             }
 
             const chunk = self.allocator.create(Chunk) catch return PushError.OutOfMemory;
