@@ -68,20 +68,19 @@ pub const Parser = struct {
     drop: usize = 0,
     ma: MsgArg = .{},
     headers: bool = false,
-    arg_buf_rec: std.ArrayList(u8), // The actual arg buffer storage
-    arg_buf: ?*std.ArrayList(u8) = null, // Nullable pointer, null = fast path
+    arg_buf: [MAX_CONTROL_LINE_SIZE]u8 = undefined, // Static arg buffer
+    arg_buf_writer: std.io.FixedBufferStream([]u8) = undefined, // Writer for static buffer
+    arg_buf_active: bool = false, // Whether we're using the static buffer (null = fast path)
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .arg_buf_rec = std.ArrayList(u8).init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.arg_buf_rec.deinit();
         if (self.ma.msg) |msg| {
             msg.deinit();
         }
@@ -96,8 +95,7 @@ pub const Parser = struct {
             msg.deinit();
         }
         self.ma = .{};
-        self.arg_buf = null; // Reset to fast path
-        self.arg_buf_rec.clearRetainingCapacity();
+        self.arg_buf_active = false; // Reset to fast path
     }
 
     pub fn parse(self: *Self, conn: anytype, buf: []const u8) !void {
@@ -171,8 +169,8 @@ pub const Parser = struct {
                         '\r' => self.drop = 1,
                         '\n' => {
                             // Process message arguments using C-style two-mode approach
-                            const arg_start = if (self.arg_buf) |arg_buf|
-                                arg_buf.items // Slow path: accumulated from split buffer
+                            const arg_start = if (self.arg_buf_active)
+                                self.arg_buf_writer.buffer[0..self.arg_buf_writer.pos] // Slow path: accumulated from split buffer
                             else
                                 buf[self.after_space .. i - self.drop]; // Fast path: direct slice
 
@@ -183,15 +181,12 @@ pub const Parser = struct {
                             self.state = .MSG_PAYLOAD;
 
                             // Clear split buffer mode
-                            if (self.arg_buf) |_| {
-                                self.arg_buf = null;
-                                self.arg_buf_rec.clearRetainingCapacity();
-                            }
+                            self.arg_buf_active = false;
                         },
                         else => {
                             // Only accumulate if we're in split buffer mode
-                            if (self.arg_buf) |arg_buf| {
-                                try arg_buf.append(b);
+                            if (self.arg_buf_active) {
+                                _ = try self.arg_buf_writer.write(&[_]u8{b});
                             }
                         },
                     }
@@ -367,8 +362,8 @@ pub const Parser = struct {
                         '\r' => self.drop = 1,
                         '\n' => {
                             // Process error message using C-style two-mode approach
-                            const err_msg = if (self.arg_buf) |arg_buf|
-                                arg_buf.items // Slow path: accumulated from split buffer
+                            const err_msg = if (self.arg_buf_active)
+                                self.arg_buf_writer.buffer[0..self.arg_buf_writer.pos] // Slow path: accumulated from split buffer
                             else
                                 buf[self.after_space .. i - self.drop]; // Fast path: direct slice
 
@@ -379,15 +374,12 @@ pub const Parser = struct {
                             self.state = .OP_START;
 
                             // Clear split buffer mode
-                            if (self.arg_buf) |_| {
-                                self.arg_buf = null;
-                                self.arg_buf_rec.clearRetainingCapacity();
-                            }
+                            self.arg_buf_active = false;
                         },
                         else => {
                             // Only accumulate if we're in split buffer mode
-                            if (self.arg_buf) |arg_buf| {
-                                try arg_buf.append(b);
+                            if (self.arg_buf_active) {
+                                _ = try self.arg_buf_writer.write(&[_]u8{b});
                             }
                         },
                     }
@@ -440,8 +432,8 @@ pub const Parser = struct {
                         '\r' => self.drop = 1,
                         '\n' => {
                             // Process INFO JSON using C-style two-mode approach
-                            const info_json = if (self.arg_buf) |arg_buf|
-                                arg_buf.items // Slow path: accumulated from split buffer
+                            const info_json = if (self.arg_buf_active)
+                                self.arg_buf_writer.buffer[0..self.arg_buf_writer.pos] // Slow path: accumulated from split buffer
                             else
                                 buf[self.after_space .. i - self.drop]; // Fast path: direct slice
 
@@ -452,15 +444,12 @@ pub const Parser = struct {
                             self.state = .OP_START;
 
                             // Clear split buffer mode
-                            if (self.arg_buf) |_| {
-                                self.arg_buf = null;
-                                self.arg_buf_rec.clearRetainingCapacity();
-                            }
+                            self.arg_buf_active = false;
                         },
                         else => {
                             // Only accumulate if we're in split buffer mode
-                            if (self.arg_buf) |arg_buf| {
-                                try arg_buf.append(b);
+                            if (self.arg_buf_active) {
+                                _ = try self.arg_buf_writer.write(&[_]u8{b});
                             }
                         },
                     }
@@ -474,19 +463,19 @@ pub const Parser = struct {
         if ((self.state == .MSG_ARG or
             self.state == .MINUS_ERR_ARG or
             self.state == .INFO_ARG) and
-            self.arg_buf == null)
+            !self.arg_buf_active)
         {
             // We're in argument parsing state but haven't finished parsing
             // Set up arg_buf for next parse() call
-            try self.setupArgBuf();
+            self.setupArgBuf();
             const remaining_args = buf[self.after_space .. i - self.drop];
-            try self.arg_buf.?.appendSlice(remaining_args);
+            _ = try self.arg_buf_writer.write(remaining_args);
         }
     }
 
-    fn setupArgBuf(self: *Self) !void {
-        self.arg_buf_rec.clearRetainingCapacity();
-        self.arg_buf = &self.arg_buf_rec;
+    fn setupArgBuf(self: *Self) void {
+        self.arg_buf_writer = std.io.fixedBufferStream(&self.arg_buf);
+        self.arg_buf_active = true;
     }
 
     fn processMsgArgs(self: *Self, args: []const u8) !void {
