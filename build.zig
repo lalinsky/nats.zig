@@ -174,7 +174,7 @@ pub fn build(b: *std.Build) void {
 
     const install_c_echo_server = b.addInstallArtifact(c_echo_server, .{});
     const install_c_echo_client = b.addInstallArtifact(c_echo_client, .{});
-    
+
     benchmarks_step.dependOn(&install_c_echo_server.step);
     benchmarks_step.dependOn(&install_c_echo_client.step);
 }
