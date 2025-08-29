@@ -89,3 +89,24 @@ pub fn waitForHealthyServices(allocator: std.mem.Allocator, timeout_ms: i64) !vo
         std.time.sleep(100 * std.time.ns_per_ms);
     }
 }
+
+var global_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
+
+pub fn generateUniqueName(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
+    const timestamp = std.time.microTimestamp();
+    const counter = global_counter.fetchAdd(1, .monotonic);
+
+    return std.fmt.allocPrint(allocator, "{s}_{d}_{d}", .{ prefix, timestamp, counter });
+}
+
+pub fn generateUniqueStreamName(allocator: std.mem.Allocator) ![]u8 {
+    return generateUniqueName(allocator, "TEST_STREAM");
+}
+
+pub fn generateUniqueConsumerName(allocator: std.mem.Allocator) ![]u8 {
+    return generateUniqueName(allocator, "TEST_CONSUMER");
+}
+
+pub fn generateSubjectFromStreamName(allocator: std.mem.Allocator, stream_name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}.*", .{stream_name});
+}

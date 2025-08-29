@@ -12,10 +12,16 @@ test "list stream names" {
     var js = conn.jetstream(.{});
     defer js.deinit();
 
+    // Generate unique stream name and subject
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(subject);
+
     // Create a test stream first
     const stream_config = nats.StreamConfig{
-        .name = "TEST_LIST_STREAM",
-        .subjects = &.{"test.list.*"},
+        .name = stream_name,
+        .subjects = &.{subject},
     };
 
     var stream_info = try js.addStream(stream_config);
@@ -31,7 +37,7 @@ test "list stream names" {
     // Find our stream in the list
     var found = false;
     for (result.value) |name| {
-        if (std.mem.eql(u8, name, "TEST_LIST_STREAM")) {
+        if (std.mem.eql(u8, name, stream_name)) {
             found = true;
             break;
         }
@@ -46,9 +52,15 @@ test "add stream" {
     var js = conn.jetstream(.{});
     defer js.deinit();
 
+    // Generate unique stream name and subject
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(subject);
+
     const stream_config = nats.StreamConfig{
-        .name = "TEST_STREAM",
-        .subjects = &.{"test.stream.*"},
+        .name = stream_name,
+        .subjects = &.{subject},
         .retention = .limits,
         .storage = .file,
         .max_msgs = 1000,
@@ -61,9 +73,9 @@ test "add stream" {
     defer stream_info.deinit();
 
     // Verify stream was created with correct configuration
-    try testing.expectEqualStrings("TEST_STREAM", stream_info.value.config.name);
+    try testing.expectEqualStrings(stream_name, stream_info.value.config.name);
     try testing.expect(stream_info.value.config.subjects.len == 1);
-    try testing.expectEqualStrings("test.stream.*", stream_info.value.config.subjects[0]);
+    try testing.expectEqualStrings(subject, stream_info.value.config.subjects[0]);
     try testing.expect(stream_info.value.config.retention == .limits);
     try testing.expect(stream_info.value.config.storage == .file);
     try testing.expect(stream_info.value.config.max_msgs == 1000);
@@ -76,10 +88,16 @@ test "list streams" {
     var js = conn.jetstream(.{});
     defer js.deinit();
 
+    // Generate unique stream name and subject
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(subject);
+
     // Create a test stream
     const stream_config = nats.StreamConfig{
-        .name = "TEST_LIST_STREAMS",
-        .subjects = &.{"test.list.*"},
+        .name = stream_name,
+        .subjects = &.{subject},
         .max_msgs = 500,
     };
 
@@ -97,10 +115,10 @@ test "list streams" {
     var found = false;
 
     for (result.value) |info| {
-        if (std.mem.eql(u8, info.config.name, "TEST_LIST_STREAMS")) {
+        if (std.mem.eql(u8, info.config.name, stream_name)) {
             found = true;
             try testing.expect(info.config.subjects.len == 1);
-            try testing.expectEqualStrings("test.list.*", info.config.subjects[0]);
+            try testing.expectEqualStrings(subject, info.config.subjects[0]);
             try testing.expect(info.config.max_msgs == 500);
             break;
         }
@@ -116,10 +134,16 @@ test "update stream" {
     var js = conn.jetstream(.{});
     defer js.deinit();
 
+    // Generate unique stream name and subject
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(subject);
+
     // First create a stream
     const initial_config = nats.StreamConfig{
-        .name = "TEST_UPDATE_STREAM",
-        .subjects = &.{"test.update.*"},
+        .name = stream_name,
+        .subjects = &.{subject},
         .max_msgs = 100,
     };
 
@@ -127,13 +151,13 @@ test "update stream" {
     defer initial_stream.deinit();
 
     // Verify initial configuration
-    try testing.expectEqualStrings("TEST_UPDATE_STREAM", initial_stream.value.config.name);
+    try testing.expectEqualStrings(stream_name, initial_stream.value.config.name);
     try testing.expect(initial_stream.value.config.max_msgs == 100);
 
     // Update the stream configuration
     const updated_config = nats.StreamConfig{
-        .name = "TEST_UPDATE_STREAM",
-        .subjects = &.{"test.update.*"},
+        .name = stream_name,
+        .subjects = &.{subject},
         .max_msgs = 200, // Double the limit
     };
 
@@ -141,7 +165,7 @@ test "update stream" {
     defer updated_stream.deinit();
 
     // Verify the update was applied
-    try testing.expectEqualStrings("TEST_UPDATE_STREAM", updated_stream.value.config.name);
+    try testing.expectEqualStrings(stream_name, updated_stream.value.config.name);
     try testing.expect(updated_stream.value.config.max_msgs == 200);
 }
 
@@ -152,10 +176,16 @@ test "delete stream" {
     var js = conn.jetstream(.{});
     defer js.deinit();
 
+    // Generate unique stream name and subject
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(subject);
+
     // First create a stream to delete
     const stream_config = nats.StreamConfig{
-        .name = "TEST_DELETE_STREAM",
-        .subjects = &.{"test.delete.*"},
+        .name = stream_name,
+        .subjects = &.{subject},
     };
 
     var stream_info = try js.addStream(stream_config);
@@ -167,7 +197,7 @@ test "delete stream" {
 
     var found_before = false;
     for (streams_before.value) |name| {
-        if (std.mem.eql(u8, name, "TEST_DELETE_STREAM")) {
+        if (std.mem.eql(u8, name, stream_name)) {
             found_before = true;
             break;
         }
@@ -175,7 +205,7 @@ test "delete stream" {
     try testing.expect(found_before);
 
     // Delete the stream
-    try js.deleteStream("TEST_DELETE_STREAM");
+    try js.deleteStream(stream_name);
 
     // Verify stream no longer exists
     var streams_after = try js.listStreamNames();
@@ -183,7 +213,7 @@ test "delete stream" {
 
     var found_after = false;
     for (streams_after.value) |name| {
-        if (std.mem.eql(u8, name, "TEST_DELETE_STREAM")) {
+        if (std.mem.eql(u8, name, stream_name)) {
             found_after = true;
             break;
         }
@@ -198,10 +228,16 @@ test "get stream info" {
     var js = conn.jetstream(.{});
     defer js.deinit();
 
+    // Generate unique stream name and subject
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(subject);
+
     // First create a stream
     const stream_config = nats.StreamConfig{
-        .name = "TEST_GET_STREAM_INFO",
-        .subjects = &.{"test.streaminfo.*"},
+        .name = stream_name,
+        .subjects = &.{subject},
         .max_msgs = 1500,
         .retention = .limits,
         .storage = .file,
@@ -210,13 +246,13 @@ test "get stream info" {
     defer created_stream.deinit();
 
     // Get stream info using the new endpoint
-    var retrieved_info = try js.getStreamInfo("TEST_GET_STREAM_INFO");
+    var retrieved_info = try js.getStreamInfo(stream_name);
     defer retrieved_info.deinit();
 
     // Verify the retrieved info matches what we created
-    try testing.expectEqualStrings("TEST_GET_STREAM_INFO", retrieved_info.value.config.name);
+    try testing.expectEqualStrings(stream_name, retrieved_info.value.config.name);
     try testing.expect(retrieved_info.value.config.subjects.len == 1);
-    try testing.expectEqualStrings("test.streaminfo.*", retrieved_info.value.config.subjects[0]);
+    try testing.expectEqualStrings(subject, retrieved_info.value.config.subjects[0]);
     try testing.expect(retrieved_info.value.config.max_msgs == 1500);
     try testing.expect(retrieved_info.value.config.retention == .limits);
     try testing.expect(retrieved_info.value.config.storage == .file);
