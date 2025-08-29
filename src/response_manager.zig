@@ -14,6 +14,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
+const MessageList = @import("message.zig").MessageList;
 const Subscription = @import("subscription.zig").Subscription;
 const MsgHandler = @import("subscription.zig").MsgHandler;
 const inbox = @import("inbox.zig");
@@ -23,8 +24,18 @@ const ConnectionError = @import("connection.zig").ConnectionError;
 
 const log = std.log.scoped(.response_manager);
 
-// Define explicit type for response results
-const ResponseResult = anyerror!*Message;
+const SingleResponseResult = struct {
+    msg: ?*Message = null,
+};
+
+const MultiResponseResult = struct {
+    msgs: MessageList = .{},
+};
+
+const ResponseResult = union(enum) {
+    single: SingleResponseResult,
+    multi: MultiResponseResult,
+};
 
 pub const RequestHandle = struct {
     rid: u64,
@@ -52,8 +63,8 @@ pub const ResponseManager = struct {
     pending_condition: std.Thread.Condition = .{},
     is_closed: bool = false,
 
-    // Map of rid -> result (null means still pending)
-    pending_responses: std.AutoHashMapUnmanaged(u64, ?ResponseResult) = .{},
+    // Map of rid -> result
+    pending_responses: std.AutoHashMapUnmanaged(u64, ResponseResult) = .{},
 
     // Request ID generation state (simple counter)
     rid_counter: u64 = 0,
@@ -83,13 +94,17 @@ pub const ResponseManager = struct {
             log.warn("Cleaning up {} remaining pending responses during shutdown", .{self.pending_responses.count()});
             var iterator = self.pending_responses.iterator();
             while (iterator.next()) |entry| {
-                // If there's a pending message, clean it up
-                if (entry.value_ptr.*) |result| {
-                    if (result) |msg| {
-                        msg.deinit();
-                    } else |_| {
-                        // Error result, nothing to clean up
-                    }
+                switch (entry.value_ptr.*) {
+                    .single => |*result| {
+                        if (result.msg) |msg| {
+                            msg.deinit();
+                        }
+                    },
+                    .multi => |*result| {
+                        while (result.msgs.pop()) |msg| {
+                            msg.deinit();
+                        }
+                    },
                 }
             }
         }
@@ -128,7 +143,21 @@ pub const ResponseManager = struct {
         const rid = self.rid_counter;
         self.rid_counter += 1;
 
-        try self.pending_responses.put(self.allocator, rid, null);
+        try self.pending_responses.put(self.allocator, rid, .{ .single = .{} });
+
+        return RequestHandle{ .rid = rid };
+    }
+
+    pub fn createMultiRequest(self: *ResponseManager) !RequestHandle {
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
+
+        if (self.is_closed) return error.ConnectionClosed;
+
+        const rid = self.rid_counter;
+        self.rid_counter += 1;
+
+        try self.pending_responses.put(self.allocator, rid, .{ .multi = .{} });
 
         return RequestHandle{ .rid = rid };
     }
@@ -137,25 +166,33 @@ pub const ResponseManager = struct {
         return try std.fmt.allocPrint(allocator, "{s}{d}", .{ self.resp_sub_prefix, handle.rid });
     }
 
+    pub fn cleanupRequestInternal(self: *ResponseManager, entry: std.AutoHashMapUnmanaged(u64, ResponseResult).Entry) void {
+        // If there's a pending message, clean it up
+        switch (entry.value_ptr.*) {
+            .single => |*result| {
+                if (result.msg) |msg| {
+                    msg.deinit();
+                }
+            },
+            .multi => |*result| {
+                while (result.msgs.pop()) |msg| {
+                    msg.deinit();
+                }
+            },
+        }
+
+        self.pending_responses.removeByPtr(entry.key_ptr);
+        self.pending_condition.broadcast();
+    }
+
     pub fn cleanupRequest(self: *ResponseManager, handle: RequestHandle) void {
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
 
-        if (self.pending_responses.fetchRemove(handle.rid)) |entry| {
-            log.debug("Cleaned up request map entry with rid: {d}", .{handle.rid});
+        const entry = self.pending_responses.getEntry(handle.rid) orelse return;
+        self.cleanupRequestInternal(entry);
 
-            // If there's a pending message, clean it up
-            if (entry.value) |result| {
-                if (result) |msg| {
-                    msg.deinit();
-                } else |_| {
-                    // Error result, nothing to clean up
-                }
-            }
-
-            // Wake any threads waiting for this response
-            self.pending_condition.broadcast();
-        }
+        log.debug("Cleaned up request map entry with rid: {d}", .{handle.rid});
     }
 
     pub fn waitForResponse(self: *ResponseManager, handle: RequestHandle, timeout_ns: u64) !*Message {
@@ -171,28 +208,130 @@ pub const ResponseManager = struct {
                 return error.UnknownRequest;
             };
 
-            if (entry.value_ptr.*) |result| {
-                // Got response - remove entry and transfer ownership to caller
-                self.pending_responses.removeByPtr(entry.key_ptr);
-                return result;
+            var cleanup = false;
+            defer if (cleanup) self.cleanupRequestInternal(entry);
+
+            std.debug.assert(entry.value_ptr.* == .single);
+            const result = &entry.value_ptr.single;
+
+            if (result.msg) |msg| {
+                cleanup = true;
+                if (msg.isNoResponders()) {
+                    return error.NoResponders;
+                }
+                result.msg = null; // Transfer ownership to caller
+                return msg;
             }
 
-            if (self.is_closed) return error.ConnectionClosed;
+            if (self.is_closed) {
+                cleanup = true;
+                return error.ConnectionClosed;
+            }
 
             const elapsed = timer.read();
-            if (elapsed >= timeout_ns) return error.Timeout;
+            if (elapsed >= timeout_ns) {
+                cleanup = true;
+                return error.Timeout;
+            }
 
             // After this call, any entry pointers become invalid due to potential HashMap modifications
-            try self.pending_condition.timedWait(&self.pending_mutex, timeout_ns - elapsed);
+            cleanup = false;
+            self.pending_condition.timedWait(&self.pending_mutex, timeout_ns - elapsed) catch {};
         }
     }
 
-    fn responseHandlerWrapper(msg: *Message, manager: *ResponseManager) anyerror!void {
+    pub const WaitForMultiResponseOptions = struct {
+        max_messages: ?usize = null,
+        sentinelFn: ?fn (*Message) bool = null,
+    };
+
+    pub fn waitForMultiResponse(self: *ResponseManager, handle: RequestHandle, timeout_ns: u64, options: WaitForMultiResponseOptions) !MessageList {
+        self.pending_mutex.lock();
+        defer self.pending_mutex.unlock();
+
+        if (self.is_closed) return error.ConnectionClosed;
+
+        var msgs: MessageList = .{};
+        var done = false;
+
+        errdefer {
+            while (msgs.pop()) |msg| {
+                msg.deinit();
+            }
+        }
+
+        var timer = std.time.Timer.start() catch unreachable;
+        while (true) {
+            // Look up entry fresh each iteration - previous pointers may be invalid after timedWait
+            const entry = self.pending_responses.getEntry(handle.rid) orelse {
+                return error.UnknownRequest;
+            };
+
+            var cleanup = false;
+            defer if (cleanup) self.cleanupRequestInternal(entry);
+
+            std.debug.assert(entry.value_ptr.* == .multi);
+            const result = &entry.value_ptr.multi;
+
+            while (result.msgs.pop()) |msg| {
+                if (msg.isNoResponders()) {
+                    msg.deinit();
+                    done = true;
+                    break;
+                }
+
+                msgs.push(msg);
+
+                if (options.max_messages) |max_messages| {
+                    if (msgs.len >= max_messages) {
+                        done = true;
+                        break;
+                    }
+                }
+
+                if (options.sentinelFn) |sentinelFn| {
+                    if (msgs.tail) |last_msg| {
+                        if (sentinelFn(last_msg)) {
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (done) {
+                cleanup = true;
+                if (msgs.len > 0) {
+                    return msgs;
+                }
+                return error.NoResponders;
+            }
+
+            if (self.is_closed) {
+                cleanup = true;
+                return error.ConnectionClosed;
+            }
+
+            const elapsed = timer.read();
+            if (elapsed >= timeout_ns) {
+                cleanup = true;
+                if (msgs.len > 0) {
+                    return msgs;
+                }
+                return error.Timeout;
+            }
+
+            // After this call, any entry pointers become invalid due to potential HashMap modifications
+            self.pending_condition.timedWait(&self.pending_mutex, timeout_ns - elapsed) catch {};
+        }
+    }
+
+    fn responseHandlerWrapper(msg: *Message, manager: *ResponseManager) !void {
         // Regular subscribe handler wrapper
         try manager.responseHandler(msg);
     }
 
-    fn responseHandler(self: *ResponseManager, msg: *Message) anyerror!void {
+    fn responseHandler(self: *ResponseManager, msg: *Message) !void {
         var own_msg = true;
         defer if (own_msg) msg.deinit();
 
@@ -212,12 +351,19 @@ pub const ResponseManager = struct {
             return;
         };
 
-        if (msg.isNoResponders()) {
-            entry.value_ptr.* = error.NoResponders;
-            // Keep own_msg = true, so message gets cleaned up
-        } else {
-            entry.value_ptr.* = msg;
-            own_msg = false; // Message ownership transferred to response
+        switch (entry.value_ptr.*) {
+            .single => |*result| {
+                if (result.msg != null) {
+                    log.warn("Received multiple responses for rid: {d}", .{rid});
+                    return;
+                }
+                result.msg = msg;
+                own_msg = false; // Message ownership transferred to response
+            },
+            .multi => |*result| {
+                result.msgs.push(msg);
+                own_msg = false; // Message ownership transferred to response
+            },
         }
 
         self.pending_condition.broadcast(); // Wake up waiting threads
@@ -273,4 +419,20 @@ test "request handle timeout functionality" {
 
     try testing.expectError(error.Timeout, result);
     try testing.expect(duration >= 1_000_000); // At least 1ms passed
+}
+
+test "multi-response request creation and timeout" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var manager = ResponseManager.init(allocator);
+    defer manager.deinit();
+
+    // Test that we can create multi-response request handles
+    const handle = try manager.createMultiRequest();
+    defer manager.cleanupRequest(handle);
+
+    // Test timeout behavior for multi-response
+    const result = manager.waitForMultiResponse(handle, 1_000_000, .{}); // 1ms timeout
+    try testing.expectError(error.Timeout, result);
 }

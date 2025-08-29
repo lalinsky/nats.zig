@@ -29,6 +29,34 @@ const HDR_STATUS_TIMEOUT = "408";
 const HDR_STATUS_MAX_BYTES = "409";
 const HDR_STATUS_NO_RESPONSE = "503";
 
+pub const MessageList = struct {
+    head: ?*Message = null,
+    tail: ?*Message = null,
+    len: usize = 0,
+
+    pub fn push(self: *MessageList, msg: *Message) void {
+        msg.next = null;
+        if (self.head == null) {
+            self.head = msg;
+            self.tail = msg;
+        } else {
+            self.tail.?.next = msg;
+            self.tail = msg;
+        }
+        self.len += 1;
+    }
+
+    pub fn pop(self: *MessageList) ?*Message {
+        if (self.head == null) return null;
+        const msg = self.head.?;
+        self.head = msg.next;
+        if (self.head == null) self.tail = null;
+        self.len -= 1;
+        msg.next = null;
+        return msg;
+    }
+};
+
 // Simple, idiomatic Zig message implementation using ArenaAllocator
 pub const Message = struct {
     // Core data - stored as slices
@@ -49,6 +77,9 @@ pub const Message = struct {
 
     // Memory management - much simpler with arena
     arena: std.heap.ArenaAllocator,
+
+    // Linked list for message queue
+    next: ?*Message = null,
 
     const Self = @This();
 
