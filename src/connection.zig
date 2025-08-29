@@ -291,6 +291,10 @@ pub const Connection = struct {
         self.parser.deinit();
     }
 
+    pub fn newMsg(self: *Self) !*Message {
+        return self.parser.msg_pool.acquire();
+    }
+
     /// Ensure dispatcher pool is initialized (lazy initialization)
     fn ensureDispatcherPool(self: *Self) !void {
         self.mutex.lock();
@@ -456,6 +460,7 @@ pub const Connection = struct {
         var msg = Message{
             .subject = subject,
             .data = data,
+            .pool = undefined,
             .arena = undefined, // we don't need a fully constructed arena for this
         };
         return self.publishMsgInternal(&msg, null, false);
@@ -472,6 +477,7 @@ pub const Connection = struct {
             .subject = subject,
             .reply = reply,
             .data = data,
+            .pool = undefined,
             .arena = undefined, // we don't need a fully constructed arena for this
         };
         return self.publishMsgInternal(&msg, null, true);
@@ -714,6 +720,7 @@ pub const Connection = struct {
         var msg = Message{
             .subject = subject,
             .data = data,
+            .pool = undefined,
             .arena = undefined,
         };
         return self.requestMsg(&msg, timeout_ms);
@@ -756,6 +763,7 @@ pub const Connection = struct {
         var msg = Message{
             .subject = subject,
             .data = data,
+            .pool = undefined,
             .arena = undefined,
         };
         return self.requestManyMsg(&msg, timeout_ms, options);
