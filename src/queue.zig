@@ -627,28 +627,55 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             }
         }
 
-        /// Move all data from this buffer to another buffer
+        /// Move all data from this buffer to another buffer atomically (no copy).
         pub fn moveToBuffer(self: *Self, dest: *Self) PushError!void {
-            self.queue.mutex.lock();
-            defer self.queue.mutex.unlock();
+            if (self == dest) return; // no-op
 
-            // Early return if source is empty
-            if (self.queue.items_available == 0) {
-                return;
+            // Lock both buffers in a stable order to avoid deadlocks.
+            const self_addr = @intFromPtr(self);
+            const dest_addr = @intFromPtr(dest);
+            var first: *Self = if (self_addr <= dest_addr) self else dest;
+            var second: *Self = if (self_addr <= dest_addr) dest else self;
+
+            first.queue.mutex.lock();
+            defer first.queue.mutex.unlock();
+            second.queue.mutex.lock();
+            defer second.queue.mutex.unlock();
+
+            // Use direct fields (don't call methods that relock).
+            if (self.queue.items_available == 0) return;
+            if (dest.queue.is_closed) return PushError.QueueClosed;
+
+            // Count chunks to enforce dest.max_chunks if needed.
+            var moved_chunk_count: usize = 0;
+            var cur = self.queue.head;
+            while (cur) |ch| : (cur = ch.next) {
+                moved_chunk_count += 1;
             }
 
-            // Move data by gathering read views and appending to destination
-            var current = self.queue.head;
-            while (current) |chunk| {
-                const slice = chunk.getReadSlice();
-                if (slice.len > 0) {
-                    try dest.append(slice);
-                }
-                current = chunk.next;
+            // Enforce dest limits before splicing.
+            if (dest.queue.max_chunks > 0 and dest.queue.total_chunks + moved_chunk_count > dest.queue.max_chunks) {
+                return PushError.ChunkLimitExceeded;
+            }
+            if (dest.queue.max_size > 0 and (dest.queue.items_available + self.queue.items_available) * @sizeOf(u8) > dest.queue.max_size) {
+                return PushError.OutOfMemory;
             }
 
-            // Clear the source buffer after successful move
-            self.clearInternal();
+            // Splice self's list onto dest's list.
+            if (dest.queue.tail) |tail| {
+                tail.next = self.queue.head;
+            } else {
+                dest.queue.head = self.queue.head;
+            }
+            dest.queue.tail = self.queue.tail;
+            dest.queue.items_available += self.queue.items_available;
+            dest.queue.total_chunks += moved_chunk_count;
+
+            // Reset source queue state (we transferred ownership).
+            self.queue.head = null;
+            self.queue.tail = null;
+            self.queue.items_available = 0;
+            self.queue.total_chunks -= moved_chunk_count;
         }
 
         /// Clear all data from the buffer (internal, assumes mutex is held)
