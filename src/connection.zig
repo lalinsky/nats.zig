@@ -970,26 +970,11 @@ pub const Connection = struct {
     }
 
     // Parser callback methods
-    pub fn processMsg(self: *Self, message_buffer: []const u8) !void {
-        const msg_arg = self.parser.ma;
-
-        // Handle full message buffer like C parser (splits headers internally)
-        const message = if (msg_arg.hdr >= 0) blk: {
-            // HMSG - message_buffer contains headers + payload
-            const hdr_len = @as(usize, @intCast(msg_arg.hdr));
-            const headers_data = message_buffer[0..hdr_len];
-            const msg_data = message_buffer[hdr_len..];
-            break :blk try Message.initWithHeaders(self.allocator, msg_arg.subject, msg_arg.reply, msg_data, headers_data);
-        } else blk: {
-            // Regular MSG - message_buffer is just payload
-            break :blk try Message.init(self.allocator, msg_arg.subject, msg_arg.reply, message_buffer);
-        };
-
-        message.sid = msg_arg.sid;
+    pub fn processMsg(self: *Self, message: *Message) !void {
 
         // Retain subscription while holding lock, then release lock
         self.subs_mutex.lock();
-        const sub = self.subscriptions.get(msg_arg.sid);
+        const sub = self.subscriptions.get(message.sid);
         if (sub) |s| {
             s.retain(); // Keep subscription alive
         }
@@ -999,18 +984,18 @@ pub const Connection = struct {
             defer s.release(); // Release when done
 
             // Log before consuming message (to avoid use-after-free)
-            log.debug("Delivering message to subscription {d}: {s}", .{ msg_arg.sid, message.data });
+            log.debug("Delivering message to subscription {d}: {s}", .{ message.sid, message.data });
 
             if (s.handler) |_| {
                 // Async subscription - dispatch to assigned dispatcher
                 if (s.dispatcher) |dispatcher| {
                     dispatcher.enqueue(s, message) catch |err| {
-                        log.err("Failed to dispatch message for sid {d}: {}", .{ msg_arg.sid, err });
+                        log.err("Failed to dispatch message for sid {d}: {}", .{ message.sid, err });
                         message.deinit();
                         return;
                     };
                 } else {
-                    log.err("Async subscription {} has no assigned dispatcher", .{msg_arg.sid});
+                    log.err("Async subscription {} has no assigned dispatcher", .{message.sid});
                     message.deinit();
                     return;
                 }
@@ -1020,13 +1005,13 @@ pub const Connection = struct {
                     switch (err) {
                         error.QueueClosed => {
                             // Queue is closed; drop gracefully.
-                            log.debug("Queue closed for sid {d}; dropping message", .{msg_arg.sid});
+                            log.debug("Queue closed for sid {d}; dropping message", .{message.sid});
                             message.deinit();
                             return;
                         },
                         else => {
                             // Allocation or unexpected push failure; log and tear down the connection.
-                            log.err("Failed to enqueue message for sid {d}: {}", .{ msg_arg.sid, err });
+                            log.err("Failed to enqueue message for sid {d}: {}", .{ message.sid, err });
                             message.deinit();
                             return err;
                         },
