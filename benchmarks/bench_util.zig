@@ -72,11 +72,19 @@ pub const BenchStats = struct {
     }
 };
 
+fn benchSignalHandler() void {
+    keep_running = false;
+}
+
 // Signal handling setup
 pub fn setupSignals() !void {
-    // Note: Zig doesn't have direct signal handling like C
-    // The keep_running flag would need to be managed by the caller
-    // or through OS-specific signal handling
+    const sa = std.posix.Sigaction{
+        .handler = .{ .handler = benchSignalHandler },
+        .mask = std.posix.empty_sigset,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &sa, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
 }
 
 // Connect to NATS server
