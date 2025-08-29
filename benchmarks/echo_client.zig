@@ -16,6 +16,8 @@ pub fn main() !void {
 
     std.debug.print("Starting NATS echo-client benchmark\n", .{});
 
+    try bench_util.setupSignals();
+
     // Initialize statistics
     var stats = bench_util.BenchStats.init();
 

@@ -72,7 +72,8 @@ pub const BenchStats = struct {
     }
 };
 
-fn benchSignalHandler() void {
+fn benchSignalHandler(sig_num: c_int) callconv(.C) void {
+    _ = sig_num;
     keep_running = false;
 }
 
@@ -106,5 +107,7 @@ pub fn connect(allocator: std.mem.Allocator, url: ?[]const u8) !*nats.Connection
 
 // Common cleanup
 pub fn cleanup(conn: *nats.Connection) void {
+    const allocator = conn.allocator;
     conn.deinit();
+    allocator.destroy(conn);
 }
