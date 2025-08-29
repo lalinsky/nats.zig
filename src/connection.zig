@@ -18,6 +18,7 @@ const ArrayList = std.ArrayList;
 const Parser = @import("parser.zig").Parser;
 const inbox = @import("inbox.zig");
 const Message = @import("message.zig").Message;
+const MessageList = @import("message.zig").MessageList;
 const subscription_mod = @import("subscription.zig");
 const Subscription = subscription_mod.Subscription;
 const MsgHandler = subscription_mod.MsgHandler;
@@ -300,6 +301,10 @@ pub const Connection = struct {
         _ = self.scratch.reset(.{ .retain_with_limit = self.options.max_scratch_size });
     }
 
+    pub fn newMsg(self: *Self) !*Message {
+        return self.parser.msg_pool.acquire();
+    }
+
     /// Ensure dispatcher pool is initialized (lazy initialization)
     fn ensureDispatcherPool(self: *Self) !void {
         self.mutex.lock();
@@ -465,6 +470,7 @@ pub const Connection = struct {
         var msg = Message{
             .subject = subject,
             .data = data,
+            .pool = null,
             .arena = undefined, // we don't need a fully constructed arena for this
         };
         return self.publishMsgInternal(&msg, null, false);
@@ -481,6 +487,7 @@ pub const Connection = struct {
             .subject = subject,
             .reply = reply,
             .data = data,
+            .pool = null,
             .arena = undefined, // we don't need a fully constructed arena for this
         };
         return self.publishMsgInternal(&msg, null, true);
@@ -721,6 +728,7 @@ pub const Connection = struct {
         var msg = Message{
             .subject = subject,
             .data = data,
+            .pool = null,
             .arena = undefined,
         };
         return self.requestMsg(&msg, timeout_ms);
@@ -755,6 +763,47 @@ pub const Connection = struct {
         }
 
         return reply_msg;
+    }
+
+    pub const RequestManyOptions = ResponseManager.WaitForMultiResponseOptions;
+
+    pub fn requestMany(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64, options: RequestManyOptions) !MessageList {
+        var msg = Message{
+            .subject = subject,
+            .data = data,
+            .pool = null,
+            .arena = undefined,
+        };
+        return self.requestManyMsg(&msg, timeout_ms, options);
+    }
+
+    pub fn requestManyMsg(self: *Self, msg: *Message, timeout_ms: u64, options: RequestManyOptions) !MessageList {
+        if (self.options.trace) {
+            log.debug("Sending request-many message to {s} with timeout {d}ms", .{ msg.subject, timeout_ms });
+        }
+
+        // Ensure response system is initialized (without mutex held)
+        try self.response_manager.ensureInitialized(self);
+
+        // Create multi-request handle
+        const handle = try self.response_manager.createMultiRequest();
+        defer self.response_manager.cleanupRequest(handle);
+
+        // Get reply subject for the request
+        const reply_subject = try self.response_manager.getReplySubject(self.allocator, handle);
+        defer self.allocator.free(reply_subject);
+
+        // Publish the request message
+        try self.publishRequestMsg(msg, reply_subject);
+
+        // Wait for multiple responses
+        const messages = try self.response_manager.waitForMultiResponse(handle, timeout_ms * std.time.ns_per_ms, options);
+
+        if (self.options.trace) {
+            log.debug("Received {} responses for request-many to {s}", .{ messages.len, msg.subject });
+        }
+
+        return messages;
     }
 
     fn processInitialHandshake(self: *Self) !void {
