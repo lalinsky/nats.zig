@@ -1,6 +1,10 @@
 const std = @import("std");
 const nats = @import("nats");
 
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -19,7 +23,7 @@ pub fn main() !void {
     };
 
     const message_data = "Hello, NATS Echo Server!";
-    const timeout_ns = std.time.ns_per_s * 5; // 5 second timeout
+    const timeout_ms = std.time.ms_per_s * 5; // 5 second timeout
 
     var msg_count: u64 = 0;
     var success_count: u64 = 0;
@@ -33,7 +37,7 @@ pub fn main() !void {
         msg_count += 1;
 
         // Send request and wait for echo reply
-        const reply = conn.request("echo", message_data, timeout_ns) catch |err| {
+        const reply = conn.request("echo", message_data, timeout_ms) catch |err| {
             error_count += 1;
             if (error_count % 1000 == 0) {
                 std.debug.print("Error #{}: {}\n", .{ error_count, err });

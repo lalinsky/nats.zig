@@ -1,6 +1,10 @@
 const std = @import("std");
 const nats = @import("nats");
 
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
