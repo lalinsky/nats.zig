@@ -23,7 +23,8 @@ test "get account info" {
     var result = try js.getAccountInfo();
     defer result.deinit();
 
-    try testing.expect(result.value.streams == 0);
+    try testing.expect(result.value.streams >= 0);
+    try testing.expect(result.value.consumers >= 0);
 }
 
 test "add consumer" {

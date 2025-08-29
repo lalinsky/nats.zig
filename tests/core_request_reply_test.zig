@@ -214,3 +214,115 @@ test "requestMsg validation errors" {
     const result = conn.requestMsg(empty_msg, 1000);
     try std.testing.expectError(error.InvalidSubject, result);
 }
+
+// Handler that responds multiple times to a single request
+fn multiResponder(msg: *nats.Message, connection: *nats.Connection) void {
+    defer msg.deinit();
+    if (msg.reply) |reply_subject| {
+        // Send 3 responses
+        for (0..3) |i| {
+            const response = std.fmt.allocPrint(std.testing.allocator, "response-{d}", .{i}) catch return;
+            defer std.testing.allocator.free(response);
+            connection.publish(reply_subject, response) catch return;
+        }
+    }
+}
+
+test "requestMany with max_messages" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    // Set up handler that sends multiple responses
+    const replier_sub = try conn.subscribe("test.many", multiResponder, .{conn});
+    defer replier_sub.deinit();
+
+    // Request with max 2 messages
+    var messages = try conn.requestMany("test.many", "get many", 1000, .{ .max_messages = 2 });
+    defer {
+        // Clean up messages
+        while (messages.pop()) |msg| {
+            msg.deinit();
+        }
+    }
+
+    // Should get exactly 2 messages
+    try std.testing.expectEqual(2, messages.len);
+}
+
+test "requestMany with timeout collecting all" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    // Set up handler that sends multiple responses
+    const replier_sub = try conn.subscribe("test.many.all", multiResponder, .{conn});
+    defer replier_sub.deinit();
+
+    // Request with no max, should collect all 3 and timeout
+    var messages = try conn.requestMany("test.many.all", "get all", 100, .{});
+
+    // Should get all 3 messages
+    try std.testing.expectEqual(3, messages.len);
+
+    // Verify message contents
+    var i: usize = 0;
+    while (messages.pop()) |msg| {
+        defer msg.deinit();
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "response-{d}", .{i});
+        defer std.testing.allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, msg.data);
+        i += 1;
+    }
+}
+
+// Handler that sends responses with a sentinel message
+fn sentinelResponder(msg: *nats.Message, connection: *nats.Connection) void {
+    defer msg.deinit();
+    if (msg.reply) |reply_subject| {
+        // Send several responses ending with "END"
+        const responses = [_][]const u8{ "data-1", "data-2", "data-3", "END" };
+        for (responses) |response| {
+            connection.publish(reply_subject, response) catch return;
+        }
+    }
+}
+
+test "requestMany with sentinel function" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    // Set up handler that sends responses with sentinel
+    const replier_sub = try conn.subscribe("test.sentinel", sentinelResponder, .{conn});
+    defer replier_sub.deinit();
+
+    std.time.sleep(10_000_000); // 10ms
+
+    // Sentinel function that checks for "END" message
+    const sentinel = struct {
+        fn check(msg: *nats.Message) bool {
+            return std.mem.eql(u8, msg.data, "END");
+        }
+    }.check;
+
+    // Request with sentinel function
+    var messages = try conn.requestMany("test.sentinel", "get until end", 1000, .{ .sentinelFn = sentinel });
+
+    // Should get all 4 messages including the sentinel
+    try std.testing.expectEqual(@as(usize, 4), messages.len);
+
+    // Verify last message is "END"
+    try std.testing.expect(messages.tail != null);
+    try std.testing.expectEqualStrings("END", messages.tail.?.data);
+
+    // Clean up messages
+    while (messages.pop()) |msg| {
+        msg.deinit();
+    }
+}
+
+test "requestMany with no responders" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    const result = conn.requestMany("test.no.responder.many", "no one", 100, .{});
+    try std.testing.expectError(error.NoResponders, result);
+}
