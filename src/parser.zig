@@ -540,6 +540,10 @@ pub const Parser = struct {
             hdr_len = try std.fmt.parseInt(usize, str, 10);
         }
 
+        if (hdr_len > total_len) {
+            return error.InvalidProtocol;
+        }
+
         var msg = try Message.initEmpty(self.allocator);
         errdefer msg.deinit();
 
