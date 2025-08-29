@@ -460,7 +460,7 @@ pub const Connection = struct {
         var msg = Message{
             .subject = subject,
             .data = data,
-            .pool = undefined,
+            .pool = null,
             .arena = undefined, // we don't need a fully constructed arena for this
         };
         return self.publishMsgInternal(&msg, null, false);
@@ -477,7 +477,7 @@ pub const Connection = struct {
             .subject = subject,
             .reply = reply,
             .data = data,
-            .pool = undefined,
+            .pool = null,
             .arena = undefined, // we don't need a fully constructed arena for this
         };
         return self.publishMsgInternal(&msg, null, true);
@@ -720,7 +720,7 @@ pub const Connection = struct {
         var msg = Message{
             .subject = subject,
             .data = data,
-            .pool = undefined,
+            .pool = null,
             .arena = undefined,
         };
         return self.requestMsg(&msg, timeout_ms);
@@ -763,7 +763,7 @@ pub const Connection = struct {
         var msg = Message{
             .subject = subject,
             .data = data,
-            .pool = undefined,
+            .pool = null,
             .arena = undefined,
         };
         return self.requestManyMsg(&msg, timeout_ms, options);
