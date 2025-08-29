@@ -13,6 +13,7 @@
 // limitations under the License.
 
 const std = @import("std");
+const Message = @import("message.zig").Message;
 
 /// Maximum size for control line operations (MSG arguments, INFO, ERR, etc.)
 pub const MAX_CONTROL_LINE_SIZE = 4096;
@@ -63,6 +64,7 @@ pub const MsgArg = struct {
 pub const Connection = @import("connection.zig").Connection;
 
 pub const Parser = struct {
+    allocator: std.mem.Allocator,
     state: ParserState = .OP_START,
     after_space: usize = 0,
     drop: usize = 0,
@@ -77,6 +79,7 @@ pub const Parser = struct {
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
+            .allocator = allocator,
             .arg_buf_rec = std.ArrayList(u8).init(allocator),
             .msg_buf_rec = std.ArrayList(u8).init(allocator),
         };
@@ -214,9 +217,10 @@ pub const Parser = struct {
                     if (self.msg_buf) |msg_buf| {
                         // Slow path: using accumulated buffer
                         if (msg_buf.items.len >= total_msg_size) {
-                            // Pass full message buffer to processMsg (like C parser)
+                            // Create Message object and pass to processMsg
                             const message_data = msg_buf.items[0..total_msg_size];
-                            try conn.processMsg(message_data);
+                            const message = try self.createMessage(message_data);
+                            try conn.processMsg(message);
                             done = true;
                         } else {
                             // Continue accumulating message bytes
@@ -230,10 +234,11 @@ pub const Parser = struct {
                             }
                         }
                     } else if (i - self.after_space >= total_msg_size) {
-                        // Fast path: process message directly from buffer (like C parser)
+                        // Fast path: create Message object and pass to processMsg
                         const msg_start = self.after_space;
                         const message_data = buf[msg_start .. msg_start + total_msg_size];
-                        try conn.processMsg(message_data);
+                        const message = try self.createMessage(message_data);
+                        try conn.processMsg(message);
                         done = true;
                     }
 
@@ -597,6 +602,24 @@ pub const Parser = struct {
         // Update parser hdr field to match ma.hdr for consistency
         self.hdr = hdr_len;
     }
+
+    fn createMessage(self: *Self, message_buffer: []const u8) !*Message {
+        // Handle full message buffer like current connection.zig implementation
+        if (self.ma.hdr >= 0) {
+            // HMSG - message_buffer contains headers + payload
+            const hdr_len = @as(usize, @intCast(self.ma.hdr));
+            const headers_data = message_buffer[0..hdr_len];
+            const msg_data = message_buffer[hdr_len..];
+            const message = try Message.initWithHeaders(self.allocator, self.ma.subject, self.ma.reply, msg_data, headers_data);
+            message.sid = self.ma.sid;
+            return message;
+        } else {
+            // Regular MSG - message_buffer is just payload
+            const message = try Message.init(self.allocator, self.ma.subject, self.ma.reply, message_buffer);
+            message.sid = self.ma.sid;
+            return message;
+        }
+    }
 };
 
 const MockConnection = struct {
@@ -606,7 +629,7 @@ const MockConnection = struct {
     err_count: u32 = 0,
     info_count: u32 = 0,
     msg_count: u32 = 0,
-    last_msg: []const u8 = "",
+    last_msg: ?*Message = null,
     last_err: []const u8 = "",
     last_info: []const u8 = "",
     parser_ref: ?*Parser = null,
@@ -621,25 +644,10 @@ const MockConnection = struct {
         self.pong_count += 1;
     }
 
-    pub fn processMsg(self: *Self, message_buffer: []const u8) !void {
+    pub fn processMsg(self: *Self, message: *Message) !void {
         self.msg_count += 1;
-        // Extract payload like the real processMsg would do
-        // For testing, assume we want just the payload part (like the test expects)
-        if (self.parser_ref) |parser| {
-            const msg_arg = parser.ma;
-            const payload = if (msg_arg.hdr >= 0) blk: {
-                // HMSG: extract payload from full message buffer
-                const hdr_len = @as(usize, @intCast(msg_arg.hdr));
-                break :blk message_buffer[hdr_len..];
-            } else blk: {
-                // MSG: full buffer is payload
-                break :blk message_buffer;
-            };
-            self.last_msg = try std.testing.allocator.dupe(u8, payload);
-        } else {
-            // Fallback for tests that don't set parser_ref
-            self.last_msg = try std.testing.allocator.dupe(u8, message_buffer);
-        }
+        // Store the message directly
+        self.last_msg = message;
     }
 
     pub fn processOK(self: *Self) !void {
@@ -657,7 +665,7 @@ const MockConnection = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        if (self.last_msg.len > 0) std.testing.allocator.free(self.last_msg);
+        if (self.last_msg) |msg| msg.deinit();
         if (self.last_err.len > 0) std.testing.allocator.free(self.last_err);
         if (self.last_info.len > 0) std.testing.allocator.free(self.last_info);
     }
@@ -735,9 +743,9 @@ test "parser msg" {
 
     try parser.parse(&mock_conn, "MSG foo 1 5\r\nhello\r\n");
     try testing.expectEqual(1, mock_conn.msg_count);
-    try testing.expectEqualStrings("hello", mock_conn.last_msg);
+    try testing.expectEqualStrings("hello", mock_conn.last_msg.?.data);
     // Test that subject is parsed correctly (would fail if first char dropped)
-    try testing.expectEqualStrings("foo", parser.ma.subject);
+    try testing.expectEqualStrings("foo", mock_conn.last_msg.?.subject);
 }
 
 test "parser msg with reply" {
@@ -751,7 +759,7 @@ test "parser msg with reply" {
 
     try parser.parse(&mock_conn, "MSG foo 1 reply.bar 5\r\nhello\r\n");
     try testing.expectEqual(1, mock_conn.msg_count);
-    try testing.expectEqualStrings("hello", mock_conn.last_msg);
+    try testing.expectEqualStrings("hello", mock_conn.last_msg.?.data);
 }
 
 test "parser hmsg" {
@@ -765,7 +773,7 @@ test "parser hmsg" {
 
     try parser.parse(&mock_conn, "HMSG foo 1 22 27\r\nNATS/1.0\r\nFoo: Bar\r\n\r\nhello\r\n");
     try testing.expectEqual(1, mock_conn.msg_count);
-    try testing.expectEqualStrings("hello", mock_conn.last_msg);
+    try testing.expectEqualStrings("hello", mock_conn.last_msg.?.data);
 
     // Verify internal state matches C parser expectations
     try testing.expectEqual(@as(i32, 22), parser.ma.hdr); // Header size
@@ -790,30 +798,40 @@ test "parser split msg arguments" {
     // Complete the arguments and message
     try parser.parse(&mock_conn, "ect 1 11\r\nhello world\r\n");
     try testing.expectEqual(1, mock_conn.msg_count);
-    try testing.expectEqualStrings("hello world", mock_conn.last_msg);
-    try testing.expectEqualStrings("test.subject", parser.ma.subject);
+    try testing.expectEqualStrings("hello world", mock_conn.last_msg.?.data);
+    try testing.expectEqualStrings("test.subject", mock_conn.last_msg.?.subject);
+}
+
+fn parseInChunks(parser: *Parser, conn: *MockConnection, data: []const u8, chunk_size: usize) !void {
+    var stream = std.io.fixedBufferStream(data);
+    const reader = stream.reader();
+
+    while (true) {
+        var buf: [1024]u8 = undefined;
+        std.debug.assert(chunk_size <= buf.len);
+        const n = try reader.read(buf[0..chunk_size]);
+        if (n == 0) break;
+        try parser.parse(conn, buf[0..n]);
+    }
 }
 
 test "parser split msg payload" {
-    const testing = std.testing;
+    const data = "MSG foo 1 11\r\nhello world\r\n";
+    for (1..data.len) |chunk_size| {
+        std.debug.print("chunk_size: {}\n", .{chunk_size});
 
-    var parser = Parser.init(testing.allocator);
-    defer parser.deinit();
+        var parser = Parser.init(std.testing.allocator);
+        defer parser.deinit();
 
-    var mock_conn = MockConnection{};
-    defer mock_conn.deinit();
+        var capture = MockConnection{};
+        defer capture.deinit();
 
-    // Split the message payload across two parse calls
-    try parser.parse(&mock_conn, "MSG foo 1 11\r\nhello"); // Missing end of payload
-    try testing.expectEqual(0, mock_conn.msg_count); // Should not process yet
-    try testing.expectEqual(parser.state, .MSG_PAYLOAD); // Should be waiting for more
-    try testing.expect(parser.msg_buf != null); // Should have set up slow path
+        try parseInChunks(&parser, &capture, data, chunk_size);
 
-    // Complete the payload
-    try parser.parse(&mock_conn, " world\r\n");
-    try testing.expectEqual(1, mock_conn.msg_count);
-    try testing.expectEqualStrings("hello world", mock_conn.last_msg);
-    try testing.expectEqualStrings("foo", parser.ma.subject);
+        try std.testing.expectEqual(1, capture.msg_count);
+        try std.testing.expectEqualStrings("foo", capture.last_msg.?.subject);
+        try std.testing.expectEqualStrings("hello world", capture.last_msg.?.data);
+    }
 }
 
 test "parser split err message" {
