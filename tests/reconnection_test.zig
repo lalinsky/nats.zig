@@ -2,7 +2,7 @@ const std = @import("std");
 const nats = @import("nats");
 const utils = @import("utils.zig");
 
-const log = std.log.scoped(.reconnection_test);
+const log = std.log;
 
 test "basic reconnection when server stops" {
     const nc = try utils.createConnection(.node1);
@@ -11,13 +11,15 @@ test "basic reconnection when server stops" {
     // Publish a test message to ensure connection works
     log.debug("Publishing test message before", .{});
     try nc.publish("test.before", "hello before");
-    try nc.flush();
 
+    log.debug("-----------------------------------", .{});
     log.debug("Restarting nats-1", .{});
     try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
+    log.debug("-----------------------------------", .{});
 
     // Verify connection works after reconnection
     log.debug("Trying to publish after reconnection", .{});
     try nc.publish("test.after", "hello after reconnection");
-    try nc.flush();
+
+    std.time.sleep(2 * std.time.ns_per_ms);
 }

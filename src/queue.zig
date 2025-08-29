@@ -444,6 +444,29 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             return self.is_closed;
         }
 
+        /// Reset the queue to empty state
+        pub fn reset(self: *Self) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // Free all chunks in the linked list
+            var current = self.head;
+            while (current) |chunk| {
+                const next = chunk.next;
+                self.recycleChunk(chunk);
+                current = next;
+            }
+
+            // Reset state
+            self.head = null;
+            self.tail = null;
+            self.items_available = 0;
+            self.is_closed = false;
+
+            // Wake up any waiting threads
+            self.data_cond.broadcast();
+        }
+
         // Private helper functions
 
         fn ensureWritableChunk(self: *Self) PushError!*Chunk {
@@ -541,6 +564,11 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         /// Check if has data
         pub fn hasData(self: *Self) bool {
             return self.queue.hasData();
+        }
+
+        /// Reset the buffer to empty state
+        pub fn reset(self: *Self) void {
+            self.queue.reset();
         }
 
         /// Get multiple readable slices for vectored I/O
@@ -813,4 +841,64 @@ test "buffer close functionality" {
 
     // Verify closed state
     try std.testing.expect(buffer.isClosed());
+}
+
+test "queue reset functionality" {
+    const allocator = std.testing.allocator;
+
+    const Queue = ConcurrentQueue(i32, 4);
+    var queue = Queue.init(allocator, .{});
+    defer queue.deinit();
+
+    // Add some data
+    try queue.push(1);
+    try queue.push(2);
+    try queue.push(3);
+
+    // Verify data is there
+    try std.testing.expectEqual(@as(usize, 3), queue.getItemsAvailable());
+    try std.testing.expect(queue.hasData());
+
+    // Reset the queue
+    queue.reset();
+
+    // Verify queue is empty
+    try std.testing.expectEqual(@as(usize, 0), queue.getItemsAvailable());
+    try std.testing.expect(!queue.hasData());
+    try std.testing.expect(!queue.isClosed());
+
+    // Should be able to use queue normally after reset
+    try queue.push(42);
+    try std.testing.expectEqual(@as(i32, 42), try queue.pop(1000));
+}
+
+test "buffer reset functionality" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(64);
+    var buffer = Buffer.init(allocator, .{});
+    defer buffer.deinit();
+
+    // Add some data
+    try buffer.append("Hello, World!");
+
+    // Verify data is there
+    try std.testing.expectEqual(@as(usize, 13), buffer.getBytesAvailable());
+    try std.testing.expect(buffer.hasData());
+
+    // Reset the buffer
+    buffer.reset();
+
+    // Verify buffer is empty
+    try std.testing.expectEqual(@as(usize, 0), buffer.getBytesAvailable());
+    try std.testing.expect(!buffer.hasData());
+    try std.testing.expect(!buffer.isClosed());
+
+    // Should be able to use buffer normally after reset
+    try buffer.append("New data");
+    var view_opt = buffer.tryGetSlice();
+    if (view_opt) |*view| {
+        try std.testing.expectEqualStrings("New data", view.data);
+        view.consume(view.data.len);
+    }
 }
