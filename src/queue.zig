@@ -661,12 +661,20 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
                 moved_chunk_count += 1;
             }
 
-            // Enforce dest limits before splicing.
-            if (dest.queue.max_chunks > 0 and dest.queue.total_chunks + moved_chunk_count > dest.queue.max_chunks) {
-                return PushError.ChunkLimitExceeded;
+            // Enforce dest limits before splicing (overflow-safe).
+            if (dest.queue.max_chunks > 0) {
+                if (dest.queue.total_chunks >= dest.queue.max_chunks) {
+                    return PushError.ChunkLimitExceeded;
+                }
+                if (moved_chunk_count > dest.queue.max_chunks - dest.queue.total_chunks) {
+                    return PushError.ChunkLimitExceeded;
+                }
             }
             if (dest.queue.max_size > 0) {
                 const max_items = dest.queue.max_size / @sizeOf(u8);
+                if (dest.queue.items_available >= max_items) {
+                    return PushError.OutOfMemory;
+                }
                 if (self.queue.items_available > max_items - dest.queue.items_available) {
                     return PushError.OutOfMemory;
                 }
@@ -688,8 +696,9 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.head = null;
             self.queue.tail = null;
             self.queue.items_available = 0;
+            // Sanity: we only subtract list-chunks; pooled chunks remain accounted.
+            std.debug.assert(self.queue.total_chunks >= moved_chunk_count);
             self.queue.total_chunks -= moved_chunk_count;
-            std.debug.assert(self.queue.total_chunks == 0); // Catch accounting bugs
         }
 
         /// Clear all data from the buffer (internal, assumes mutex is held)
