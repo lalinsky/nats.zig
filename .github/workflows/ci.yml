@@ -29,3 +29,9 @@ jobs:
 
     - name: Run integration tests
       run: zig build test-e2e
+
+    - name: Build examples
+      run: zig build examples
+
+    - name: Build benchmarks
+      run: zig build benchmarks
