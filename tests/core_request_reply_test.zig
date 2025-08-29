@@ -165,9 +165,11 @@ test "requestMsg basic functionality" {
 
     std.time.sleep(10_000_000); // 10ms
 
-    // Create a message to send as request
-    const request_msg = try nats.Message.init(std.testing.allocator, "test.requestmsg", null, "requestMsg test data");
+    var request_msg = try conn.newMsg();
     defer request_msg.deinit();
+
+    try request_msg.setSubject("test.requestmsg");
+    try request_msg.setPayload("requestMsg test data");
 
     // Send request using requestMsg
     const response = try conn.requestMsg(request_msg, 1000);
@@ -187,9 +189,11 @@ test "requestMsg with headers" {
 
     std.time.sleep(10_000_000); // 10ms
 
-    // Create a message with headers
-    const request_msg = try nats.Message.init(std.testing.allocator, "test.requestmsg.headers", null, "header test");
+    var request_msg = try conn.newMsg();
     defer request_msg.deinit();
+
+    try request_msg.setSubject("test.requestmsg.headers");
+    try request_msg.setPayload("header test");
 
     // Add some headers
     try request_msg.headerSet("X-Test-Header", "test-value");
@@ -207,11 +211,14 @@ test "requestMsg validation errors" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    // Test invalid subject (empty)
-    const empty_msg = try nats.Message.init(std.testing.allocator, "", null, "test data");
-    defer empty_msg.deinit();
+    var request_msg = try conn.newMsg();
+    defer request_msg.deinit();
 
-    const result = conn.requestMsg(empty_msg, 1000);
+    // Test invalid subject (empty)
+    try request_msg.setSubject("");
+    try request_msg.setPayload("test data");
+
+    const result = conn.requestMsg(request_msg, 1000);
     try std.testing.expectError(error.InvalidSubject, result);
 }
 

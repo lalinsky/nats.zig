@@ -183,8 +183,11 @@ test "get message with headers" {
     defer stream_info.deinit();
 
     // Create message with headers
-    var msg = try nats.Message.init(std.testing.allocator, "test.msg.headers", null, "Message with headers");
+    var msg = try js.nc.newMsg();
     defer msg.deinit();
+
+    try msg.setSubject("test.msg.headers");
+    try msg.setPayload("Message with headers");
 
     try msg.headerSet("X-Test-Header", "test-value");
     try msg.headerSet("X-Another-Header", "another-value");
