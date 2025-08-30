@@ -864,104 +864,118 @@ pub const Connection = struct {
     }
 
     fn readerLoop(self: *Self) void {
-        var buffer: [4096]u8 = undefined;
-
         log.debug("Reader loop started", .{});
 
-        // Simple while condition - just check should_stop
         while (!self.should_stop.load(.acquire)) {
-            const socket = self.acquireSocket() catch break;
-            defer self.releaseSocket();
-
-            // Simple blocking read - shutdown() will wake us up
-            const bytes_read = socket.read(&buffer) catch |err| switch (err) {
-                error.WouldBlock => {
-                    // Read timeout from SO_RCVTIMEO - this is expected, continue reading
-                    continue;
-                },
-                else => {
-                    log.err("Read error: {}", .{err});
-                    self.triggerReconnect(err); // Handles its own locking
-                    continue;
-                },
+            self.readerIteration() catch |err| {
+                // Error occurred, trigger reconnect or break
+                switch (err) {
+                    error.ConnectionClosed => break,
+                    else => continue, // triggerReconnect was called in readerIteration
+                }
             };
-
-            if (bytes_read == 0) {
-                log.debug("Connection closed by server", .{});
-                self.triggerReconnect(ConnectionError.ConnectionClosed); // Handles its own locking
-                continue;
-            }
-
-            log.debug("Read {} bytes: {s}", .{ bytes_read, buffer[0..bytes_read] });
-
-            // Parse the received data
-            self.parser.parse(self, buffer[0..bytes_read]) catch |err| {
-                log.err("Parser error: {}", .{err});
-                // Reset parser state on error to prevent corruption
-                self.parser.reset();
-                self.triggerReconnect(err); // Handles its own locking
-                continue;
-            };
-        }
-
-        // Cleanup socket when reader exits (like C _readLoop)
-        if (self.socket) |socket| {
-            socket.close();
-            self.socket = null;
         }
 
         log.debug("Reader loop exited", .{});
+    }
+
+    fn readerIteration(self: *Self) !void {
+        var buffer: [4096]u8 = undefined;
+
+        const socket = try self.acquireSocket();
+        defer self.releaseSocket();
+
+        // Simple blocking read - shutdown() will wake us up
+        const bytes_read = socket.read(&buffer) catch |err| switch (err) {
+            error.WouldBlock => {
+                // Read timeout from SO_RCVTIMEO - this is expected, continue reading
+                return;
+            },
+            else => {
+                log.err("Read error: {}", .{err});
+                self.triggerReconnectWithSocket(err, socket);
+                return err;
+            },
+        };
+
+        if (bytes_read == 0) {
+            log.debug("Connection closed by server", .{});
+            self.triggerReconnectWithSocket(ConnectionError.ConnectionClosed, socket);
+            return ConnectionError.ConnectionClosed;
+        }
+
+        log.debug("Read {} bytes: {s}", .{ bytes_read, buffer[0..bytes_read] });
+
+        // Parse the received data
+        self.parser.parse(self, buffer[0..bytes_read]) catch |err| {
+            log.err("Parser error: {}", .{err});
+            // Reset parser state on error to prevent corruption
+            self.parser.reset();
+            self.triggerReconnectWithSocket(err, socket);
+            return err;
+        };
     }
 
     fn flusherLoop(self: *Self) void {
         log.debug("Flusher loop started", .{});
 
         while (!self.should_stop.load(.acquire)) {
-            // First try to gather data from buffer - this will block when frozen during reconnection
-            var iovecs: [16]std.posix.iovec_const = undefined;
-            const gather = self.write_buffer.gatherReadVectors(&iovecs, self.options.timeout_ms) catch |err| switch (err) {
-                error.QueueEmpty, error.BufferFrozen => {
-                    // No data to write or buffer is frozen during reconnection
-                    continue;
-                },
-                error.QueueClosed => break,
-            };
-
-            if (gather.iovecs.len == 0) {
-                // No data to write
-                continue;
-            }
-
-            // Now try to get a socket - blocks until available
-            const socket = self.acquireSocket() catch break;
-            defer self.releaseSocket();
-
-            const bytes_written = socket.writev(gather.iovecs) catch |err| switch (err) {
-                error.WouldBlock => {
-                    // Write timeout from SO_SNDTIMEO - this is expected, continue writing
-                    continue;
-                },
-                else => {
-                    log.err("Write error: {}", .{err});
-                    self.triggerReconnect(err);
-                    continue;
-                },
-            };
-
-            gather.consume(bytes_written) catch |err| switch (err) {
-                error.BufferReset => {
-                    // This can only happen during reconnection, we can assume
-                    // it's safe to continue, since we will have a new buffer
-                    continue;
-                },
-                error.ConcurrentConsumer => {
-                    // This is a bug, we can't handle it
-                    std.debug.panic("Concurrent consumer detected", .{});
-                },
+            self.flusherIteration() catch |err| {
+                // Error occurred, trigger reconnect or break
+                switch (err) {
+                    error.QueueClosed => break,
+                    error.QueueEmpty, error.BufferFrozen => continue,
+                    else => continue, // triggerReconnect was called in flusherIteration
+                }
             };
         }
 
         log.debug("Flusher loop exited", .{});
+    }
+
+    fn flusherIteration(self: *Self) !void {
+        // First try to gather data from buffer - this will block when frozen during reconnection
+        var iovecs: [16]std.posix.iovec_const = undefined;
+        const gather = self.write_buffer.gatherReadVectors(&iovecs, self.options.timeout_ms) catch |err| switch (err) {
+            error.QueueEmpty, error.BufferFrozen => {
+                // No data to write or buffer is frozen during reconnection
+                return err;
+            },
+            error.QueueClosed => return err,
+        };
+
+        if (gather.iovecs.len == 0) {
+            // No data to write
+            return error.QueueEmpty;
+        }
+
+        // Now try to get a socket - blocks until available
+        const socket = try self.acquireSocket();
+        defer self.releaseSocket();
+
+        const bytes_written = socket.writev(gather.iovecs) catch |err| switch (err) {
+            error.WouldBlock => {
+                // Write timeout from SO_SNDTIMEO - this is expected, continue writing
+                return;
+            },
+            else => {
+                log.err("Write error: {}", .{err});
+                self.triggerReconnectWithSocket(err, socket);
+                return err;
+            },
+        };
+
+        gather.consume(bytes_written) catch |err| switch (err) {
+            error.BufferReset => {
+                // This can only happen during reconnection, we can assume
+                // it's safe to continue, since we will have a new buffer
+                return;
+            },
+            error.ConcurrentConsumer => {
+                // This is a bug, we can't handle it
+                std.debug.panic("Concurrent consumer detected", .{});
+            },
+        };
     }
 
     fn bufferWrite(self: *Self, data: []const u8) !void {
@@ -1101,6 +1115,11 @@ pub const Connection = struct {
         self.outgoing_pings = 0;
         self.incoming_pongs = 0;
         self.pong_condition.broadcast();
+    }
+
+    fn triggerReconnectWithSocket(self: *Self, err: anyerror, socket: Socket) void {
+        _ = socket; // Socket parameter for future use, currently unused
+        self.triggerReconnect(err);
     }
 
     fn triggerReconnect(self: *Self, err: anyerror) void {
