@@ -19,7 +19,7 @@ const subscription_mod = @import("subscription.zig");
 const jetstream_message = @import("jetstream_message.zig");
 const inbox = @import("inbox.zig");
 
-const log = std.log.scoped(.jetstream);
+const log = @import("log.zig").log;
 
 // Re-export JetStream message types
 pub const JetStreamMessage = jetstream_message.JetStreamMessage;
@@ -565,7 +565,6 @@ pub const JetStream = struct {
         log.debug("Full response: {s}", .{msg.data});
 
         // TODO: Handle specific error cases
-        std.debug.print("JetStream error: code={d} err_code={d} description={s}\n", .{ info.code, info.err_code, info.description });
         return error.JetStreamError;
     }
 

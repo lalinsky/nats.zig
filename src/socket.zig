@@ -14,7 +14,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const log = std.log.scoped(.socket);
+const log = @import("log.zig").log;
 
 pub const ConnectError = std.net.TcpConnectToHostError;
 pub const ReadError = std.net.Stream.ReadError;

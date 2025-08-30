@@ -3,7 +3,7 @@ const testing = std.testing;
 const nats = @import("nats");
 const utils = @import("utils.zig");
 
-const log = std.log.scoped(.jetstream_nak_test);
+const log = std.log.default;
 
 test "NAK redelivery with delivery count verification" {
     const conn = try utils.createDefaultConnection();
