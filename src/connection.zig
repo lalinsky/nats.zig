@@ -27,7 +27,6 @@ const DispatcherPool = dispatcher_mod.DispatcherPool;
 const server_pool_mod = @import("server_pool.zig");
 const ServerPool = server_pool_mod.ServerPool;
 const Server = server_pool_mod.Server;
-const net_utils = @import("net_utils.zig");
 const jetstream_mod = @import("jetstream.zig");
 const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
