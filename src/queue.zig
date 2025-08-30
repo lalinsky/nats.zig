@@ -472,6 +472,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             defer self.mutex.unlock();
 
             self.is_closed = true;
+            self.is_frozen = false;
             self.data_cond.broadcast();
         }
 
