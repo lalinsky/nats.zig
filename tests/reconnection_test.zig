@@ -2,7 +2,7 @@ const std = @import("std");
 const nats = @import("nats");
 const utils = @import("utils.zig");
 
-const log = std.log.scoped(.reconnection_test);
+const log = std.log.default;
 
 test "basic reconnection when server stops" {
     const nc = try utils.createConnection(.node1);

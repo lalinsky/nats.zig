@@ -15,6 +15,7 @@
 const std = @import("std");
 const Message = @import("message.zig").Message;
 const MessagePool = @import("message.zig").MessagePool;
+const log = @import("log.zig").log;
 
 /// Maximum size for control line operations (MSG arguments, INFO, ERR, etc.)
 pub const MAX_CONTROL_LINE_SIZE = 4096;
@@ -745,7 +746,7 @@ fn parseInChunks(parser: *Parser, conn: *MockConnection, data: []const u8, chunk
 test "parser split msg" {
     const data = "MSG foo 1 11\r\nhello world\r\n";
     for (1..data.len) |chunk_size| {
-        std.log.info("chunk_size: {}", .{chunk_size});
+        log.info("chunk_size: {}", .{chunk_size});
 
         var parser = Parser.init(std.testing.allocator);
         defer parser.deinit();
@@ -764,7 +765,7 @@ test "parser split msg" {
 test "parser split hmsg" {
     const data = "HMSG foo 1 22 27\r\nNATS/1.0\r\nFoo: Bar\r\n\r\nhello\r\n";
     for (1..data.len) |chunk_size| {
-        std.log.info("chunk_size: {}", .{chunk_size});
+        log.info("chunk_size: {}", .{chunk_size});
 
         var parser = Parser.init(std.testing.allocator);
         defer parser.deinit();
@@ -788,7 +789,7 @@ test "parser split hmsg" {
 test "parser split err" {
     const data = "-ERR Authentication Required\r\n";
     for (1..data.len) |chunk_size| {
-        std.log.info("chunk_size: {}", .{chunk_size});
+        log.info("chunk_size: {}", .{chunk_size});
 
         var parser = Parser.init(std.testing.allocator);
         defer parser.deinit();
@@ -806,7 +807,7 @@ test "parser split err" {
 test "parser split info" {
     const data = "INFO {\"server_id\":\"test\",\"version\":\"2.0.0\"}\r\n";
     for (1..data.len) |chunk_size| {
-        std.log.info("chunk_size: {}", .{chunk_size});
+        log.info("chunk_size: {}", .{chunk_size});
 
         var parser = Parser.init(std.testing.allocator);
         defer parser.deinit();
@@ -831,7 +832,7 @@ test "parser multiple lines" {
     ;
 
     for (1..data.len) |chunk_size| {
-        std.log.info("chunk_size: {}", .{chunk_size});
+        log.info("chunk_size: {}", .{chunk_size});
 
         var parser = Parser.init(std.testing.allocator);
         defer parser.deinit();

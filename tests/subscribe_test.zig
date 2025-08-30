@@ -3,7 +3,7 @@ const nats = @import("nats");
 const utils = @import("utils.zig");
 const Message = nats.Message;
 
-const log = std.log.scoped(.testing);
+const log = std.log.default;
 
 test "subscribeSync smoke test" {
     var conn = try utils.createDefaultConnection();

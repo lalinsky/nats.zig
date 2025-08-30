@@ -18,7 +18,7 @@ const RefCounter = @import("ref_counter.zig").RefCounter;
 const ConcurrentQueue = @import("queue.zig").ConcurrentQueue;
 const Dispatcher = @import("dispatcher.zig").Dispatcher;
 
-const log = std.log.scoped(.subscription);
+const log = @import("log.zig").log;
 
 // Message handler storage for type-erased callback
 // Error set for message handlers

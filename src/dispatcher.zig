@@ -17,7 +17,7 @@ const Message = @import("message.zig").Message;
 const Subscription = @import("subscription.zig").Subscription;
 const ConcurrentQueue = @import("queue.zig").ConcurrentQueue;
 
-const log = std.log.scoped(.dispatcher);
+const log = @import("log.zig").log;
 
 /// Message to be dispatched to a subscription handler
 pub const DispatchMessage = struct {

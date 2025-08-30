@@ -3,7 +3,7 @@ const testing = std.testing;
 const nats = @import("nats");
 const utils = @import("utils.zig");
 
-const log = std.log.scoped(.jetstream_push_test);
+const log = std.log.default;
 
 test "basic push subscription" {
     const conn = try utils.createDefaultConnection();
