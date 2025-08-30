@@ -19,13 +19,14 @@ const Allocator = std.mem.Allocator;
 const PopError = error{
     QueueEmpty,
     QueueClosed,
-    ReadersPaused,
+    BufferFrozen,
 };
 
 const PushError = error{
     QueueClosed,
     ChunkLimitExceeded,
     OutOfMemory,
+    BufferFrozen,
 };
 
 /// A single chunk in the linked list with inline data
@@ -188,8 +189,8 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         chunk_pool: Pool,
         /// Whether the queue is closed for writes (protected by mutex)
         is_closed: bool,
-        /// Whether readers are paused (protected by mutex)
-        readers_paused: bool,
+        /// Whether the buffer is frozen (blocks both readers and writers, protected by mutex)
+        is_frozen: bool,
 
         const Self = @This();
         const Chunk = ChunkType(T, chunk_size);
@@ -219,7 +220,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 .max_size = config.max_size,
                 .chunk_pool = Pool.init(allocator, config.max_pool_size),
                 .is_closed = false,
-                .readers_paused = false,
+                .is_frozen = false,
             };
         }
 
@@ -243,6 +244,9 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
             if (self.is_closed) {
                 return PushError.QueueClosed;
+            }
+            if (self.is_frozen) {
+                return PushError.BufferFrozen;
             }
 
             // Check size limit before adding (overflow-safe)
@@ -272,6 +276,9 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
             if (self.is_closed) {
                 return PushError.QueueClosed;
+            }
+            if (self.is_frozen) {
+                return PushError.BufferFrozen;
             }
 
             // Check size limit before adding (overflow-safe)
@@ -318,8 +325,8 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 if (self.is_closed and self.items_available == 0) {
                     return PopError.QueueClosed;
                 }
-                if (self.readers_paused) {
-                    return PopError.ReadersPaused;
+                if (self.is_frozen) {
+                    return PopError.BufferFrozen;
                 }
                 if (self.items_available == 0) {
                     return PopError.QueueEmpty;
@@ -328,14 +335,14 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 var timer = std.time.Timer.start() catch unreachable;
                 const timeout_ns = timeout_ms * std.time.ns_per_ms;
 
-                while ((self.items_available == 0 or self.readers_paused) and !self.is_closed) {
+                while ((self.items_available == 0 or self.is_frozen) and !self.is_closed) {
                     const elapsed_ns = timer.read();
                     if (elapsed_ns >= timeout_ns) {
                         if (self.is_closed and self.items_available == 0) {
                             return PopError.QueueClosed;
                         }
-                        if (self.readers_paused) {
-                            return PopError.ReadersPaused;
+                        if (self.is_frozen) {
+                            return PopError.BufferFrozen;
                         }
                         return PopError.QueueEmpty;
                     }
@@ -347,8 +354,8 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 if (self.is_closed and self.items_available == 0) {
                     return PopError.QueueClosed;
                 }
-                if (self.readers_paused) {
-                    return PopError.ReadersPaused;
+                if (self.is_frozen) {
+                    return PopError.BufferFrozen;
                 }
             }
 
@@ -387,37 +394,37 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 if (self.is_closed and self.items_available == 0) {
                     return PopError.QueueClosed;
                 }
-                if (self.readers_paused) {
-                    return PopError.ReadersPaused;
+                if (self.is_frozen) {
+                    return PopError.BufferFrozen;
                 }
                 if (self.items_available == 0) {
                     return PopError.QueueEmpty;
                 }
             } else if (timeout_ms == std.math.maxInt(u64)) {
                 // Wait indefinitely
-                while ((self.items_available == 0 or self.readers_paused) and !self.is_closed) {
+                while ((self.items_available == 0 or self.is_frozen) and !self.is_closed) {
                     self.data_cond.wait(&self.mutex);
                 }
 
                 if (self.is_closed and self.items_available == 0) {
                     return PopError.QueueClosed;
                 }
-                if (self.readers_paused) {
-                    return PopError.ReadersPaused;
+                if (self.is_frozen) {
+                    return PopError.BufferFrozen;
                 }
             } else {
                 // Wait with timeout
                 var timer = std.time.Timer.start() catch unreachable;
                 const timeout_ns = timeout_ms * std.time.ns_per_ms;
 
-                while ((self.items_available == 0 or self.readers_paused) and !self.is_closed) {
+                while ((self.items_available == 0 or self.is_frozen) and !self.is_closed) {
                     const elapsed_ns = timer.read();
                     if (elapsed_ns >= timeout_ns) {
                         if (self.is_closed and self.items_available == 0) {
                             return PopError.QueueClosed;
                         }
-                        if (self.readers_paused) {
-                            return PopError.ReadersPaused;
+                        if (self.is_frozen) {
+                            return PopError.BufferFrozen;
                         }
                         return PopError.QueueEmpty;
                     }
@@ -429,8 +436,8 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 if (self.is_closed and self.items_available == 0) {
                     return PopError.QueueClosed;
                 }
-                if (self.readers_paused) {
-                    return PopError.ReadersPaused;
+                if (self.is_frozen) {
+                    return PopError.BufferFrozen;
                 }
             }
 
@@ -508,29 +515,29 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             return self.is_closed;
         }
 
-        /// Pause all readers (writes still allowed)
-        pub fn pauseReaders(self: *Self) void {
+        /// Freeze the buffer (blocks both readers and writers)
+        pub fn freeze(self: *Self) void {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            self.readers_paused = true;
+            self.is_frozen = true;
         }
 
-        /// Resume all readers and wake them up
-        pub fn resumeReaders(self: *Self) void {
+        /// Unfreeze the buffer and wake up waiting threads
+        pub fn unfreeze(self: *Self) void {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            self.readers_paused = false;
+            self.is_frozen = false;
             self.data_cond.broadcast();
         }
 
-        /// Check if readers are paused
-        pub fn areReadersPaused(self: *Self) bool {
+        /// Check if buffer is frozen
+        pub fn isFrozen(self: *Self) bool {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            return self.readers_paused;
+            return self.is_frozen;
         }
 
         /// Reset the queue to empty state
@@ -551,7 +558,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             self.tail = null;
             self.items_available = 0;
             self.is_closed = false;
-            self.readers_paused = false;
+            self.is_frozen = false;
 
             // Wake up any waiting threads
             self.data_cond.broadcast();
@@ -660,19 +667,19 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.reset();
         }
 
-        /// Pause all readers (writes still allowed)
-        pub fn pauseReaders(self: *Self) void {
-            self.queue.pauseReaders();
+        /// Freeze the buffer (blocks both readers and writers)
+        pub fn freeze(self: *Self) void {
+            self.queue.freeze();
         }
 
-        /// Resume all readers and wake them up
-        pub fn resumeReaders(self: *Self) void {
-            self.queue.resumeReaders();
+        /// Unfreeze the buffer and wake up waiting threads
+        pub fn unfreeze(self: *Self) void {
+            self.queue.unfreeze();
         }
 
-        /// Check if readers are paused
-        pub fn areReadersPaused(self: *Self) bool {
-            return self.queue.areReadersPaused();
+        /// Check if buffer is frozen
+        pub fn isFrozen(self: *Self) bool {
+            return self.queue.isFrozen();
         }
 
         /// Get multiple readable slices for vectored I/O
@@ -820,8 +827,8 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
                 if (self.queue.is_closed and self.queue.items_available == 0) {
                     return error.QueueClosed;
                 }
-                if (self.queue.readers_paused) {
-                    return error.ReadersPaused;
+                if (self.queue.is_frozen) {
+                    return error.BufferFrozen;
                 }
                 if (self.queue.items_available == 0) {
                     return error.QueueEmpty;
@@ -832,14 +839,14 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             var timer = std.time.Timer.start() catch unreachable;
             const timeout_ns = timeout_ms * std.time.ns_per_ms;
 
-            while ((self.queue.items_available == 0 or self.queue.readers_paused) and !self.queue.is_closed) {
+            while ((self.queue.items_available == 0 or self.queue.is_frozen) and !self.queue.is_closed) {
                 const elapsed_ns = timer.read();
                 if (elapsed_ns >= timeout_ns) {
                     if (self.queue.is_closed and self.queue.items_available == 0) {
                         return error.QueueClosed;
                     }
-                    if (self.queue.readers_paused) {
-                        return error.ReadersPaused;
+                    if (self.queue.is_frozen) {
+                        return error.BufferFrozen;
                     }
                     return error.QueueEmpty;
                 }
@@ -851,8 +858,8 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             if (self.queue.is_closed and self.queue.items_available == 0) {
                 return error.QueueClosed;
             }
-            if (self.queue.readers_paused) {
-                return error.ReadersPaused;
+            if (self.queue.is_frozen) {
+                return error.BufferFrozen;
             }
         }
 
@@ -1216,7 +1223,7 @@ test "buffer max_size limit" {
     }
 }
 
-test "pauseReaders/resumeReaders basic functionality" {
+test "freeze/unfreeze basic functionality" {
     const allocator = std.testing.allocator;
 
     const Queue = ConcurrentQueue(i32, 4);
@@ -1227,66 +1234,66 @@ test "pauseReaders/resumeReaders basic functionality" {
     try queue.push(42);
     try std.testing.expectEqual(@as(usize, 1), queue.getItemsAvailable());
 
-    // Pause readers
-    queue.pauseReaders();
-    try std.testing.expect(queue.areReadersPaused());
+    // Freeze buffer
+    queue.freeze();
+    try std.testing.expect(queue.isFrozen());
 
-    // Non-blocking read should return ReadersPaused
-    try std.testing.expectError(PopError.ReadersPaused, queue.pop(0));
-    try std.testing.expectError(PopError.ReadersPaused, queue.getSlice(0));
+    // Non-blocking read should return BufferFrozen
+    try std.testing.expectError(PopError.BufferFrozen, queue.pop(0));
+    try std.testing.expectError(PopError.BufferFrozen, queue.getSlice(0));
 
     // Data should still be available after failed reads
     try std.testing.expectEqual(@as(usize, 1), queue.getItemsAvailable());
 
-    // Resume readers
-    queue.resumeReaders();
-    try std.testing.expect(!queue.areReadersPaused());
+    // Unfreeze buffer
+    queue.unfreeze();
+    try std.testing.expect(!queue.isFrozen());
 
     // Should be able to read now
     try std.testing.expectEqual(@as(i32, 42), try queue.pop(1000));
     try std.testing.expectEqual(@as(usize, 0), queue.getItemsAvailable());
 }
 
-test "writers can still push while readers are paused" {
+test "writers cannot push while buffer is frozen" {
     const allocator = std.testing.allocator;
 
     const Queue = ConcurrentQueue(i32, 4);
     var queue = Queue.init(allocator, .{});
     defer queue.deinit();
 
-    // Pause readers
-    queue.pauseReaders();
+    // Freeze buffer
+    queue.freeze();
 
-    // Writers should still work
+    // Writers should be blocked
+    try std.testing.expectError(PushError.BufferFrozen, queue.push(1));
+    try std.testing.expectError(PushError.BufferFrozen, queue.pushSlice(&[_]i32{ 2, 3 }));
+    try std.testing.expectEqual(@as(usize, 0), queue.getItemsAvailable());
+
+    // Readers should be blocked
+    try std.testing.expectError(PopError.BufferFrozen, queue.pop(0));
+
+    // Unfreeze and add data
+    queue.unfreeze();
     try queue.push(1);
     try queue.push(2);
-    try queue.push(3);
-    try std.testing.expectEqual(@as(usize, 3), queue.getItemsAvailable());
-
-    // Readers should still be paused
-    try std.testing.expectError(PopError.ReadersPaused, queue.pop(0));
-
-    // Resume and verify data
-    queue.resumeReaders();
     try std.testing.expectEqual(@as(i32, 1), try queue.pop(1000));
     try std.testing.expectEqual(@as(i32, 2), try queue.pop(1000));
-    try std.testing.expectEqual(@as(i32, 3), try queue.pop(1000));
 }
 
-test "blocking operations during pause" {
+test "blocking operations during freeze" {
     const allocator = std.testing.allocator;
 
     const Queue = ConcurrentQueue(i32, 4);
     var queue = Queue.init(allocator, .{});
     defer queue.deinit();
 
-    queue.pauseReaders();
+    queue.freeze();
 
     // Start a thread that will resume after a delay
     const Resumer = struct {
         fn run(q: *Queue) !void {
             std.time.sleep(10 * std.time.ns_per_ms);
-            q.resumeReaders();
+            q.unfreeze();
             try q.push(99);
         }
     };
@@ -1300,44 +1307,44 @@ test "blocking operations during pause" {
     resumer.join();
 }
 
-test "timeout while paused returns ReadersPaused" {
+test "timeout while frozen returns BufferFrozen" {
     const allocator = std.testing.allocator;
 
     const Queue = ConcurrentQueue(i32, 4);
     var queue = Queue.init(allocator, .{});
     defer queue.deinit();
 
-    // Add data but pause readers
+    // Add data then freeze buffer
     try queue.push(42);
-    queue.pauseReaders();
+    queue.freeze();
 
-    // Should timeout and return ReadersPaused
-    try std.testing.expectError(PopError.ReadersPaused, queue.pop(10));
-    try std.testing.expectError(PopError.ReadersPaused, queue.getSlice(10));
+    // Should timeout and return BufferFrozen
+    try std.testing.expectError(PopError.BufferFrozen, queue.pop(10));
+    try std.testing.expectError(PopError.BufferFrozen, queue.getSlice(10));
 
     // Data should still be there
     try std.testing.expectEqual(@as(usize, 1), queue.getItemsAvailable());
 }
 
-test "pause/resume interaction with close" {
+test "freeze/unfreeze interaction with close" {
     const allocator = std.testing.allocator;
 
     const Queue = ConcurrentQueue(i32, 4);
     var queue = Queue.init(allocator, .{});
     defer queue.deinit();
 
-    // Pause then close
-    queue.pauseReaders();
+    // Freeze then close
+    queue.freeze();
     queue.close();
 
-    // Should return QueueClosed instead of ReadersPaused
+    // Should return QueueClosed instead of BufferFrozen
     try std.testing.expectError(PopError.QueueClosed, queue.pop(0));
 
     // Can't push when closed
     try std.testing.expectError(PushError.QueueClosed, queue.push(42));
 }
 
-test "ConcurrentWriteBuffer pause/resume functionality" {
+test "ConcurrentWriteBuffer freeze/unfreeze functionality" {
     const allocator = std.testing.allocator;
 
     const Buffer = ConcurrentWriteBuffer(64);
@@ -1347,20 +1354,23 @@ test "ConcurrentWriteBuffer pause/resume functionality" {
     // Add some data
     try buffer.append("Hello, World!");
 
-    // Pause readers
-    buffer.pauseReaders();
-    try std.testing.expect(buffer.areReadersPaused());
+    // Freeze buffer
+    buffer.freeze();
+    try std.testing.expect(buffer.isFrozen());
 
-    // Non-blocking read should return ReadersPaused
+    // Non-blocking read should return BufferFrozen
     try std.testing.expect(buffer.tryGetSlice() == null);
-    try std.testing.expectError(PopError.ReadersPaused, buffer.getSlice(0));
+    try std.testing.expectError(PopError.BufferFrozen, buffer.getSlice(0));
 
-    // Writers should still work
+    // Writers should be blocked
+    try std.testing.expectError(PushError.BufferFrozen, buffer.append(" More data"));
+
+    // Unfreeze buffer
+    buffer.unfreeze();
+    try std.testing.expect(!buffer.isFrozen());
+
+    // Now writers work
     try buffer.append(" More data");
-
-    // Resume readers
-    buffer.resumeReaders();
-    try std.testing.expect(!buffer.areReadersPaused());
 
     // Should be able to read now
     var view_opt = buffer.tryGetSlice();
