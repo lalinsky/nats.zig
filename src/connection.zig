@@ -868,10 +868,14 @@ pub const Connection = struct {
 
         while (!self.should_stop.load(.acquire)) {
             self.readerIteration() catch |err| {
-                // Error occurred, trigger reconnect or break
+                // Error occurred, determine whether to reconnect or break
                 switch (err) {
                     error.ConnectionClosed => break,
-                    else => continue, // triggerReconnect was called in readerIteration
+                    else => {
+                        // Trigger reconnect for other errors
+                        self.triggerReconnect(err);
+                        continue;
+                    },
                 }
             };
         }
@@ -893,14 +897,12 @@ pub const Connection = struct {
             },
             else => {
                 log.err("Read error: {}", .{err});
-                self.triggerReconnectWithSocket(err, socket);
                 return err;
             },
         };
 
         if (bytes_read == 0) {
             log.debug("Connection closed by server", .{});
-            self.triggerReconnectWithSocket(ConnectionError.ConnectionClosed, socket);
             return ConnectionError.ConnectionClosed;
         }
 
@@ -911,7 +913,6 @@ pub const Connection = struct {
             log.err("Parser error: {}", .{err});
             // Reset parser state on error to prevent corruption
             self.parser.reset();
-            self.triggerReconnectWithSocket(err, socket);
             return err;
         };
     }
@@ -921,11 +922,15 @@ pub const Connection = struct {
 
         while (!self.should_stop.load(.acquire)) {
             self.flusherIteration() catch |err| {
-                // Error occurred, trigger reconnect or break
+                // Error occurred, determine whether to reconnect or break
                 switch (err) {
                     error.QueueClosed => break,
                     error.QueueEmpty, error.BufferFrozen => continue,
-                    else => continue, // triggerReconnect was called in flusherIteration
+                    else => {
+                        // Trigger reconnect for other errors
+                        self.triggerReconnect(err);
+                        continue;
+                    },
                 }
             };
         }
@@ -960,7 +965,6 @@ pub const Connection = struct {
             },
             else => {
                 log.err("Write error: {}", .{err});
-                self.triggerReconnectWithSocket(err, socket);
                 return err;
             },
         };
@@ -1115,11 +1119,6 @@ pub const Connection = struct {
         self.outgoing_pings = 0;
         self.incoming_pongs = 0;
         self.pong_condition.broadcast();
-    }
-
-    fn triggerReconnectWithSocket(self: *Self, err: anyerror, socket: Socket) void {
-        _ = socket; // Socket parameter for future use, currently unused
-        self.triggerReconnect(err);
     }
 
     fn triggerReconnect(self: *Self, err: anyerror) void {
