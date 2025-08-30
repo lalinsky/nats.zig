@@ -43,25 +43,24 @@ pub const Socket = struct {
     /// Sets the socket to non-blocking mode.
     pub fn setNonBlocking(s: Socket) !void {
         const current_flags = try std.posix.fcntl(s.stream.handle, std.posix.F.GETFL, 0);
-
-        const new_flags = current_flags | std.posix.SOCK.NONBLOCK;
+        const new_flags = current_flags | 0o4000; // O_NONBLOCK
         _ = try std.posix.fcntl(s.stream.handle, std.posix.F.SETFL, new_flags);
     }
 
     /// Sets the socket read timeout.
     pub fn setReadTimeout(s: Socket, timeout_ms: u64) !void {
-        const timeout = std.posix.timespec{
+        const timeout = std.posix.timeval{
             .sec = @intCast(@divFloor(timeout_ms, std.time.ms_per_s)),
-            .nsec = @intCast(@mod(timeout_ms, std.time.ms_per_s) * std.time.ns_per_s),
+            .usec = @intCast(@mod(timeout_ms, std.time.ms_per_s) * 1000), // ms -> µs
         };
         try std.posix.setsockopt(s.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
     }
 
     /// Sets the socket write timeout.
     pub fn setWriteTimeout(s: Socket, timeout_ms: u64) !void {
-        const timeout = std.posix.timespec{
+        const timeout = std.posix.timeval{
             .sec = @intCast(@divFloor(timeout_ms, std.time.ms_per_s)),
-            .nsec = @intCast(@mod(timeout_ms, std.time.ms_per_s) * std.time.ns_per_s),
+            .usec = @intCast(@mod(timeout_ms, std.time.ms_per_s) * 1000), // ms -> µs
         };
         try std.posix.setsockopt(s.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout));
     }
