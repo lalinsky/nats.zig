@@ -800,30 +800,6 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.total_chunks -= moved_chunk_count;
         }
 
-        /// Clear all data from the buffer (internal, assumes mutex is held)
-        fn clearInternal(self: *Self) void {
-            // Free all chunks in the linked list
-            var current = self.queue.head;
-            while (current) |chunk| {
-                const next = chunk.next;
-                self.queue.recycleChunk(chunk);
-                current = next;
-            }
-
-            // Reset queue state
-            self.queue.head = null;
-            self.queue.tail = null;
-            self.queue.items_available = 0;
-            self.queue.total_chunks = 0;
-        }
-
-        /// Clear all data from the buffer
-        pub fn clear(self: *Self) void {
-            self.queue.mutex.lock();
-            defer self.queue.mutex.unlock();
-            self.clearInternal();
-        }
-
         /// Wait for data to become available (blocks until any data arrives)
         pub fn waitForData(self: *Self) !void {
             self.queue.mutex.lock();
