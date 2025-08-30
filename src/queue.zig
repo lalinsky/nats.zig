@@ -1573,3 +1573,45 @@ test "moveToBuffer respects freeze state on destination" {
     try std.testing.expectEqual(@as(usize, 5), source.getBytesAvailable());
     try std.testing.expectEqual(@as(usize, 0), dest.getBytesAvailable());
 }
+
+test "VectorGather detects buffer reset between gather and consume" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(64);
+    var buffer = Buffer.init(allocator, .{});
+    defer buffer.deinit();
+
+    try buffer.append("Hello, World!");
+
+    var iovecs: [4]std.posix.iovec_const = undefined;
+    const gather = try buffer.gatherReadVectors(&iovecs, 0);
+    try std.testing.expect(gather.iovecs.len > 0);
+
+    // Reset the buffer which should increment reset_id
+    buffer.reset();
+
+    // Now trying to consume with the old gather should fail with BufferReset
+    try std.testing.expectError(error.BufferReset, gather.consume(1));
+}
+
+test "VectorGather detects concurrent consumer advancing buffer" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(64);
+    var buffer = Buffer.init(allocator, .{});
+    defer buffer.deinit();
+
+    try buffer.append("Hello, World!");
+
+    var iovecs: [4]std.posix.iovec_const = undefined;
+    const gather = try buffer.gatherReadVectors(&iovecs, 0);
+    try std.testing.expect(gather.iovecs.len > 0);
+    try std.testing.expect(gather.total_bytes > 0);
+
+    // Simulate another consumer advancing the read position
+    var view = try buffer.getSlice(0);
+    view.consume(2); // Advance read_pos by 2 bytes
+
+    // Now trying to consume with the original gather should fail with ConcurrentConsumer
+    try std.testing.expectError(error.ConcurrentConsumer, gather.consume(3));
+}
