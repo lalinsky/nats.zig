@@ -389,9 +389,9 @@ pub const Connection = struct {
         // and blocks any further writes
         self.write_buffer.close();
 
-        // Wait for both threads to release the sockets
-        while (self.socket_refs != 0) {
-            self.socket_unused_cond.wait(&self.mutex);
+        // Wait for both threads to release the sockets with timeout
+        if (!self.waitForSocketUnused(self.options.timeout_ms * 2)) {
+            log.warn("Timeout waiting for socket references to be released during close", .{});
         }
 
         // Clear pending flushes (wake up any waiting flush() calls)
@@ -1421,6 +1421,32 @@ pub const Connection = struct {
                 self.socket_unused_cond.broadcast();
             }
         }
+    }
+
+    /// Internal helper for waiting for socket to become unused (assumes mutex is held)
+    fn waitForSocketUnused(self: *Self, timeout_ms: u64) bool {
+        if (self.socket_refs == 0) {
+            return true; // Already unused
+        }
+
+        if (timeout_ms == 0) {
+            return false; // Non-blocking, socket still in use
+        }
+
+        var timer = std.time.Timer.start() catch return false;
+        const timeout_ns = timeout_ms * std.time.ns_per_ms;
+
+        while (self.socket_refs > 0) {
+            const elapsed_ns = timer.read();
+            if (elapsed_ns >= timeout_ns) {
+                return false; // Timeout occurred
+            }
+
+            const remaining_ns = timeout_ns - elapsed_ns;
+            self.socket_unused_cond.timedWait(&self.mutex, remaining_ns) catch {};
+        }
+
+        return true; // Socket became unused
     }
 
     // JetStream support
