@@ -911,6 +911,13 @@ pub const Connection = struct {
         log.debug("Reader thread exited", .{});
     }
 
+    fn getSocket(self: *Self) ?*std.os.socket.Socket {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        return self.socket;
+    }
+
     fn flusherLoop(self: *Self) void {
         log.debug("Flusher thread started", .{});
 
@@ -937,11 +944,14 @@ pub const Connection = struct {
 
             if (!self.flusher_asap and !self.options.send_asap) {
                 // Give a chance to accumulate more requests
+                log.info("[flusher] 1ms delay", .{});
                 self.flusher_condition.timedWait(&self.mutex, 1 * std.time.ns_per_ms) catch {};
             }
 
             self.flusher_signaled = false;
             self.flusher_asap = false;
+
+            log.info("[flusher] waiting for mutex", .{});
 
             // Unlock before I/O
             self.mutex.unlock();
@@ -953,6 +963,8 @@ pub const Connection = struct {
                 // If we don't have any data to write, try again
                 continue;
             }
+
+            log.info("[flusher] writing", .{});
 
             // Write all buffered data using vectored I/O
             socket.writevAll(iovecs[0..iovec_count]) catch |err| {
@@ -967,6 +979,8 @@ pub const Connection = struct {
                 total_size += iov.len;
             }
             self.write_buffer.consumeBytesMultiple(total_size);
+
+            log.info("[flusher] wrote {} bytes", .{total_size});
         }
 
         log.debug("Flusher thread exited", .{});
@@ -976,7 +990,7 @@ pub const Connection = struct {
         // Assume mutex is already held by caller
 
         // If we're reconnecting, buffer the message for later
-        if (self.status == .connecting and self.options.reconnect.allow_reconnect) {
+        if (!asap and self.status == .connecting and self.options.reconnect.allow_reconnect) {
             return self.pending_buffer.append(data);
         }
 
