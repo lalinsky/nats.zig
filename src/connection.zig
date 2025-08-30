@@ -871,9 +871,7 @@ pub const Connection = struct {
 
         // Simple while condition - just check should_stop
         while (!self.should_stop.load(.acquire)) {
-            const socket = self.acquireSocket() catch |err| switch (err) {
-                error.ConnectionClosed => break, // Connection is closed, stop reader
-            };
+            const socket = self.acquireSocket() catch break;
             defer self.releaseSocket();
 
             // Simple blocking read - shutdown() will wake us up
@@ -936,9 +934,7 @@ pub const Connection = struct {
             }
 
             // Now try to get a socket - blocks until available
-            const socket = self.acquireSocket() catch |err| switch (err) {
-                error.ConnectionClosed => break, // Connection is closed, stop flusher
-            };
+            const socket = self.acquireSocket() catch break;
             defer self.releaseSocket();
 
             const bytes_written = socket.writev(gather.iovecs) catch |err| switch (err) {
