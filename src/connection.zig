@@ -154,9 +154,12 @@ pub const Connection = struct {
     allocator: Allocator,
     options: ConnectionOptions,
 
+    status: ConnectionStatus = .disconnected,
+
     // Network
     socket: ?Socket = null,
-    status: ConnectionStatus = .disconnected,
+    socket_refs: u64 = 0,
+    socket_unused_cond: std.Thread.Condition = .{},
 
     // Server management
     server_pool: ServerPool,
@@ -1396,6 +1399,36 @@ pub const Connection = struct {
 
             log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
             buffer.clearRetainingCapacity();
+        }
+    }
+
+    /// Acquires a reference to the socket for safe concurrent use.
+    /// Returns a pointer to the socket if available, null if not connected.
+    /// The caller MUST call releaseSocket() when done with the socket.
+    pub fn acquireSocket(self: *Self) ?*Socket {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.socket) |*socket_ptr| {
+            self.socket_refs += 1;
+            return socket_ptr;
+        }
+
+        return null;
+    }
+
+    /// Releases a reference to the socket obtained via acquireSocket().
+    /// This must be called for every successful acquireSocket() call.
+    pub fn releaseSocket(self: *Self) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.socket_refs > 0) {
+            self.socket_refs -= 1;
+            // Only broadcast when all references are released
+            if (self.socket_refs == 0) {
+                self.socket_unused_cond.broadcast();
+            }
         }
     }
 
