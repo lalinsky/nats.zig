@@ -327,6 +327,10 @@ pub const Connection = struct {
             return ConnectionError.ConnectionFailed;
         };
 
+        try socket.setKeepAlive(true);
+        try socket.setReadTimeout(self.options.timeout_ms);
+        try socket.setWriteTimeout(self.options.timeout_ms);
+
         self.socket = socket;
         self.should_stop.store(false, .monotonic);
 
@@ -879,10 +883,16 @@ pub const Connection = struct {
             defer self.releaseSocket();
 
             // Simple blocking read - shutdown() will wake us up
-            const bytes_read = socket.read(&buffer) catch |err| {
-                log.err("Read error: {}", .{err});
-                self.triggerReconnect(err); // Handles its own locking
-                break;
+            const bytes_read = socket.read(&buffer) catch |err| switch (err) {
+                error.WouldBlock => {
+                    // Read timeout from SO_RCVTIMEO - this is expected, continue reading
+                    continue;
+                },
+                else => {
+                    log.err("Read error: {}", .{err});
+                    self.triggerReconnect(err); // Handles its own locking
+                    break;
+                },
             };
 
             if (bytes_read == 0) {
@@ -920,7 +930,7 @@ pub const Connection = struct {
             defer self.releaseSocket();
 
             var iovecs: [16]std.posix.iovec_const = undefined;
-            const gather = self.write_buffer.gatherReadVectors(&iovecs, 1000) catch |err| switch (err) {
+            const gather = self.write_buffer.gatherReadVectors(&iovecs, self.options.timeout_ms) catch |err| switch (err) {
                 error.QueueEmpty, error.BufferFrozen => {
                     // No data to write or buffer is frozen
                     continue;
@@ -933,10 +943,16 @@ pub const Connection = struct {
                 continue;
             }
 
-            const bytes_written = socket.writev(gather.iovecs) catch |err| {
-                log.err("Write error: {}", .{err});
-                self.triggerReconnect(err);
-                break;
+            const bytes_written = socket.writev(gather.iovecs) catch |err| switch (err) {
+                error.WouldBlock => {
+                    // Write timeout from SO_SNDTIMEO - this is expected, continue writing
+                    continue;
+                },
+                else => {
+                    log.err("Write error: {}", .{err});
+                    self.triggerReconnect(err);
+                    break;
+                },
             };
 
             gather.consume(bytes_written) catch |err| switch (err) {
@@ -1355,12 +1371,12 @@ pub const Connection = struct {
                 try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
             }
 
-            // Send directly (bypass buffering since we're reconnecting)
-            const socket = self.socket orelse return ConnectionError.ConnectionClosed;
-            try socket.stream.writeAll(buffer.items);
-
             log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
-            buffer.clearRetainingCapacity();
+        }
+
+        // Send all subscription commands via write buffer
+        if (buffer.items.len > 0) {
+            try self.write_buffer.append(buffer.items);
         }
     }
 
