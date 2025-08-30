@@ -892,10 +892,13 @@ pub const Connection = struct {
 
         // Parse the received data
         self.parser.parse(self, buffer[0..bytes_read]) catch |err| {
-            log.err("Parser error: {}", .{err});
-            // Reset parser state on error to prevent corruption
-            self.parser.reset();
-            return err;
+            switch (err) {
+                error.ShouldStop => return err,
+                else => {
+                    log.err("Parser error: {}", .{err});
+                    return err;
+                },
+            }
         };
     }
 
@@ -977,6 +980,9 @@ pub const Connection = struct {
 
     // Parser callback methods
     pub fn processMsg(self: *Self, message: *Message) !void {
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
 
         // Retain subscription while holding lock, then release lock
         self.subs_mutex.lock();
@@ -1069,6 +1075,10 @@ pub const Connection = struct {
     }
 
     pub fn processInfo(self: *Self, info_json: []const u8) !void {
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
+
         log.debug("Received INFO: {s}", .{info_json});
 
         self.mutex.lock();
@@ -1120,6 +1130,10 @@ pub const Connection = struct {
     }
 
     pub fn processOK(self: *Self) !void {
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -1137,6 +1151,10 @@ pub const Connection = struct {
     }
 
     pub fn processErr(self: *Self, err_msg: []const u8) !void {
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
+
         // Call the callback outside of mutex, if provided
         var callback: @TypeOf(self.options.callbacks.error_cb) = null;
         defer if (callback) |cb| cb(self, err_msg);
@@ -1162,6 +1180,10 @@ pub const Connection = struct {
     }
 
     pub fn processPong(self: *Self) !void {
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -1181,6 +1203,10 @@ pub const Connection = struct {
     }
 
     pub fn processPing(self: *Self) !void {
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
