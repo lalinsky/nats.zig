@@ -3,7 +3,7 @@ const testing = std.testing;
 const nats = @import("nats");
 const utils = @import("utils.zig");
 
-const log = std.log.scoped(.jetstream_stream_test);
+const log = std.log.default;
 
 test "list stream names" {
     const conn = try utils.createDefaultConnection();

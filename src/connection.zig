@@ -36,7 +36,7 @@ const ResponseManager = @import("response_manager.zig").ResponseManager;
 const MAX_CONTROL_LINE_SIZE = @import("parser.zig").MAX_CONTROL_LINE_SIZE;
 const Socket = @import("socket.zig").Socket;
 
-const log = std.log.scoped(.connection);
+const log = @import("log.zig").log;
 
 pub const ServerVersion = struct {
     major: u32 = 0,
