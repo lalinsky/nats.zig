@@ -868,9 +868,14 @@ pub const Connection = struct {
 
         while (!self.should_stop.load(.acquire)) {
             self.readerIteration() catch |err| {
-                // Error occurred, determine whether to reconnect or break
+                // Handle errors from readerIteration
                 switch (err) {
-                    error.ConnectionClosed => break,
+                    error.ShouldStop => break,
+                    error.EndOfStream => {
+                        // Zero read from server - trigger reconnect
+                        self.triggerReconnect(err);
+                        continue;
+                    },
                     else => {
                         // Trigger reconnect for other errors
                         self.triggerReconnect(err);
@@ -902,8 +907,8 @@ pub const Connection = struct {
         };
 
         if (bytes_read == 0) {
-            log.debug("Connection closed by server", .{});
-            return ConnectionError.ConnectionClosed;
+            log.debug("Connection closed by server (EOF)", .{});
+            return error.EndOfStream;
         }
 
         log.debug("Read {} bytes: {s}", .{ bytes_read, buffer[0..bytes_read] });
@@ -922,8 +927,9 @@ pub const Connection = struct {
 
         while (!self.should_stop.load(.acquire)) {
             self.flusherIteration() catch |err| {
-                // Error occurred, determine whether to reconnect or break
+                // Handle errors from flusherIteration
                 switch (err) {
+                    error.ShouldStop => break,
                     error.QueueClosed => break,
                     error.QueueEmpty, error.BufferFrozen => continue,
                     else => {
@@ -1399,22 +1405,23 @@ pub const Connection = struct {
     }
 
     /// Acquires a reference to the socket for safe concurrent use.
-    /// Blocks until a socket becomes available or connection is closed.
+    /// Blocks until a socket becomes available.
     /// The caller MUST call releaseSocket() when done with the socket.
     fn acquireSocket(self: *Self) !Socket {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Wait until socket is available and connection is fully connected
-        while (self.socket == null or self.status != .connected) {
-            if (self.status == .closed) {
-                return error.ConnectionClosed;
-            }
-            self.socket_cond.wait(&self.mutex);
+        // Check should_stop flag first
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
         }
 
-        if (self.status == .closed) {
-            return error.ConnectionClosed;
+        // Wait until socket is available
+        while (self.socket == null) {
+            if (self.should_stop.load(.acquire)) {
+                return error.ShouldStop;
+            }
+            self.socket_cond.wait(&self.mutex);
         }
 
         if (self.socket) |socket| {
