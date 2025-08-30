@@ -574,8 +574,10 @@ pub const Connection = struct {
         }
 
         // Send SUB command via buffer
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+        const allocator = self.scratch.allocator();
+        defer self.resetScratch();
+
+        var buffer = ArrayList(u8).init(allocator);
         if (sub.queue_group) |group| {
             try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, group, sub.sid });
         } else {
@@ -663,8 +665,10 @@ pub const Connection = struct {
         }
 
         // Send UNSUB command
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+        const allocator = self.scratch.allocator();
+        defer self.resetScratch();
+
+        var buffer = ArrayList(u8).init(allocator);
         try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
         try self.bufferWrite(buffer.items);
 
@@ -1043,7 +1047,6 @@ pub const Connection = struct {
 
         // Build CONNECT message with all options
         var buffer = ArrayList(u8).init(allocator);
-        defer buffer.deinit();
 
         // Calculate effective no_responders: enable if server supports headers
         const no_responders = self.options.no_responders and self.server_info.headers;
@@ -1443,8 +1446,10 @@ pub const Connection = struct {
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
 
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+        const allocator = self.scratch.allocator();
+        defer self.resetScratch();
+
+        var buffer = ArrayList(u8).init(allocator);
 
         var iter = self.subscriptions.iterator();
         while (iter.next()) |entry| {
