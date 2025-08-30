@@ -184,12 +184,6 @@ pub const Connection = struct {
     // Main connection mutex (protects most fields)
     mutex: std.Thread.Mutex = .{},
 
-    // Flusher synchronization (protected by main mutex)
-    flusher_stop: bool = false,
-    flusher_signaled: bool = false,
-    flusher_asap: bool = false,
-    flusher_condition: std.Thread.Condition = .{},
-
     // PING/PONG flush tracking (simplified counter approach)
     outgoing_pings: u64 = 0,
     incoming_pongs: u64 = 0,
@@ -379,12 +373,21 @@ pub const Connection = struct {
         self.should_stop.store(true, .release);
         self.status = .closed;
 
-        // Shutdown socket to wake up reader thread (like C library)
+        // Shutdown socket - this will wake up both threads from I/O operations
         if (self.socket) |socket| {
             socket.shutdown(.both) catch |shutdown_err| {
-                log.debug("Socket shutdown failed: {}", .{shutdown_err});
-                // Continue anyway, not critical
+                log.err("Socket shutdown failed: {}", .{shutdown_err});
+                // Continue anyway, they will wake up on timeouts
             };
+        }
+
+        // Close write buffer - this wakes up the flusher thread,
+        // and blocks any further writes
+        self.write_buffer.close();
+
+        // Wait for both threads to release the sockets
+        while (self.socket_refs != 0) {
+            self.socket_unused_cond.wait(&self.mutex);
         }
 
         // Clear pending flushes (wake up any waiting flush() calls)
@@ -402,11 +405,6 @@ pub const Connection = struct {
 
         // Stop flusher thread
         if (self.flusher_thread) |thread| {
-            self.mutex.lock();
-            self.flusher_stop = true;
-            self.flusher_condition.signal();
-            self.mutex.unlock();
-
             thread.join();
             self.flusher_thread = null;
         }
@@ -418,8 +416,8 @@ pub const Connection = struct {
         }
 
         // Reset the buffers
-        self.pending_buffer.reset();
         self.write_buffer.reset();
+        self.pending_buffer.reset();
 
         // Invoke closed callback
         if (self.options.callbacks.closed_cb) |callback| {
@@ -442,12 +440,12 @@ pub const Connection = struct {
             .pool = null,
             .arena = undefined, // we don't need a fully constructed arena for this
         };
-        return self.publishMsgInternal(&msg, null, false);
+        return self.publishMsgInternal(&msg, null);
     }
 
     /// Publishes a message on a subject.
     pub fn publishMsg(self: *Self, msg: *Message) !void {
-        return self.publishMsgInternal(msg, null, false);
+        return self.publishMsgInternal(msg, null);
     }
 
     /// Publishes data on a subject, with a reply subject.
@@ -459,15 +457,15 @@ pub const Connection = struct {
             .pool = null,
             .arena = undefined, // we don't need a fully constructed arena for this
         };
-        return self.publishMsgInternal(&msg, null, true);
+        return self.publishMsgInternal(&msg, null);
     }
 
     /// Publishes a message on a subject, with a reply subject.
     pub fn publishRequestMsg(self: *Self, msg: *Message, reply: []const u8) !void {
-        return self.publishMsgInternal(msg, reply, true);
+        return self.publishMsgInternal(msg, reply);
     }
 
-    fn publishMsgInternal(self: *Self, msg: *Message, reply_override: ?[]const u8, asap: bool) !void {
+    fn publishMsgInternal(self: *Self, msg: *Message, reply_override: ?[]const u8) !void {
         if (msg.subject.len == 0) {
             return error.InvalidSubject;
         }
@@ -528,7 +526,7 @@ pub const Connection = struct {
             },
         }
 
-        try self.bufferWrite(buffer.items, asap);
+        try self.bufferWrite(buffer.items);
 
         if (reply_to_use) |reply| {
             log.debug("Published message to {s} with reply {s}", .{ msg.subject, reply });
@@ -565,7 +563,7 @@ pub const Connection = struct {
         } else {
             try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
         }
-        try self.bufferWrite(buffer.items, false);
+        try self.bufferWrite(buffer.items);
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
@@ -650,7 +648,7 @@ pub const Connection = struct {
         var buffer = ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
         try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
-        try self.bufferWrite(buffer.items, false);
+        try self.bufferWrite(buffer.items);
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
     }
@@ -664,7 +662,7 @@ pub const Connection = struct {
         }
 
         // Buffer the PING first (can fail on allocation)
-        try self.bufferWrite("PING\r\n", true); // ASAP=true for immediate flush
+        try self.bufferWrite("PING\r\n");
 
         // Only increment counter after successful buffering
         self.outgoing_pings += 1;
@@ -917,41 +915,9 @@ pub const Connection = struct {
     fn flusherLoop(self: *Self) void {
         log.debug("Flusher loop started", .{});
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        while (true) {
-            // Wait for signal or stop condition
-            while (!self.flusher_signaled and !self.flusher_stop) {
-                self.flusher_condition.wait(&self.mutex);
-            }
-
-            if (self.flusher_stop) {
-                log.debug("Flusher stopping...", .{});
-                break;
-            }
-
-            if (!self.flusher_asap) {
-                // Give a chance to accumulate more requests (like C implementation)
-                self.flusher_condition.timedWait(&self.mutex, 1_000_000) catch {}; // 1ms in nanoseconds
-            }
-
-            self.flusher_signaled = false;
-            self.flusher_asap = false;
-
-            if (self.status != .connected) {
-                // No need to flush if not connected
-                continue;
-            }
-
-            // Unlock before I/O like C _readLoop
-            self.mutex.unlock();
-            defer self.mutex.lock(); // Re-lock at end of iteration
-
+        while (!self.should_stop.load(.acquire)) {
             const socket = self.acquireSocket() catch break orelse break;
             defer self.releaseSocket();
-
-            // Write all buffered data using vectored I/O
 
             var iovecs: [16]std.posix.iovec_const = undefined;
             const gather = self.write_buffer.gatherReadVectors(&iovecs, 1000) catch |err| switch (err) {
@@ -967,23 +933,29 @@ pub const Connection = struct {
                 continue;
             }
 
-            socket.stream.writevAll(gather.iovecs) catch |err| {
-                log.err("Flush error: {}", .{err});
+            const bytes_written = socket.writev(gather.iovecs) catch |err| {
+                log.err("Write error: {}", .{err});
                 self.triggerReconnect(err);
                 break;
             };
 
-            gather.consume(gather.total_bytes) catch |err| {
-                log.err("Consume error: {}", .{err});
-                // This should not happen in normal operation
-                break;
+            gather.consume(bytes_written) catch |err| switch (err) {
+                error.BufferReset => {
+                    // This can only happen during reconnection, we can assume
+                    // it's safe to continue, since we will have a new buffer
+                    continue;
+                },
+                error.ConcurrentConsumer => {
+                    // This is a bug, we can't handle it
+                    std.debug.panic("Concurrent consumer detected", .{});
+                },
             };
         }
 
         log.debug("Flusher loop exited", .{});
     }
 
-    fn bufferWrite(self: *Self, data: []const u8, asap: bool) !void {
+    fn bufferWrite(self: *Self, data: []const u8) !void {
         // Assume mutex is already held by caller
 
         // If we're reconnecting, buffer the message for later
@@ -991,16 +963,8 @@ pub const Connection = struct {
             return self.pending_buffer.append(data);
         }
 
-        // Buffer and signal flusher (mutex already held)
+        // Buffer the data (mutex already held)
         try self.write_buffer.append(data);
-
-        // Wake up the flusher thread, in the ASAP mode we signal() multiple times
-        // to wake it up from the 1ms delay, if needed
-        if (!self.flusher_signaled or asap) {
-            self.flusher_signaled = true;
-            self.flusher_asap = asap;
-            self.flusher_condition.signal();
-        }
     }
 
     // Parser callback methods
@@ -1118,7 +1082,7 @@ pub const Connection = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        try self.bufferWrite("PONG\r\n", true);
+        try self.bufferWrite("PONG\r\n");
     }
 
     // Reconnection Logic
@@ -1291,10 +1255,6 @@ pub const Connection = struct {
                 };
 
                 // Restart flusher thread for the new connection
-                self.mutex.lock();
-                self.flusher_stop = false;
-                self.flusher_signaled = false;
-                self.mutex.unlock();
 
                 self.flusher_thread = std.Thread.spawn(.{}, flusherLoop, .{self}) catch |err| {
                     log.err("Failed to restart flusher thread: {}", .{err});
