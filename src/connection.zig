@@ -331,12 +331,8 @@ pub const Connection = struct {
         try socket.setReadTimeout(self.options.timeout_ms);
         try socket.setWriteTimeout(self.options.timeout_ms);
 
-        self.socket = socket;
-        self.should_stop.store(false, .monotonic);
-
         // Handle initial handshake (outside mutex) - before setting non-blocking
-        self.processInitialHandshake() catch |err| {
-            self.socket = null;
+        self.processInitialHandshake(socket) catch |err| {
             socket.close();
             self.mutex.lock();
             selected_server.last_error = err;
@@ -347,6 +343,8 @@ pub const Connection = struct {
 
         // Mark successful connection (back under mutex)
         self.mutex.lock();
+        self.socket = socket;
+        self.should_stop.store(false, .monotonic);
         selected_server.did_connect = true;
         selected_server.reconnects = 0; // Reset on success
         self.status = .connected;
@@ -783,8 +781,7 @@ pub const Connection = struct {
         return messages;
     }
 
-    fn processInitialHandshake(self: *Self) !void {
-        const socket = self.socket orelse return ConnectionError.ConnectionClosed;
+    fn processInitialHandshake(self: *Self, socket: Socket) !void {
         const reader = socket.stream.reader();
 
         // Read INFO message
@@ -1239,16 +1236,15 @@ pub const Connection = struct {
                 continue; // Continue loop (mutex still held)
             };
 
-            self.socket = socket;
-            self.should_stop.store(false, .monotonic);
-
             // Handle initial handshake (outside mutex)
-            const handshake_result = self.processInitialHandshake();
+            const handshake_result = self.processInitialHandshake(socket);
 
             self.mutex.lock(); // Re-acquire mutex
 
             if (handshake_result) |_| {
                 // Success! Update connection state (under mutex)
+                self.socket = socket;
+                self.should_stop.store(false, .monotonic);
                 server.did_connect = true;
                 server.reconnects = 0;
                 self.status = .connected;
@@ -1384,8 +1380,11 @@ pub const Connection = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Wait until socket is available or connection is closed
-        while (self.socket == null and self.status != .closed) {
+        // Wait until socket is available and connection is fully connected
+        while (self.socket == null or self.status != .connected) {
+            if (self.status == .closed) {
+                return error.ConnectionClosed;
+            }
             self.socket_cond.wait(&self.mutex);
         }
 
