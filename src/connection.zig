@@ -949,24 +949,30 @@ pub const Connection = struct {
             // Write all buffered data using vectored I/O
 
             var iovecs: [16]std.posix.iovec_const = undefined;
-            const iovec_count = self.write_buffer.gatherReadVectors(&iovecs);
-            if (iovec_count == 0) {
+            const gather = self.write_buffer.gatherReadVectors(&iovecs, 1000) catch |err| switch (err) {
+                error.QueueEmpty, error.BufferFrozen => {
+                    // No data to write or buffer is frozen
+                    continue;
+                },
+                error.QueueClosed => break,
+            };
+
+            if (gather.iovecs.len == 0) {
                 // No data to write
                 continue;
             }
 
-            var total_size: usize = 0;
-            for (iovecs[0..iovec_count]) |iov| {
-                total_size += iov.len;
-            }
-
-            stream.writevAll(iovecs[0..iovec_count]) catch |err| {
+            stream.writevAll(gather.iovecs) catch |err| {
                 log.err("Flush error: {}", .{err});
                 self.triggerReconnect(err);
                 break;
             };
 
-            self.write_buffer.consumeBytesMultiple(total_size);
+            gather.consume(gather.total_bytes) catch |err| {
+                log.err("Consume error: {}", .{err});
+                // This should not happen in normal operation
+                break;
+            };
         }
 
         log.debug("Flusher loop exited", .{});
