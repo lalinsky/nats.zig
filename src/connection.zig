@@ -949,7 +949,7 @@ pub const Connection = struct {
             // Write all buffered data using vectored I/O
 
             var iovecs: [16]std.posix.iovec_const = undefined;
-            const gather = self.write_buffer.gatherReadVectors(&iovecs, 0) catch |err| switch (err) {
+            const gather = self.write_buffer.gatherReadVectors(&iovecs, 1000) catch |err| switch (err) {
                 error.QueueEmpty, error.BufferFrozen => {
                     // No data to write or buffer is frozen
                     continue;
