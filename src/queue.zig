@@ -354,9 +354,6 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 if (self.is_closed and self.items_available == 0) {
                     return PopError.QueueClosed;
                 }
-                if (self.is_frozen) {
-                    return PopError.BufferFrozen;
-                }
             }
 
             // At this point we have data, pop it
@@ -409,9 +406,6 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 if (self.is_closed and self.items_available == 0) {
                     return PopError.QueueClosed;
                 }
-                if (self.is_frozen) {
-                    return PopError.BufferFrozen;
-                }
             } else {
                 // Wait with timeout
                 var timer = std.time.Timer.start() catch unreachable;
@@ -435,9 +429,6 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
                 if (self.is_closed and self.items_available == 0) {
                     return PopError.QueueClosed;
-                }
-                if (self.is_frozen) {
-                    return PopError.BufferFrozen;
                 }
             }
 
@@ -687,6 +678,11 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.mutex.lock();
             defer self.queue.mutex.unlock();
 
+            // Respect freeze: treat as non-blocking read -> return nothing.
+            if (self.queue.is_frozen) {
+                return 0;
+            }
+
             var count: usize = 0;
             var current = self.queue.head;
 
@@ -716,6 +712,9 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         pub fn consumeBytesMultiple(self: *Self, total_bytes: usize) void {
             self.queue.mutex.lock();
             defer self.queue.mutex.unlock();
+
+            // Do not allow consumption while frozen.
+            std.debug.assert(!self.queue.is_frozen);
 
             // Validate that we're not consuming more than available
             if (total_bytes > self.queue.items_available) {
@@ -765,6 +764,14 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             defer first.queue.mutex.unlock();
             second.queue.mutex.lock();
             defer second.queue.mutex.unlock();
+
+            // Respect freeze semantics:
+            if (dest.queue.is_frozen) {
+                return PushError.BufferFrozen;
+            }
+            if (self.queue.is_frozen) {
+                return PushError.BufferFrozen;
+            }
 
             // Use direct fields (don't call methods that relock).
             if (self.queue.items_available == 0) return;
@@ -1442,4 +1449,75 @@ test "ConcurrentWriteBuffer waitForMoreData with closed buffer" {
 
     // waitForMoreData should return QueueClosed error
     try std.testing.expectError(error.QueueClosed, buffer.waitForMoreData(1 * std.time.ns_per_ms));
+}
+
+test "gatherReadVectors respects freeze state" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(64);
+    var buffer = Buffer.init(allocator, .{});
+    defer buffer.deinit();
+
+    // Add data to buffer
+    try buffer.append("Hello, World!");
+
+    // Normal operation should gather vectors
+    var iovecs: [4]std.posix.iovec_const = undefined;
+    const count = buffer.gatherReadVectors(&iovecs);
+    try std.testing.expect(count > 0);
+
+    // Freeze buffer
+    buffer.freeze();
+
+    // gatherReadVectors should return 0 when frozen
+    const frozen_count = buffer.gatherReadVectors(&iovecs);
+    try std.testing.expectEqual(@as(usize, 0), frozen_count);
+}
+
+test "moveToBuffer respects freeze state on source" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(64);
+    var source = Buffer.init(allocator, .{});
+    defer source.deinit();
+
+    var dest = Buffer.init(allocator, .{});
+    defer dest.deinit();
+
+    // Add data to source
+    try source.append("Hello");
+
+    // Freeze source
+    source.freeze();
+
+    // Moving from frozen source should return BufferFrozen
+    try std.testing.expectError(PushError.BufferFrozen, source.moveToBuffer(&dest));
+
+    // Data should still be in source
+    try std.testing.expectEqual(@as(usize, 5), source.getBytesAvailable());
+    try std.testing.expectEqual(@as(usize, 0), dest.getBytesAvailable());
+}
+
+test "moveToBuffer respects freeze state on destination" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(64);
+    var source = Buffer.init(allocator, .{});
+    defer source.deinit();
+
+    var dest = Buffer.init(allocator, .{});
+    defer dest.deinit();
+
+    // Add data to source
+    try source.append("Hello");
+
+    // Freeze destination
+    dest.freeze();
+
+    // Moving to frozen destination should return BufferFrozen
+    try std.testing.expectError(PushError.BufferFrozen, source.moveToBuffer(&dest));
+
+    // Data should still be in source
+    try std.testing.expectEqual(@as(usize, 5), source.getBytesAvailable());
+    try std.testing.expectEqual(@as(usize, 0), dest.getBytesAvailable());
 }
