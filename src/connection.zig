@@ -154,7 +154,7 @@ pub const HandshakeState = enum {
 };
 
 pub const ReconnectOptions = struct {
-    max_reconnect: i32 = 60, // -1 = unlimited
+    max_reconnect: u32 = 60,
     reconnect_wait_ms: u64 = 2000, // milliseconds
     reconnect_jitter_ms: u64 = 100,
     reconnect_jitter_tls_ms: u64 = 1000,
@@ -1301,7 +1301,7 @@ pub const Connection = struct {
 
         var total_attempts: u32 = 0;
         var server_cycle_count: u32 = 0;
-        const max_attempts = @as(u32, @intCast(@max(0, self.options.reconnect.max_reconnect)));
+        const max_attempts = self.options.reconnect.max_reconnect;
 
         // Main reconnection loop (under mutex for state consistency)
         while (total_attempts < max_attempts and self.status == .reconnecting and !self.should_stop.load(.acquire)) {
