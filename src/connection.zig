@@ -873,11 +873,12 @@ pub const Connection = struct {
                 break;
             }
 
-            const socket = self.socket orelse break;
-
             // Unlock before I/O like C _readLoop
             self.mutex.unlock();
             defer self.mutex.lock(); // Re-lock at end of iteration
+
+            const socket = self.acquireSocket() catch break orelse break;
+            defer self.releaseSocket();
 
             // Simple blocking read - shutdown() will wake us up
             const bytes_read = socket.read(&buffer) catch |err| {
@@ -943,11 +944,12 @@ pub const Connection = struct {
                 continue;
             }
 
-            const socket = self.socket orelse break;
-
             // Unlock before I/O like C _readLoop
             self.mutex.unlock();
             defer self.mutex.lock(); // Re-lock at end of iteration
+
+            const socket = self.acquireSocket() catch break orelse break;
+            defer self.releaseSocket();
 
             // Write all buffered data using vectored I/O
 
@@ -1403,11 +1405,15 @@ pub const Connection = struct {
     }
 
     /// Acquires a reference to the socket for safe concurrent use.
-    /// Returns a pointer to the socket if available, null if not connected.
+    /// Returns a pointer to the socket if available, error if closed, null if not connected.
     /// The caller MUST call releaseSocket() when done with the socket.
-    pub fn acquireSocket(self: *Self) ?*Socket {
+    pub fn acquireSocket(self: *Self) ConnectionError!?*Socket {
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        if (self.status == .closed) {
+            return ConnectionError.ConnectionClosed;
+        }
 
         if (self.socket) |*socket_ptr| {
             self.socket_refs += 1;
