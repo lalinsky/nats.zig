@@ -325,10 +325,12 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                     return PopError.QueueEmpty;
                 }
             } else {
+                var timer = std.time.Timer.start() catch unreachable;
                 const timeout_ns = timeout_ms * std.time.ns_per_ms;
 
                 while ((self.items_available == 0 or self.readers_paused) and !self.is_closed) {
-                    self.data_cond.timedWait(&self.mutex, timeout_ns) catch {
+                    const elapsed_ns = timer.read();
+                    if (elapsed_ns >= timeout_ns) {
                         if (self.is_closed and self.items_available == 0) {
                             return PopError.QueueClosed;
                         }
@@ -336,7 +338,10 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                             return PopError.ReadersPaused;
                         }
                         return PopError.QueueEmpty;
-                    };
+                    }
+
+                    const remaining_ns = timeout_ns - elapsed_ns;
+                    self.data_cond.timedWait(&self.mutex, remaining_ns) catch {};
                 }
 
                 if (self.is_closed and self.items_available == 0) {
@@ -402,10 +407,12 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 }
             } else {
                 // Wait with timeout
+                var timer = std.time.Timer.start() catch unreachable;
                 const timeout_ns = timeout_ms * std.time.ns_per_ms;
 
                 while ((self.items_available == 0 or self.readers_paused) and !self.is_closed) {
-                    self.data_cond.timedWait(&self.mutex, timeout_ns) catch {
+                    const elapsed_ns = timer.read();
+                    if (elapsed_ns >= timeout_ns) {
                         if (self.is_closed and self.items_available == 0) {
                             return PopError.QueueClosed;
                         }
@@ -413,7 +420,10 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                             return PopError.ReadersPaused;
                         }
                         return PopError.QueueEmpty;
-                    };
+                    }
+
+                    const remaining_ns = timeout_ns - elapsed_ns;
+                    self.data_cond.timedWait(&self.mutex, remaining_ns) catch {};
                 }
 
                 if (self.is_closed and self.items_available == 0) {
@@ -824,8 +834,16 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
                 return error.QueueClosed;
             }
 
-            // Wait for more data OR resume (if paused), with timeout
-            self.queue.data_cond.timedWait(&self.queue.mutex, timeout_ns) catch {};
+            const initial_data = self.queue.items_available;
+            var timer = std.time.Timer.start() catch unreachable;
+
+            while (self.queue.items_available <= initial_data and !self.queue.is_closed) {
+                const elapsed_ns = timer.read();
+                if (elapsed_ns >= timeout_ns) break;
+
+                const remaining_ns = timeout_ns - elapsed_ns;
+                self.queue.data_cond.timedWait(&self.queue.mutex, remaining_ns) catch {};
+            }
 
             // Check if closed after waiting
             if (self.queue.is_closed) {
