@@ -1376,7 +1376,7 @@ pub const Connection = struct {
     /// Acquires a reference to the socket for safe concurrent use.
     /// Blocks until a socket becomes available or connection is closed.
     /// The caller MUST call releaseSocket() when done with the socket.
-    pub fn acquireSocket(self: *Self) !Socket {
+    fn acquireSocket(self: *Self) !Socket {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -1402,7 +1402,7 @@ pub const Connection = struct {
 
     /// Releases a reference to the socket obtained via acquireSocket().
     /// This must be called for every successful acquireSocket() call.
-    pub fn releaseSocket(self: *Self) void {
+    fn releaseSocket(self: *Self) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
