@@ -121,8 +121,40 @@ pub const ConnectionStatus = enum {
     draining_pubs,
 };
 
+pub const HandshakeState = enum {
+    not_started,
+    waiting_for_info,
+    waiting_for_pong,
+    completed,
+    failed,
+
+    /// Returns true if handshake is currently in progress
+    pub fn isInProgress(self: HandshakeState) bool {
+        return switch (self) {
+            .waiting_for_info, .waiting_for_pong => true,
+            .not_started, .completed, .failed => false,
+        };
+    }
+
+    /// Returns true if handshake is waiting for any server response
+    pub fn isWaiting(self: HandshakeState) bool {
+        return switch (self) {
+            .waiting_for_info, .waiting_for_pong => true,
+            .not_started, .completed, .failed => false,
+        };
+    }
+
+    /// Returns true if handshake has finished (either success or failure)
+    pub fn isFinished(self: HandshakeState) bool {
+        return switch (self) {
+            .completed, .failed => true,
+            .not_started, .waiting_for_info, .waiting_for_pong => false,
+        };
+    }
+};
+
 pub const ReconnectOptions = struct {
-    max_reconnect: i32 = 60, // -1 = unlimited
+    max_reconnect: u32 = 60,
     reconnect_wait_ms: u64 = 2000, // milliseconds
     reconnect_jitter_ms: u64 = 100,
     reconnect_jitter_tls_ms: u64 = 1000,
@@ -159,7 +191,8 @@ pub const Connection = struct {
     // Network
     socket: ?Socket = null,
     socket_refs: u64 = 0,
-    socket_cond: std.Thread.Condition = .{},
+    socket_available_cond: std.Thread.Condition = .{}, // Signals when socket becomes available
+    socket_unused_cond: std.Thread.Condition = .{}, // Signals when socket is no longer in use
 
     // Server management
     server_pool: ServerPool,
@@ -168,18 +201,18 @@ pub const Connection = struct {
     server_info_arena: std.heap.ArenaAllocator, // Arena for server_info strings
 
     // Reconnection state
-    reconnect_thread: ?std.Thread = null,
-    in_reconnect: i32 = 0, // Regular int like C library, protected by mutex
-    abort_reconnect: bool = false, // Like C library's nc->ar flag, protected by mutex
     pending_buffer: WriteBuffer,
 
-    // Reconnection coordination
-    reconnect_condition: std.Thread.Condition = .{},
+    // Handshake state
+    handshake_state: HandshakeState = .not_started,
+    handshake_error: ?anyerror = null,
+    handshake_cond: std.Thread.Condition = .{},
 
     // Threading
     reader_thread: ?std.Thread = null,
     flusher_thread: ?std.Thread = null,
     should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    should_stop_cond: std.Thread.Condition = .{}, // Signals when should_stop becomes true
 
     // Main connection mutex (protects most fields)
     mutex: std.Thread.Mutex = .{},
@@ -228,6 +261,16 @@ pub const Connection = struct {
 
     pub fn deinit(self: *Self) void {
         self.close();
+
+        // Join threads (they should have been signaled to stop by close())
+        if (self.flusher_thread) |thread| {
+            thread.join();
+            self.flusher_thread = null;
+        }
+        if (self.reader_thread) |thread| {
+            thread.join();
+            self.reader_thread = null;
+        }
 
         // Release global dispatcher pool
         if (self.dispatcher_pool != null) {
@@ -301,13 +344,13 @@ pub const Connection = struct {
     fn connectToServer(self: *Self) !void {
         // This is called from initial connect() - needs to manage its own mutex
         self.mutex.lock();
+        defer self.mutex.unlock();
 
         self.status = .connecting;
 
         // Get server using C library's GetNextServer algorithm
         const selected_server = try self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) orelse {
             self.status = .disconnected;
-            self.mutex.unlock();
             return ConnectionError.ConnectionFailed;
         };
 
@@ -315,128 +358,93 @@ pub const Connection = struct {
         self.current_server = selected_server;
         selected_server.reconnects += 1;
 
-        self.mutex.unlock();
-
-        // Establish TCP connection (outside mutex like C library)
-        log.debug("Connecting to server: {s}:{d}", .{ selected_server.parsed_url.host, selected_server.parsed_url.port });
-        const socket = Socket.connect(self.allocator, selected_server.parsed_url.host, selected_server.parsed_url.port) catch |err| {
-            self.mutex.lock();
-            selected_server.last_error = err;
+        // Establish connection (under mutex for consistent state management)
+        self.establishConnection(selected_server) catch {
             self.status = .disconnected;
-            self.mutex.unlock();
             return ConnectionError.ConnectionFailed;
         };
 
-        try socket.setKeepAlive(true);
-        try socket.setReadTimeout(self.options.timeout_ms);
-        try socket.setWriteTimeout(self.options.timeout_ms);
-
-        // Handle initial handshake (outside mutex) - before setting non-blocking
-        self.processInitialHandshake(socket) catch |err| {
-            socket.close();
-            self.mutex.lock();
-            selected_server.last_error = err;
-            self.status = .disconnected;
-            self.mutex.unlock();
-            return err;
-        };
-
-        // Mark successful connection (back under mutex)
-        self.mutex.lock();
-        self.socket = socket;
+        // Socket is now established and connection state is set up
         self.should_stop.store(false, .monotonic);
-        selected_server.did_connect = true;
-        selected_server.reconnects = 0; // Reset on success
-        self.status = .connected;
+        self.status = .connecting;
 
-        // Reset reconnection state (under mutex)
-        self.abort_reconnect = false;
-
-        // Wake up any threads waiting for socket
-        self.socket_cond.broadcast();
-        self.mutex.unlock();
-
-        // Socket will be blocking - shutdown() will wake up reader
-
-        // Start reader thread
+        // Start reader thread - it will handle the handshake
         self.reader_thread = try std.Thread.spawn(.{}, readerLoop, .{self});
 
         // Start flusher thread
         self.flusher_thread = try std.Thread.spawn(.{}, flusherLoop, .{self});
 
+        // Wait for handshake completion
+        self.waitForHandshakeCompletion() catch |err| {
+            // Clean up failed handshake state and close socket
+            self.status = .disconnected;
+            self.cleanupFailedConnection(err, true);
+
+            return err;
+        };
+
+        // Handshake completed successfully
+        self.status = .connected;
+
         log.info("Connected successfully to {s}", .{selected_server.parsed_url.full_url});
     }
 
+    /// Close the connection
     pub fn close(self: *Self) void {
+        // Call the callback outside of mutex, if provided
+        var callback: @TypeOf(self.options.callbacks.closed_cb) = null;
+        defer if (callback) |cb| cb(self);
+
         self.mutex.lock();
+        defer self.mutex.unlock();
+
         if (self.status == .closed) {
-            self.mutex.unlock();
             return;
         }
 
         log.info("Closing connection", .{});
-        self.should_stop.store(true, .release);
-        self.status = .closed;
 
-        // Detach the old socket from the connection and wake waiters
+        // Mark the connection as permanently closed
+        self.status = .closed;
+        self.should_stop.store(true, .release);
+        self.should_stop_cond.broadcast(); // Wake up any threads waiting on should_stop
+
+        // Detach socket immediately and wake any waiting threads
         const old_socket = self.socket;
         self.socket = null;
-        self.socket_cond.broadcast();
+        self.socket_available_cond.broadcast();
 
-        // Interrupt any ongoing I/O and close the old socket
+        // Shutdown socket to interrupt ongoing I/O (but don't close yet)
         if (old_socket) |socket| {
             socket.shutdown(.both) catch |shutdown_err| {
                 log.err("Socket shutdown failed: {}", .{shutdown_err});
             };
+        }
+
+        // Close write buffer - this wakes up the flusher thread
+        self.pending_buffer.close();
+        self.write_buffer.close();
+
+        // Wait for both threads to release the socket with timeout
+        self.waitForSocketUnused(self.options.timeout_ms * 2) catch {
+            log.warn("Timeout waiting for socket references to be released during close", .{});
+        };
+
+        // Now safe to close socket since threads are done with it
+        if (old_socket) |socket| {
             socket.close();
         }
 
-        // Close write buffer - this wakes up the flusher thread,
-        // and blocks any further writes
-        self.write_buffer.close();
+        // Wake up any waiting flush() calls
+        self.pong_condition.broadcast();
 
-        // Wait for both threads to release the sockets with timeout
-        if (!self.waitForSocketUnused(self.options.timeout_ms * 2)) {
-            log.warn("Timeout waiting for socket references to be released during close", .{});
-        }
-
-        // Clear pending flushes (wake up any waiting flush() calls)
-        self.clearPendingFlushes();
-
-        // Get reconnection thread reference and wake it up
-        const reconnect_thread = self.reconnect_thread;
-        self.reconnect_condition.signal();
-        self.mutex.unlock();
-
-        // Wait for reconnection thread to complete
-        if (reconnect_thread) |thread| {
-            thread.join();
-        }
-
-        // Stop flusher thread
-        if (self.flusher_thread) |thread| {
-            thread.join();
-            self.flusher_thread = null;
-        }
-
-        // Wait for reader thread to complete (it will handle stream cleanup)
-        if (self.reader_thread) |thread| {
-            thread.join();
-            self.reader_thread = null;
-        }
-
-        // Reset the buffers
-        self.write_buffer.reset();
-        self.pending_buffer.reset();
-
-        // Invoke closed callback
-        if (self.options.callbacks.closed_cb) |callback| {
-            callback(self);
+        // Make sure we invoke the closed callback
+        if (self.options.callbacks.closed_cb) |cb| {
+            callback = cb;
         }
     }
 
     pub fn getStatus(self: *Self) ConnectionStatus {
-        // Lock like C library status getter
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.status;
@@ -566,8 +574,10 @@ pub const Connection = struct {
         }
 
         // Send SUB command via buffer
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+        const allocator = self.scratch.allocator();
+        defer self.resetScratch();
+
+        var buffer = ArrayList(u8).init(allocator);
         if (sub.queue_group) |group| {
             try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, group, sub.sid });
         } else {
@@ -655,8 +665,10 @@ pub const Connection = struct {
         }
 
         // Send UNSUB command
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+        const allocator = self.scratch.allocator();
+        defer self.resetScratch();
+
+        var buffer = ArrayList(u8).init(allocator);
         try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
         try self.bufferWrite(buffer.items);
 
@@ -783,97 +795,71 @@ pub const Connection = struct {
         return messages;
     }
 
-    fn processInitialHandshake(self: *Self, socket: Socket) !void {
-        const reader = socket.stream.reader();
+    fn establishConnection(self: *Self, server: *Server) !void {
+        // Establish TCP connection
+        log.debug("Connecting to server: {s}:{d}", .{ server.parsed_url.host, server.parsed_url.port });
+        const socket = Socket.connect(self.allocator, server.parsed_url.host, server.parsed_url.port) catch |err| {
+            log.err("Failed to connect to server: {}", .{err});
+            return err;
+        };
+        errdefer socket.close();
 
-        // Read INFO message
-        var info_buffer: [4096]u8 = undefined;
-        if (try reader.readUntilDelimiterOrEof(info_buffer[0..], '\n')) |info_line| {
-            log.debug("Received: {s}", .{info_line});
-
-            if (!std.mem.startsWith(u8, info_line, "INFO ")) {
-                return ConnectionError.InvalidProtocol;
-            }
-
-            // Extract and parse the JSON part after "INFO "
-            const json_start = "INFO ".len;
-            if (info_line.len > json_start) {
-                const info_json = std.mem.trim(u8, info_line[json_start..], " \r\n");
-                try self.processInfo(info_json);
-            }
-        } else {
-            return ConnectionError.ConnectionClosed;
-        }
-
-        // Build CONNECT message with all options
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-
-        // Calculate effective no_responders: enable if server supports headers
-        const no_responders = self.options.no_responders and self.server_info.headers;
-
-        // Get client name from options or use default
-        const client_name = self.options.name orelse build_options.name;
-
-        // Create CONNECT JSON object
-        const connect_obj = .{
-            .verbose = self.options.verbose,
-            .pedantic = false,
-            .headers = true,
-            .no_responders = no_responders,
-            .name = client_name,
-            .lang = build_options.lang,
-            .version = build_options.version,
-            .protocol = 1,
+        // Configure socket options (fail hard if these don't work)
+        socket.setKeepAlive(true) catch |err| {
+            log.err("Failed to set keep alive: {}", .{err});
+            return err;
+        };
+        socket.setReadTimeout(self.options.timeout_ms) catch |err| {
+            log.err("Failed to set read timeout: {}", .{err});
+            return err;
+        };
+        socket.setWriteTimeout(self.options.timeout_ms) catch |err| {
+            log.err("Failed to set write timeout: {}", .{err});
+            return err;
         };
 
-        try buffer.writer().writeAll("CONNECT ");
-        try std.json.stringify(connect_obj, .{}, buffer.writer());
-        try buffer.writer().writeAll("\r\n");
-        const connect_msg = buffer.items;
+        // Setup connection state (assuming mutex is held by caller)
+        self.socket = socket;
+        self.socket_available_cond.broadcast();
 
-        try socket.stream.writeAll(connect_msg);
-        try socket.stream.writeAll("PING\r\n");
+        server.did_connect = true;
+        server.reconnects = 0;
 
-        // Wait for PONG (or +OK then PONG if verbose)
-        var response_buffer: [256]u8 = undefined;
-        if (try reader.readUntilDelimiterOrEof(response_buffer[0..], '\n')) |response| {
-            log.debug("Handshake response: {s}", .{response});
+        // Reset parser for clean state
+        self.parser.reset();
 
-            // Handle +OK if verbose
-            if (std.mem.startsWith(u8, response, "+OK")) {
-                // Read next line for PONG
-                if (try reader.readUntilDelimiterOrEof(response_buffer[0..], '\n')) |pong_line| {
-                    if (!std.mem.startsWith(u8, pong_line, "PONG")) {
-                        return ConnectionError.InvalidProtocol;
-                    }
-                } else {
-                    return ConnectionError.ConnectionClosed;
-                }
-            } else if (!std.mem.startsWith(u8, response, "PONG")) {
-                if (std.mem.startsWith(u8, response, "-ERR")) {
-                    return ConnectionError.AuthFailed;
-                }
-                return ConnectionError.InvalidProtocol;
-            }
-        } else {
-            return ConnectionError.ConnectionClosed;
-        }
+        // Reset ping/pong counters for fresh connection
+        self.outgoing_pings = 0;
+        self.incoming_pongs = 0;
 
-        log.debug("Handshake completed successfully", .{});
+        // Initialize handshake state
+        self.handshake_state = .waiting_for_info;
+        self.handshake_error = null;
+
+        // Unfreeze write buffer now that we have a working socket
+        self.write_buffer.unfreeze();
     }
 
     fn readerLoop(self: *Self) void {
         log.debug("Reader loop started", .{});
 
         while (!self.should_stop.load(.acquire)) {
+            self.mutex.lock();
+            const status = self.status;
+            self.mutex.unlock();
+
+            if (status == .reconnecting) {
+                self.doReconnect();
+                continue;
+            }
+
             self.readerIteration() catch |err| {
                 // Handle errors from readerIteration
                 switch (err) {
                     error.ShouldStop => break,
                     else => {
-                        // Trigger reconnect for all other errors (including EndOfStream)
-                        self.triggerReconnect(err);
+                        // Mark that reconnection is needed
+                        self.markNeedsReconnect(err);
                         continue;
                     },
                 }
@@ -910,10 +896,13 @@ pub const Connection = struct {
 
         // Parse the received data
         self.parser.parse(self, buffer[0..bytes_read]) catch |err| {
-            log.err("Parser error: {}", .{err});
-            // Reset parser state on error to prevent corruption
-            self.parser.reset();
-            return err;
+            switch (err) {
+                error.ShouldStop => return err,
+                else => {
+                    log.err("Parser error: {}", .{err});
+                    return err;
+                },
+            }
         };
     }
 
@@ -926,8 +915,8 @@ pub const Connection = struct {
                 switch (err) {
                     error.ShouldStop => break,
                     else => {
-                        // Trigger reconnect for other errors
-                        self.triggerReconnect(err);
+                        // Mark that reconnection is needed
+                        self.markNeedsReconnect(err);
                         continue;
                     },
                 }
@@ -938,11 +927,11 @@ pub const Connection = struct {
     }
 
     fn flusherIteration(self: *Self) !void {
-        // First try to gather data from buffer - this will block when frozen during reconnection
+        // Try to gather data from buffer first
         var iovecs: [16]std.posix.iovec_const = undefined;
         const gather = self.write_buffer.gatherReadVectors(&iovecs, self.options.timeout_ms) catch |err| switch (err) {
             error.QueueEmpty, error.BufferFrozen => {
-                // No data to write or buffer is frozen during reconnection
+                // No data to write or buffer frozen during reconnection
                 return;
             },
             error.QueueClosed => return error.ShouldStop,
@@ -995,6 +984,9 @@ pub const Connection = struct {
 
     // Parser callback methods
     pub fn processMsg(self: *Self, message: *Message) !void {
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
 
         // Retain subscription while holding lock, then release lock
         self.subs_mutex.lock();
@@ -1048,7 +1040,48 @@ pub const Connection = struct {
         }
     }
 
+    /// Sends CONNECT and PING during handshake (assumes mutex is held)
+    fn sendConnectAndPing(self: *Self) !void {
+        const allocator = self.scratch.allocator();
+        defer self.resetScratch();
+
+        // Build CONNECT message with all options
+        var buffer = ArrayList(u8).init(allocator);
+
+        // Calculate effective no_responders: enable if server supports headers
+        const no_responders = self.options.no_responders and self.server_info.headers;
+
+        // Get client name from options or use default
+        const client_name = self.options.name orelse build_options.name;
+
+        // Create CONNECT JSON object
+        const connect_obj = .{
+            .verbose = self.options.verbose,
+            .pedantic = false,
+            .headers = true,
+            .no_responders = no_responders,
+            .name = client_name,
+            .lang = build_options.lang,
+            .version = build_options.version,
+            .protocol = 1,
+        };
+
+        try buffer.writer().writeAll("CONNECT ");
+        try std.json.stringify(connect_obj, .{}, buffer.writer());
+        try buffer.writer().writeAll("\r\n");
+        try buffer.writer().writeAll("PING\r\n");
+
+        // Send via buffer (mutex already held)
+        try self.bufferWrite(buffer.items);
+
+        log.debug("Sent CONNECT+PING during handshake", .{});
+    }
+
     pub fn processInfo(self: *Self, info_json: []const u8) !void {
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
+
         log.debug("Received INFO: {s}", .{info_json});
 
         self.mutex.lock();
@@ -1069,6 +1102,21 @@ pub const Connection = struct {
 
         log.debug("Parsed server info: id={?s}, version={?s} ({}.{}.{}), max_payload={}, headers={}", .{ self.server_info.server_id, self.server_info.version, self.server_info.parsed_version.major, self.server_info.parsed_version.minor, self.server_info.parsed_version.update, self.server_info.max_payload, self.server_info.headers });
 
+        // Handle handshake if we're waiting for INFO
+        if (self.handshake_state == .waiting_for_info) {
+            self.sendConnectAndPing() catch |err| {
+                log.err("Failed to send CONNECT+PING: {}", .{err});
+                self.handshake_error = err;
+                self.handshake_state = .failed;
+                self.handshake_cond.broadcast();
+                return;
+            };
+
+            self.handshake_state = .waiting_for_pong;
+            self.handshake_cond.broadcast(); // Signal state change
+            log.debug("Handshake: sent CONNECT+PING, waiting for PONG", .{});
+        }
+
         // Add discovered servers to pool if any connect_urls were provided
         if (self.server_info.connect_urls) |urls| {
             for (urls) |url| {
@@ -1085,19 +1133,72 @@ pub const Connection = struct {
     }
 
     pub fn processOK(self: *Self) !void {
-        _ = self;
-        log.debug("Received +OK", .{});
-    }
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
 
-    pub fn processErr(self: *Self, err_msg: []const u8) !void {
-        _ = self;
-        log.err("Received -ERR: {s}", .{err_msg});
-    }
-
-    pub fn processPong(self: *Self) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        log.debug("Received +OK", .{});
+
+        // Handle verbose handshake mode - +OK is expected before PONG
+        if (self.handshake_state == .waiting_for_pong and self.options.verbose) {
+            log.debug("Received +OK during verbose handshake, waiting for PONG", .{});
+            // Continue waiting for PONG - no state change needed
+            return;
+        }
+
+        // Regular +OK handling (acknowledgment of successful command)
+        // No action needed for now
+    }
+
+    pub fn processErr(self: *Self, err_msg: []const u8) !void {
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
+
+        // Call the callback outside of mutex, if provided
+        var callback: @TypeOf(self.options.callbacks.error_cb) = null;
+        defer if (callback) |cb| cb(self, err_msg);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        log.err("Received -ERR: {s}", .{err_msg});
+
+        // Handle handshake failure
+        if (self.handshake_state.isWaiting()) {
+            self.handshake_error = ConnectionError.AuthFailed;
+            self.handshake_state = .failed;
+            self.handshake_cond.broadcast(); // Signal handshake failure
+            log.debug("Handshake failed due to server error: {s}", .{err_msg});
+            return;
+        }
+
+        // Invoke error callback (in defer outside of mutex)
+        if (self.options.callbacks.error_cb) |cb| {
+            callback = cb;
+        }
+    }
+
+    pub fn processPong(self: *Self) !void {
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Handle handshake completion
+        if (self.handshake_state == .waiting_for_pong) {
+            self.handshake_state = .completed;
+            self.handshake_cond.broadcast(); // Signal handshake completion
+            log.debug("Handshake completed successfully", .{});
+            return;
+        }
+
+        // Regular PONG handling for flush() calls
         self.incoming_pongs += 1;
         self.pong_condition.broadcast();
 
@@ -1105,6 +1206,10 @@ pub const Connection = struct {
     }
 
     pub fn processPing(self: *Self) !void {
+        if (self.should_stop.load(.acquire)) {
+            return error.ShouldStop;
+        }
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -1113,128 +1218,142 @@ pub const Connection = struct {
 
     // Reconnection Logic
 
-    fn clearPendingFlushes(self: *Self) void {
-        // Reset counters on reconnection/close
-        self.outgoing_pings = 0;
-        self.incoming_pongs = 0;
-        self.pong_condition.broadcast();
-    }
-
-    fn triggerReconnect(self: *Self, err: anyerror) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // Check if we should start reconnection (like C library's _processOpError)
-        if (!self.options.reconnect.allow_reconnect or
-            self.status != .connected or // Only trigger if we were connected
-            self.in_reconnect > 0)
-        {
-            return; // Already reconnecting or not connected
-        }
-
-        log.info("Connection lost ({}), starting reconnection", .{err});
-
-        // Mark current server as having an error (already under connection mutex)
+    /// Performs cleanup after connection failure while keeping the Connection
+    /// object intact for potential reconnection attempts.
+    /// This should be called with mutex already held.
+    ///
+    /// @param err The error that caused the connection failure
+    /// @param close_socket Whether to close the socket (false for markNeedsReconnect)
+    fn cleanupFailedConnection(self: *Self, err: anyerror, close_socket: bool) void {
+        // Update server tracking if we have a current server
         if (self.current_server) |server| {
+            server.did_connect = false;
             server.last_error = err;
-            server.reconnects += 1;
+
+            // Only increment reconnects for active connection loss
+            if (self.status == .reconnecting) {
+                server.reconnects += 1;
+            }
         }
 
-        self.status = .reconnecting;
-        self.abort_reconnect = false; // Reset abort flag when starting reconnection
-
-        // Freeze write buffer to prevent flusher from writing to dead socket
-        self.write_buffer.freeze();
-
-        // Detach the old socket from the connection and wake waiters
+        // Detach socket and wake any threads waiting for it
         const old_socket = self.socket;
         self.socket = null;
-        self.socket_cond.broadcast();
+        self.socket_available_cond.broadcast();
 
-        // Interrupt any ongoing I/O and wait for socket to be released
+        // Always freeze write buffer (idempotent operation)
+        self.write_buffer.freeze();
+
+        // Wake up any waiting flush() calls
+        self.pong_condition.broadcast();
+
+        // Reset handshake state
+        self.handshake_state = .not_started;
+        self.handshake_error = null;
+        self.handshake_cond.broadcast();
+
+        // Handle socket cleanup
         if (old_socket) |socket| {
+            // Always shutdown first to interrupt ongoing I/O
             socket.shutdown(.both) catch |shutdown_err| {
                 log.debug("Socket shutdown failed: {}", .{shutdown_err});
             };
-            // Wait for socket references to be released before closing
-            const wait_ms: u64 = @min(self.options.timeout_ms, 200);
-            _ = self.waitForSocketUnused(wait_ms);
-            socket.close();
+
+            // Close socket if requested
+            if (close_socket) {
+                socket.close();
+            }
+        }
+    }
+
+    fn markNeedsReconnect(self: *Self, err: anyerror) void {
+        var needs_close = false;
+        defer if (needs_close) self.close();
+
+        var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
+        defer if (callback) |cb| cb(self);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        log.info("markNeedsReconnect", .{});
+
+        if (self.status != .connected) {
+            log.info("Connection not in connected state", .{});
+            return;
         }
 
-        // Reset parser state for clean reconnection
-        self.parser.reset();
+        // Check if reconnection is allowed
+        if (!self.options.reconnect.allow_reconnect) {
+            log.info("Connection lost: {} (reconnect disabled)", .{err});
+            needs_close = true;
+            return;
+        }
 
-        // Clear pending flushes (wake up any waiting flush() calls)
-        self.clearPendingFlushes();
+        log.info("Connection lost: {}", .{err});
+
+        // Perform connection cleanup (don't close socket - let reconnect handle it)
+        self.status = .reconnecting;
+        self.cleanupFailedConnection(err, false);
 
         // Invoke disconnected callback
-        if (self.options.callbacks.disconnected_cb) |callback| {
-            callback(self);
+        if (self.options.callbacks.disconnected_cb) |cb| {
+            callback = cb;
         }
-
-        // Start reconnection thread (protected by mutex like C library)
-        const thread = std.Thread.spawn(.{}, doReconnect, .{self}) catch |spawn_err| {
-            log.err("Failed to start reconnection thread: {}", .{spawn_err});
-            self.status = .closed;
-            self.socket_cond.broadcast(); // Wake up any threads waiting for socket
-            return;
-        };
-
-        // Successfully created thread - update state (under mutex like C library)
-        self.reconnect_thread = thread;
-        self.in_reconnect += 1; // Increment like C library
     }
 
     fn doReconnect(self: *Self) void {
-        log.info("Reconnection loop started", .{});
+        var needs_close = false;
+        defer if (needs_close) self.close();
 
-        // Follow C library pattern: main loop under mutex with selective releases
+        var callback: @TypeOf(self.options.callbacks.reconnected_cb) = null;
+        defer if (callback) |cb| cb(self);
+
         self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Check if we should still reconnect (could have been closed)
+        if (self.status != .reconnecting) {
+            return;
+        }
+
+        log.debug("Starting reconnection", .{});
+
+        // Close old socket if still attached (reader thread owns socket lifecycle)
+        const old_socket = self.socket;
+        self.socket = null;
+        self.socket_available_cond.broadcast(); // Wake any threads waiting for socket
+
+        if (old_socket) |socket| {
+            socket.close();
+        }
 
         var total_attempts: u32 = 0;
         var server_cycle_count: u32 = 0;
+        const max_attempts = self.options.reconnect.max_reconnect;
 
-        // Main reconnection loop (like C library: continue while status OK and servers available)
-        while (self.status != .closed and !self.abort_reconnect and self.server_pool.getSize() > 0) {
-
-            // Check if we've exhausted our reconnection attempts (under mutex)
-            if (self.options.reconnect.max_reconnect >= 0 and
-                total_attempts >= self.options.reconnect.max_reconnect)
-            {
-                log.err("Max reconnection attempts ({}) reached", .{self.options.reconnect.max_reconnect});
+        // Main reconnection loop (under mutex for state consistency)
+        while (total_attempts < max_attempts and self.status == .reconnecting and !self.should_stop.load(.acquire)) {
+            const server_count = self.server_pool.getSize();
+            if (server_count == 0) {
+                log.err("No servers available for reconnection", .{});
                 break;
             }
 
-            // Sleep after trying all servers once (under mutex like C library)
-            if (server_cycle_count >= self.server_pool.getSize() and total_attempts > 0) {
+            // Sleep after trying all servers once (using condition variable for responsive shutdown)
+            if (server_cycle_count >= server_count and total_attempts > 0) {
                 server_cycle_count = 0;
-
-                // Check if connection closed before sleep (like C library)
-                if (self.status == .closed) break;
-
                 const delay_ms = self.calculateReconnectDelay(total_attempts);
                 log.debug("Waiting {}ms before next reconnection attempt", .{delay_ms});
 
-                // Exception: Custom delay callback outside mutex (like C library)
-                if (self.options.reconnect.custom_reconnect_delay_cb) |callback| {
-                    self.mutex.unlock(); // Release for callback
-                    const custom_delay = callback(total_attempts);
-                    self.mutex.lock(); // Re-acquire after callback
+                const timeout_ns = delay_ms * std.time.ns_per_ms;
+                self.should_stop_cond.timedWait(&self.mutex, timeout_ns) catch {};
 
-                    const timeout_ns = custom_delay * std.time.ns_per_ms;
-                    self.reconnect_condition.timedWait(&self.mutex, timeout_ns) catch {};
-                } else {
-                    // Regular sleep with interruptible wait (under mutex)
-                    const timeout_ns = delay_ms * std.time.ns_per_ms;
-                    self.reconnect_condition.timedWait(&self.mutex, timeout_ns) catch {};
-                }
+                // Re-check status after wait (either timeout or signaled)
+                if (self.status != .reconnecting or self.should_stop.load(.acquire)) break;
             }
 
-            // Check if connection closed after potential sleep (like C library)
-            if (self.status == .closed) break;
-
-            // Get next server using C library algorithm (under mutex)
+            // Get next server
             const server = self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) catch |err| {
                 log.err("Server pool error: {}", .{err});
                 break;
@@ -1243,115 +1362,65 @@ pub const Connection = struct {
                 break;
             };
 
-            // Update current server and track attempt (under mutex)
             self.current_server = server;
             server.reconnects += 1;
             total_attempts += 1;
             server_cycle_count += 1;
-
             self.status = .connecting;
 
-            // Exception: Release mutex for actual TCP connection (like C library)
-            self.mutex.unlock();
+            // Try to establish connection (no mutex needed for network I/O)
+            log.debug("Reconnection attempt {} to {s}:{d}", .{ total_attempts, server.parsed_url.host, server.parsed_url.port });
 
-            // Establish TCP connection (outside mutex)
-            log.debug("Connecting to server: {s}:{d} (reconnect attempt {})", .{ server.parsed_url.host, server.parsed_url.port, total_attempts });
-            const socket = Socket.connect(self.allocator, server.parsed_url.host, server.parsed_url.port) catch |err| {
-                self.mutex.lock(); // Re-acquire for error handling
-                server.last_error = err;
+            self.establishConnection(server) catch |err| {
+                self.status = .reconnecting;
                 log.debug("Reconnection attempt {} failed: {}", .{ total_attempts, err });
-                continue; // Continue loop (mutex still held)
+                continue;
             };
 
-            // Handle initial handshake (outside mutex)
-            const handshake_result = self.processInitialHandshake(socket);
+            // Socket established and connection state set up by establishConnection
+            self.status = .connecting;
 
-            self.mutex.lock(); // Re-acquire mutex
-
-            if (handshake_result) |_| {
-                // Success! Update connection state (under mutex)
-                self.socket = socket;
-                self.should_stop.store(false, .monotonic);
-                server.did_connect = true;
-                server.reconnects = 0;
-                self.status = .connected;
-                self.abort_reconnect = false;
-
-                // Unfreeze write buffer now that we have a working socket
-                self.write_buffer.unfreeze();
-
-                // Wake up any threads waiting for socket
-                self.socket_cond.broadcast();
-
-                // Clean up thread state
-                self.in_reconnect -= 1;
-                const thread = self.reconnect_thread;
-                self.reconnect_thread = null;
-
-                self.mutex.unlock(); // Release before operations that don't need mutex
-
-                // Reader thread continues running during reconnection - no need to restart it
-
-                // Re-establish subscriptions (outside mutex like C library)
-                self.resendSubscriptions() catch |err| {
-                    log.err("Failed to re-establish subscriptions: {}", .{err});
-                    // Continue anyway, connection is established
-                };
-
-                // Flush pending messages (outside mutex like C library)
-                self.pending_buffer.moveToBuffer(&self.write_buffer) catch |err| {
-                    log.warn("Failed to flush pending messages: {}", .{err});
-                    // Continue anyway, connection is established
-                };
-
-                // Exception: Invoke callback outside mutex (like C library)
-                if (self.options.callbacks.reconnected_cb) |callback| {
-                    callback(self);
-                }
-
-                log.info("Reconnection successful after {} attempts", .{total_attempts});
-
-                // Detach thread for cleanup (like C library)
-                if (thread) |t| {
-                    t.detach();
-                }
-                return;
-            } else |err| {
-                // Handshake failed, clean up and continue
-                self.socket = null;
-                socket.close();
-                server.last_error = err;
+            // Wait for handshake completion
+            self.waitForHandshakeCompletion() catch |err| {
+                // Clean up failed handshake state and close socket
                 self.status = .reconnecting;
-                log.debug("Handshake failed for reconnection attempt {}: {}", .{ total_attempts, err });
+                self.cleanupFailedConnection(err, true);
 
-                // Check if connection closed or should abort after error (like C library)
-                if (self.status == .closed or self.abort_reconnect) {
-                    break;
-                }
-                // Continue loop (mutex still held)
+                log.debug("Reconnect handshake failed: {}", .{err});
+                continue;
+            };
+
+            // Handshake completed successfully!
+            self.status = .connected;
+
+            // Re-establish subscriptions
+            self.resendSubscriptions() catch |err| {
+                log.err("Failed to re-establish subscriptions: {}", .{err});
+            };
+
+            // Flush pending messages
+            self.pending_buffer.moveToBuffer(&self.write_buffer) catch |err| {
+                log.warn("Failed to flush pending messages: {}", .{err});
+            };
+
+            // Invoke callback (in defer outside of mutex)
+            if (self.options.callbacks.reconnected_cb) |cb| {
+                callback = cb;
             }
+
+            log.info("Reconnection successful after {} attempts", .{total_attempts});
+            return;
         }
 
-        // Failed to reconnect - cleanup (under mutex like C library)
-        log.err("Reconnection failed after {} attempts", .{total_attempts});
-
-        self.in_reconnect -= 1; // Always decrement
-        self.reconnect_thread = null;
-        self.status = .closed;
-        self.abort_reconnect = true; // Mark as aborted
-
-        // Wake up any threads waiting for socket
-        self.socket_cond.broadcast();
-
-        // Close write buffer since reconnection failed completely
-        self.write_buffer.close();
-
-        self.mutex.unlock(); // Final release
-
-        // Exception: Invoke callback outside mutex (like C library)
-        if (self.options.callbacks.closed_cb) |callback| {
-            callback(self);
+        // Reconnection ended (either failed or closed)
+        if (self.should_stop.load(.acquire)) {
+            log.debug("Reconnection aborted due to connection close", .{});
+        } else {
+            log.err("Reconnection failed after {} attempts", .{total_attempts});
         }
+
+        // Will call close() in defer (outside of the mutex)
+        needs_close = true;
     }
 
     fn calculateReconnectDelay(self: *Self, attempts: u32) u64 {
@@ -1377,8 +1446,10 @@ pub const Connection = struct {
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
 
-        var buffer = ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+        const allocator = self.scratch.allocator();
+        defer self.resetScratch();
+
+        var buffer = ArrayList(u8).init(allocator);
 
         var iter = self.subscriptions.iterator();
         while (iter.next()) |entry| {
@@ -1404,20 +1475,20 @@ pub const Connection = struct {
     /// Blocks until a socket becomes available.
     /// The caller MUST call releaseSocket() when done with the socket.
     fn acquireSocket(self: *Self) !Socket {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // Check should_stop flag first
+        // Check should_stop flag before acquiring the mutex
         if (self.should_stop.load(.acquire)) {
             return error.ShouldStop;
         }
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         // Wait until socket is available
         while (self.socket == null) {
             if (self.should_stop.load(.acquire)) {
                 return error.ShouldStop;
             }
-            self.socket_cond.wait(&self.mutex);
+            self.socket_available_cond.wait(&self.mutex);
         }
 
         if (self.socket) |socket| {
@@ -1438,35 +1509,76 @@ pub const Connection = struct {
             self.socket_refs -= 1;
             // Only broadcast when all references are released
             if (self.socket_refs == 0) {
-                self.socket_cond.broadcast();
+                self.socket_unused_cond.broadcast();
             }
         }
     }
 
+    /// Waits for handshake completion with timeout (assumes mutex is held)
+    /// Returns error if handshake fails or times out
+    fn waitForHandshakeCompletion(self: *Self) !void {
+        const timeout_ns = self.options.timeout_ms * std.time.ns_per_ms;
+        var timer = std.time.Timer.start() catch {
+            log.err("Failed to start timer for handshake", .{});
+            return ConnectionError.ConnectionFailed;
+        };
+
+        while (!self.handshake_state.isFinished()) {
+            log.debug("Handshake state: {}", .{self.handshake_state});
+
+            const elapsed_ns = timer.read();
+            if (elapsed_ns >= timeout_ns) {
+                log.err("Handshake timeout", .{});
+                self.handshake_error = ConnectionError.Timeout;
+                self.handshake_state = .failed;
+                self.handshake_cond.broadcast(); // Signal the state change
+                break;
+            }
+
+            const remaining_ns = timeout_ns - elapsed_ns;
+            self.handshake_cond.timedWait(&self.mutex, remaining_ns) catch {};
+
+            // Check for early termination conditions
+            if (self.should_stop.load(.acquire)) {
+                self.handshake_error = ConnectionError.ConnectionClosed;
+                self.handshake_state = .failed;
+                self.handshake_cond.broadcast(); // Signal the state change
+                break;
+            }
+        }
+
+        // Return the handshake error if it failed, or void if successful
+        if (self.handshake_state == .completed) {
+            return;
+        } else {
+            return self.handshake_error orelse ConnectionError.ConnectionFailed;
+        }
+    }
+
     /// Internal helper for waiting for socket to become unused (assumes mutex is held)
-    fn waitForSocketUnused(self: *Self, timeout_ms: u64) bool {
+    fn waitForSocketUnused(self: *Self, timeout_ms: u64) !void {
         if (self.socket_refs == 0) {
-            return true; // Already unused
+            return; // Already unused
         }
 
         if (timeout_ms == 0) {
-            return false; // Non-blocking, socket still in use
+            return error.Timeout; // Non-blocking, socket still in use
         }
 
-        var timer = std.time.Timer.start() catch return false;
+        var timer = std.time.Timer.start() catch return error.Timeout;
         const timeout_ns = timeout_ms * std.time.ns_per_ms;
 
         while (self.socket_refs > 0) {
             const elapsed_ns = timer.read();
             if (elapsed_ns >= timeout_ns) {
-                return false; // Timeout occurred
+                return error.Timeout;
             }
 
             const remaining_ns = timeout_ns - elapsed_ns;
-            self.socket_cond.timedWait(&self.mutex, remaining_ns) catch {};
+            self.socket_unused_cond.timedWait(&self.mutex, remaining_ns) catch {};
         }
 
-        return true; // Socket became unused
+        // Socket became unused
     }
 
     // JetStream support
