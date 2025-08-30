@@ -810,18 +810,49 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.total_chunks -= moved_chunk_count;
         }
 
-        /// Wait for data to become available (blocks until any data arrives)
-        pub fn waitForData(self: *Self) !void {
+        /// Wait for data to become available with timeout (0 = non-blocking)
+        pub fn waitForData(self: *Self, timeout_ms: u64) !void {
             self.queue.mutex.lock();
             defer self.queue.mutex.unlock();
 
-            // Wait while no data AND (readers paused OR no data), until not closed
-            while ((self.queue.items_available == 0 or self.queue.readers_paused) and !self.queue.is_closed) {
-                self.queue.data_cond.wait(&self.queue.mutex);
+            // Fast path for non-blocking
+            if (timeout_ms == 0) {
+                if (self.queue.is_closed and self.queue.items_available == 0) {
+                    return error.QueueClosed;
+                }
+                if (self.queue.readers_paused) {
+                    return error.ReadersPaused;
+                }
+                if (self.queue.items_available == 0) {
+                    return error.QueueEmpty;
+                }
+                return;
             }
 
-            if (self.queue.is_closed) {
+            var timer = std.time.Timer.start() catch unreachable;
+            const timeout_ns = timeout_ms * std.time.ns_per_ms;
+
+            while ((self.queue.items_available == 0 or self.queue.readers_paused) and !self.queue.is_closed) {
+                const elapsed_ns = timer.read();
+                if (elapsed_ns >= timeout_ns) {
+                    if (self.queue.is_closed and self.queue.items_available == 0) {
+                        return error.QueueClosed;
+                    }
+                    if (self.queue.readers_paused) {
+                        return error.ReadersPaused;
+                    }
+                    return error.QueueEmpty;
+                }
+
+                const remaining_ns = timeout_ns - elapsed_ns;
+                self.queue.data_cond.timedWait(&self.queue.mutex, remaining_ns) catch {};
+            }
+
+            if (self.queue.is_closed and self.queue.items_available == 0) {
                 return error.QueueClosed;
+            }
+            if (self.queue.readers_paused) {
+                return error.ReadersPaused;
             }
         }
 
@@ -1350,7 +1381,7 @@ test "ConcurrentWriteBuffer waitForData smoke test" {
     try buffer.append("Hello");
 
     // Should return immediately since data is available
-    try buffer.waitForData();
+    try buffer.waitForData(1000);
 
     // Verify data is still there
     try std.testing.expect(buffer.hasData());
@@ -1368,7 +1399,7 @@ test "ConcurrentWriteBuffer waitForData with closed buffer" {
     buffer.close();
 
     // waitForData should return QueueClosed error
-    try std.testing.expectError(error.QueueClosed, buffer.waitForData());
+    try std.testing.expectError(error.QueueClosed, buffer.waitForData(1000));
 }
 
 test "ConcurrentWriteBuffer waitForMoreData smoke test" {
