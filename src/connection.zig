@@ -378,15 +378,17 @@ pub const Connection = struct {
         self.should_stop.store(true, .release);
         self.status = .closed;
 
-        // Wake up any threads waiting for socket
+        // Detach the old socket from the connection and wake waiters
+        const old_socket = self.socket;
+        self.socket = null;
         self.socket_cond.broadcast();
 
-        // Shutdown socket - this will wake up both threads from I/O operations
-        if (self.socket) |socket| {
+        // Interrupt any ongoing I/O and close the old socket
+        if (old_socket) |socket| {
             socket.shutdown(.both) catch |shutdown_err| {
                 log.err("Socket shutdown failed: {}", .{shutdown_err});
-                // Continue anyway, they will wake up on timeouts
             };
+            socket.close();
         }
 
         // Close write buffer - this wakes up the flusher thread,
