@@ -120,7 +120,7 @@ pub const ServerPool = struct {
     }
 
     // Core server selection algorithm matching C library's natsSrvPool_GetNextServer
-    pub fn getNextServer(self: *ServerPool, max_reconnect: i32, current_server: ?*const Server) !?*Server {
+    pub fn getNextServer(self: *ServerPool, max_reconnect: u32, current_server: ?*const Server) !?*Server {
         if (current_server == null) {
             // Initial connection case - C library would return pool->srvrs[0] directly
             return self.getFirstServer();
@@ -129,7 +129,7 @@ pub const ServerPool = struct {
         const current_srv = current_server.?;
 
         // Decide server fate based on reconnect attempts (like C library lines 96-107)
-        if (max_reconnect < 0 or current_srv.reconnects < max_reconnect) {
+        if (current_srv.reconnects < max_reconnect) {
             // Remove current server and move it to back (like C library)
             // Remove using the stored key and get the mutable server back
             const removed_server = self.servers.fetchSwapRemove(current_srv.key).?;
@@ -191,10 +191,10 @@ test "server pool basic operations" {
     try std.testing.expect(pool.getSize() == 3);
 
     // Test initial server selection
-    const server1 = try pool.getNextServer(-1, null);
+    const server1 = try pool.getNextServer(100, null);
     try std.testing.expect(server1 != null);
 
-    const server2 = try pool.getNextServer(-1, server1);
+    const server2 = try pool.getNextServer(100, server1);
     try std.testing.expect(server2 != null);
     try std.testing.expect(server2 != server1);
 
@@ -240,7 +240,7 @@ test "server removal on max reconnects" {
     _ = try pool.addServer("nats://localhost:4222", false);
     _ = try pool.addServer("nats://localhost:4223", false);
 
-    const server1 = try pool.getNextServer(-1, null);
+    const server1 = try pool.getNextServer(100, null);
     try std.testing.expect(server1 != null);
 
     // Set server to max reconnects
