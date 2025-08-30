@@ -274,15 +274,15 @@ pub const Connection = struct {
         }
         self.subscriptions.deinit();
 
-        // Clean up write buffer
+        // Clean up the buffers
+        self.pending_buffer.deinit();
         self.write_buffer.deinit();
 
         // Clean up response manager
         self.response_manager.deinit();
 
-        // Clean up server pool and pending buffer
+        // Clean up server pool
         self.server_pool.deinit();
-        self.pending_buffer.deinit();
 
         // Clean up server info arena
         self.server_info_arena.deinit();
@@ -510,8 +510,9 @@ pub const Connection = struct {
         self.abort_reconnect = true;
         self.reconnect_condition.signal();
 
-        // Clear pending buffer
-        self.pending_buffer.clear();
+        // Reset the buffers
+        self.pending_buffer.reset();
+        self.write_buffer.reset();
     }
 
     pub fn getStatus(self: *Self) ConnectionStatus {
