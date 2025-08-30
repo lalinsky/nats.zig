@@ -389,8 +389,15 @@ pub const Connection = struct {
         log.info("Connected successfully to {s}", .{selected_server.parsed_url.full_url});
     }
 
-    /// Internal close method - assumes mutex is already held
-    fn closeInternal(self: *Self) void {
+    /// Close the connection
+    pub fn close(self: *Self) void {
+        // Call the callback outside of mutex, if provided
+        var callback: @TypeOf(self.options.callbacks.closed_cb) = null;
+        defer if (callback) |cb| cb(self);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         if (self.status == .closed) {
             return;
         }
@@ -431,17 +438,10 @@ pub const Connection = struct {
         // Wake up any waiting flush() calls
         self.pong_condition.broadcast();
 
-        // Invoke closed callback
-        if (self.options.callbacks.closed_cb) |callback| {
-            callback(self);
+        // Make sure we invoke the closed callback
+        if (self.options.callbacks.closed_cb) |cb| {
+            callback = cb;
         }
-    }
-
-    pub fn close(self: *Self) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        self.closeInternal();
     }
 
     pub fn getStatus(self: *Self) ConnectionStatus {
@@ -1137,6 +1137,10 @@ pub const Connection = struct {
     }
 
     pub fn processErr(self: *Self, err_msg: []const u8) !void {
+        // Call the callback outside of mutex, if provided
+        var callback: @TypeOf(self.options.callbacks.error_cb) = null;
+        defer if (callback) |cb| cb(self, err_msg);
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -1151,19 +1155,9 @@ pub const Connection = struct {
             return;
         }
 
-        // Regular error handling - invoke error callback if set
-        if (self.options.callbacks.error_cb) |callback| {
-            // Need to clone the error message since it might be freed after this function
-            const owned_err_msg = self.allocator.dupe(u8, err_msg) catch {
-                log.warn("Failed to allocate memory for error message callback", .{});
-                return;
-            };
-            defer self.allocator.free(owned_err_msg);
-
-            // Release mutex before callback to avoid deadlock
-            self.mutex.unlock();
-            defer self.mutex.lock();
-            callback(self, owned_err_msg);
+        // Invoke error callback (in defer outside of mutex)
+        if (self.options.callbacks.error_cb) |cb| {
+            callback = cb;
         }
     }
 
@@ -1244,6 +1238,12 @@ pub const Connection = struct {
     }
 
     fn markNeedsReconnect(self: *Self, err: anyerror) void {
+        var needs_close = false;
+        defer if (needs_close) self.close();
+
+        var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
+        defer if (callback) |cb| cb(self);
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -1257,7 +1257,7 @@ pub const Connection = struct {
         // Check if reconnection is allowed
         if (!self.options.reconnect.allow_reconnect) {
             log.info("Connection lost: {} (reconnect disabled)", .{err});
-            self.closeInternal();
+            needs_close = true;
             return;
         }
 
@@ -1268,12 +1268,18 @@ pub const Connection = struct {
         self.cleanupFailedConnection(err, false);
 
         // Invoke disconnected callback
-        if (self.options.callbacks.disconnected_cb) |callback| {
-            callback(self);
+        if (self.options.callbacks.disconnected_cb) |cb| {
+            callback = cb;
         }
     }
 
     fn doReconnect(self: *Self) void {
+        var needs_close = false;
+        defer if (needs_close) self.close();
+
+        var callback: @TypeOf(self.options.callbacks.reconnected_cb) = null;
+        defer if (callback) |cb| cb(self);
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -1368,9 +1374,9 @@ pub const Connection = struct {
                 log.warn("Failed to flush pending messages: {}", .{err});
             };
 
-            // Invoke callback
-            if (self.options.callbacks.reconnected_cb) |callback| {
-                callback(self);
+            // Invoke callback (in defer outside of mutex)
+            if (self.options.callbacks.reconnected_cb) |cb| {
+                callback = cb;
             }
 
             log.info("Reconnection successful after {} attempts", .{total_attempts});
@@ -1384,7 +1390,8 @@ pub const Connection = struct {
             log.err("Reconnection failed after {} attempts", .{total_attempts});
         }
 
-        self.closeInternal();
+        // Will call close() in defer (outside of the mutex)
+        needs_close = true;
     }
 
     fn calculateReconnectDelay(self: *Self, attempts: u32) u64 {
