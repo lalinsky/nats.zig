@@ -1127,12 +1127,17 @@ pub const Connection = struct {
         // Freeze write buffer to prevent flusher from writing to dead socket
         self.write_buffer.freeze();
 
-        // Shutdown socket to interrupt any ongoing reads (like C natsSock_Shutdown)
-        if (self.socket) |socket| {
+        // Detach the old socket from the connection and wake waiters
+        const old_socket = self.socket;
+        self.socket = null;
+        self.socket_cond.broadcast();
+
+        // Interrupt any ongoing I/O and close the old socket
+        if (old_socket) |socket| {
             socket.shutdown(.both) catch |shutdown_err| {
                 log.debug("Socket shutdown failed: {}", .{shutdown_err});
-                // Continue anyway, not critical
             };
+            socket.close();
         }
 
         // Reset parser state for clean reconnection
