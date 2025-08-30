@@ -1133,6 +1133,9 @@ pub const Connection = struct {
         self.status = .reconnecting;
         self.abort_reconnect = false; // Reset abort flag when starting reconnection
 
+        // Freeze write buffer to prevent flusher from writing to dead socket
+        self.write_buffer.freeze();
+
         // Shutdown socket to interrupt any ongoing reads (like C natsSock_Shutdown)
         if (self.socket) |socket| {
             socket.shutdown(.both) catch |shutdown_err| {
@@ -1256,6 +1259,9 @@ pub const Connection = struct {
                 self.status = .connected;
                 self.abort_reconnect = false;
 
+                // Unfreeze write buffer now that we have a working socket
+                self.write_buffer.unfreeze();
+
                 // Clean up thread state
                 self.in_reconnect -= 1;
                 const thread = self.reconnect_thread;
@@ -1325,6 +1331,9 @@ pub const Connection = struct {
         self.reconnect_thread = null;
         self.status = .closed;
         self.abort_reconnect = true; // Mark as aborted
+
+        // Close write buffer since reconnection failed completely
+        self.write_buffer.close();
 
         self.mutex.unlock(); // Final release
 
