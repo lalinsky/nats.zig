@@ -498,6 +498,9 @@ pub const Connection = struct {
 
         log.info("Closing connection", .{});
 
+        self.pending_buffer.close();
+        self.write_buffer.close();
+
         self.closeSocket();
         self.stopThreads();
 
@@ -943,16 +946,10 @@ pub const Connection = struct {
                 continue;
             }
 
-            if (!self.flusher_asap and !self.options.send_asap) {
-                // Give a chance to accumulate more requests
-                log.info("[flusher] 1ms delay", .{});
-                self.flusher_condition.timedWait(&self.mutex, 1 * std.time.ns_per_ms) catch {};
-            }
-
             self.flusher_signaled = false;
             self.flusher_asap = false;
 
-            log.info("[flusher] waiting for mutex", .{});
+            // NOTE: we are explicitly migrating away from the 1ms delay, it's not worth it
 
             // Unlock before I/O
             self.mutex.unlock();
@@ -965,23 +962,15 @@ pub const Connection = struct {
                 continue;
             }
 
-            log.info("[flusher] writing", .{});
-
             // Write all buffered data using vectored I/O
-            socket.writevAll(iovecs[0..iovec_count]) catch |err| {
-                log.err("Flush error: {}", .{err});
+            const bytes_written = socket.writev(iovecs[0..iovec_count]) catch |err| {
+                log.err("[flusher] write error: {}", .{err});
                 self.processConnectionError(err);
                 continue;
             };
 
-            var total_size: usize = 0;
-            for (iovecs[0..iovec_count]) |iov| {
-                log.debug("Writing {} bytes: {s}", .{ iov.len, iov.base[0..iov.len] });
-                total_size += iov.len;
-            }
-            self.write_buffer.consumeBytesMultiple(total_size);
-
-            log.info("[flusher] wrote {} bytes", .{total_size});
+            log.info("[flusher] wrote {} bytes", .{bytes_written});
+            self.write_buffer.consumeBytesMultiple(bytes_written);
         }
 
         log.debug("Flusher thread exited", .{});

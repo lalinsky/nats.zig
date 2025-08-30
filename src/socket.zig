@@ -1,3 +1,16 @@
+// Copyright 2025 Lukas Lalinsky
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 const std = @import("std");
 const assert = std.debug.assert;
 
@@ -17,34 +30,17 @@ pub const Socket = struct {
         return .{ .stream = stream };
     }
 
-    pub fn write(s: Socket, buf: []const u8) WriteError!usize {
-        return s.stream.write(buf);
-    }
-
-    pub fn writeAll(s: Socket, buf: []const u8) WriteError!void {
-        return s.stream.writeAll(buf);
-    }
-
-    pub fn read(s: Socket, buf: []u8) ReadError!usize {
-        return s.stream.read(buf);
-    }
-
-    pub fn readAtLeast(s: Socket, buffer: []u8, len: usize) ReadError!usize {
-        return s.stream.readAtLeast(buffer, len);
-    }
-
-    pub fn readAll(s: Socket, buf: []u8) ReadError!void {
-        return s.stream.readAll(buf);
-    }
-
-    pub fn shutdown(s: Socket, how: ShutdownHow) ShutdownError!void {
-        try std.posix.shutdown(s.stream.handle, how);
-    }
-
+    /// Closes the socket.
     pub fn close(s: Socket) void {
         s.stream.close();
     }
 
+    /// Shuts down the socket, unblocking any pending reads or writes.
+    pub fn shutdown(s: Socket, how: ShutdownHow) ShutdownError!void {
+        try std.posix.shutdown(s.stream.handle, how);
+    }
+
+    /// Sets the socket to non-blocking mode.
     pub fn setNonBlocking(s: Socket) !void {
         const current_flags = try std.posix.fcntl(s.stream.handle, std.posix.F.GETFL, 0);
 
@@ -52,15 +48,38 @@ pub const Socket = struct {
         _ = try std.posix.fcntl(s.stream.handle, std.posix.F.SETFL, new_flags);
     }
 
-    pub fn reader(s: Socket) std.net.Stream.Reader {
-        return s.stream.reader();
+    /// Sets the socket read timeout.
+    pub fn setReadTimeout(s: Socket, timeout_ms: u64) !void {
+        const timeout = std.time.timespec{
+            .tv_sec = @divFloor(timeout_ms, std.time.ms_per_s),
+            .tv_nsec = @mod(timeout_ms, std.time.ms_per_s) * std.time.ns_per_s,
+        };
+        try std.posix.setsockopt(s.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &timeout);
     }
 
-    pub fn writevAll(s: Socket, iovecs: []std.posix.iovec_const) WriteError!void {
-        return s.stream.writevAll(iovecs);
+    /// Sets the socket write timeout.
+    pub fn setWriteTimeout(s: Socket, timeout_ms: u64) !void {
+        const timeout = std.time.timespec{
+            .tv_sec = @divFloor(timeout_ms, std.time.ms_per_s),
+            .tv_nsec = @mod(timeout_ms, std.time.ms_per_s) * std.time.ns_per_s,
+        };
+        try std.posix.setsockopt(s.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, &timeout);
     }
 
-    pub fn readUntilDelimiterOrEof(s: Socket, buf: []u8, delimiter: u8) (ReadError || error{StreamTooLong})!?[]u8 {
-        return s.stream.reader().readUntilDelimiterOrEof(buf, delimiter);
+    /// Reads data from the socket and returns the number of bytes read.
+    pub fn read(s: Socket, buf: []u8) ReadError!usize {
+        return s.stream.read(buf);
+    }
+
+    /// Writes data to the socket and returns the number of bytes written.
+    /// The operation is atomic, if it returns an error, no data was written.
+    pub fn write(s: Socket, buf: []const u8) WriteError!usize {
+        return s.stream.write(buf);
+    }
+
+    /// Writes data to the socket using multiple buffers and returns the number of bytes written.
+    /// The operation is atomic, if it returns an error, no data was written.
+    pub fn writev(s: Socket, iovecs: []std.posix.iovec_const) WriteError!usize {
+        return s.stream.writev(iovecs);
     }
 };
