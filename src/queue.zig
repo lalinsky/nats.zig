@@ -583,7 +583,7 @@ pub fn VectorGather(comptime T: type, comptime chunk_size: usize) type {
 
     return struct {
         reset_id: u64,
-        first_chunk: ?*Chunk,
+        first_chunk: *Chunk,
         iovecs: []std.posix.iovec_const,
         total_bytes: usize,
         buffer: *ConcurrentWriteBuffer(chunk_size),
@@ -700,7 +700,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             var count: usize = 0;
             var total_bytes: usize = 0;
             var current = self.queue.head;
-            const first_chunk = current;
+            const first_chunk = current.?; // Safe: waitForDataInternal ensures data exists
 
             while (current) |chunk| {
                 if (count >= iovecs.len) break;
