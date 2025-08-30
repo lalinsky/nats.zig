@@ -22,7 +22,7 @@ const nuid = @import("nuid.zig");
 const Connection = @import("connection.zig").Connection;
 const ConnectionError = @import("connection.zig").ConnectionError;
 
-const log = std.log.scoped(.response_manager);
+const log = @import("log.zig").log;
 
 const SingleResponseResult = struct {
     msg: ?*Message = null,

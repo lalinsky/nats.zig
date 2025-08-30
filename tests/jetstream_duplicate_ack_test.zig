@@ -3,7 +3,7 @@ const testing = std.testing;
 const nats = @import("nats");
 const utils = @import("utils.zig");
 
-const log = std.log.scoped(.jetstream_duplicate_ack_test);
+const log = std.log.default;
 
 test "ack should succeed on first call" {
     const conn = try utils.createDefaultConnection();

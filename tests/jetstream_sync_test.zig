@@ -3,7 +3,7 @@ const testing = std.testing;
 const nats = @import("nats");
 const utils = @import("utils.zig");
 
-const log = std.log.scoped(.jetstream_sync_test);
+const log = std.log.default;
 
 test "JetStream synchronous subscription basic functionality" {
     const conn = try utils.createDefaultConnection();

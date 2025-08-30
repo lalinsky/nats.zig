@@ -2,7 +2,7 @@ const std = @import("std");
 const nats = @import("nats");
 const utils = @import("utils.zig");
 
-const log = std.log.scoped(.testing);
+const log = std.log.default;
 
 test "connect" {
     const conn = try utils.createDefaultConnection();

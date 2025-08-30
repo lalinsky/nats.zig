@@ -2,7 +2,7 @@ const std = @import("std");
 const nats = @import("nats");
 const utils = @import("utils.zig");
 
-const log = std.log.scoped(.request_reply_test);
+const log = std.log.default;
 
 // Echo handler function for basic request/reply testing
 fn echoHandler(msg: *nats.Message, connection: *nats.Connection) void {
