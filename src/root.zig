@@ -26,6 +26,7 @@ pub const Dispatcher = @import("dispatcher.zig").Dispatcher;
 pub const DispatcherPool = @import("dispatcher.zig").DispatcherPool;
 pub const ServerPool = @import("server_pool.zig").ServerPool;
 pub const Server = @import("server_pool.zig").Server;
+pub const Socket = @import("socket.zig").Socket;
 pub const inbox = @import("inbox.zig");
 
 // JetStream types
