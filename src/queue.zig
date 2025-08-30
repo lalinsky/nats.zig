@@ -318,11 +318,8 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             self.data_cond.signal();
         }
 
-        /// Pop a single item with timeout (0 = non-blocking)
-        pub fn pop(self: *Self, timeout_ms: u64) PopError!T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
+        /// Internal helper to wait for data availability with timeout handling
+        fn waitForDataInternal(self: *Self, timeout_ms: u64) PopError!void {
             // Fast path for non-blocking (timeout_ms == 0)
             if (timeout_ms == 0) {
                 if (self.is_closed and self.items_available == 0) {
@@ -334,7 +331,19 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 if (self.items_available == 0) {
                     return PopError.QueueEmpty;
                 }
+                return;
+            } else if (timeout_ms == std.math.maxInt(u64)) {
+                // Wait indefinitely
+                while ((self.items_available == 0 or self.is_frozen) and !self.is_closed) {
+                    self.data_cond.wait(&self.mutex);
+                }
+
+                if (self.is_closed and self.items_available == 0) {
+                    return PopError.QueueClosed;
+                }
+                return;
             } else {
+                // Wait with timeout
                 var timer = std.time.Timer.start() catch unreachable;
                 const timeout_ns = timeout_ms * std.time.ns_per_ms;
 
@@ -357,7 +366,16 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 if (self.is_closed and self.items_available == 0) {
                     return PopError.QueueClosed;
                 }
+                return;
             }
+        }
+
+        /// Pop a single item with timeout (0 = non-blocking)
+        pub fn pop(self: *Self, timeout_ms: u64) PopError!T {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            try self.waitForDataInternal(timeout_ms);
 
             // At this point we have data, pop it
             const chunk = self.head orelse return PopError.QueueEmpty;
@@ -389,51 +407,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            // Fast path for non-blocking (timeout_ms == 0)
-            if (timeout_ms == 0) {
-                if (self.is_closed and self.items_available == 0) {
-                    return PopError.QueueClosed;
-                }
-                if (self.is_frozen) {
-                    return PopError.BufferFrozen;
-                }
-                if (self.items_available == 0) {
-                    return PopError.QueueEmpty;
-                }
-            } else if (timeout_ms == std.math.maxInt(u64)) {
-                // Wait indefinitely
-                while ((self.items_available == 0 or self.is_frozen) and !self.is_closed) {
-                    self.data_cond.wait(&self.mutex);
-                }
-
-                if (self.is_closed and self.items_available == 0) {
-                    return PopError.QueueClosed;
-                }
-            } else {
-                // Wait with timeout
-                var timer = std.time.Timer.start() catch unreachable;
-                const timeout_ns = timeout_ms * std.time.ns_per_ms;
-
-                while ((self.items_available == 0 or self.is_frozen) and !self.is_closed) {
-                    const elapsed_ns = timer.read();
-                    if (elapsed_ns >= timeout_ns) {
-                        if (self.is_closed and self.items_available == 0) {
-                            return PopError.QueueClosed;
-                        }
-                        if (self.is_frozen) {
-                            return PopError.BufferFrozen;
-                        }
-                        return PopError.QueueEmpty;
-                    }
-
-                    const remaining_ns = timeout_ns - elapsed_ns;
-                    self.data_cond.timedWait(&self.mutex, remaining_ns) catch {};
-                }
-
-                if (self.is_closed and self.items_available == 0) {
-                    return PopError.QueueClosed;
-                }
-            }
+            try self.waitForDataInternal(timeout_ms);
 
             const chunk = self.head orelse return PopError.QueueEmpty;
             const available = chunk.availableToRead();
@@ -720,51 +694,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.mutex.lock();
             defer self.queue.mutex.unlock();
 
-            // Wait for data if needed, following same pattern as getSlice
-            if (timeout_ms == 0) {
-                if (self.queue.is_closed and self.queue.items_available == 0) {
-                    return PopError.QueueClosed;
-                }
-                if (self.queue.is_frozen) {
-                    return PopError.BufferFrozen;
-                }
-                if (self.queue.items_available == 0) {
-                    return PopError.QueueEmpty;
-                }
-            } else if (timeout_ms == std.math.maxInt(u64)) {
-                // Wait indefinitely
-                while ((self.queue.items_available == 0 or self.queue.is_frozen) and !self.queue.is_closed) {
-                    self.queue.data_cond.wait(&self.queue.mutex);
-                }
-
-                if (self.queue.is_closed and self.queue.items_available == 0) {
-                    return PopError.QueueClosed;
-                }
-            } else {
-                // Wait with timeout
-                var timer = std.time.Timer.start() catch unreachable;
-                const timeout_ns = timeout_ms * std.time.ns_per_ms;
-
-                while ((self.queue.items_available == 0 or self.queue.is_frozen) and !self.queue.is_closed) {
-                    const elapsed_ns = timer.read();
-                    if (elapsed_ns >= timeout_ns) {
-                        if (self.queue.is_closed and self.queue.items_available == 0) {
-                            return PopError.QueueClosed;
-                        }
-                        if (self.queue.is_frozen) {
-                            return PopError.BufferFrozen;
-                        }
-                        return PopError.QueueEmpty;
-                    }
-
-                    const remaining_ns = timeout_ns - elapsed_ns;
-                    self.queue.data_cond.timedWait(&self.queue.mutex, remaining_ns) catch {};
-                }
-
-                if (self.queue.is_closed and self.queue.items_available == 0) {
-                    return PopError.QueueClosed;
-                }
-            }
+            try self.queue.waitForDataInternal(timeout_ms);
 
             // At this point we have data and are not frozen - gather vectors
             var count: usize = 0;
@@ -778,7 +708,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
                 const slice = chunk.getReadSlice();
                 if (slice.len > 0) {
                     iovecs[count] = .{
-                        .base = @constCast(slice.ptr),
+                        .base = slice.ptr,
                         .len = slice.len,
                     };
                     total_bytes += slice.len;
@@ -915,45 +845,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.mutex.lock();
             defer self.queue.mutex.unlock();
 
-            // Fast path for non-blocking
-            if (timeout_ms == 0) {
-                if (self.queue.is_closed and self.queue.items_available == 0) {
-                    return error.QueueClosed;
-                }
-                if (self.queue.is_frozen) {
-                    return error.BufferFrozen;
-                }
-                if (self.queue.items_available == 0) {
-                    return error.QueueEmpty;
-                }
-                return;
-            }
-
-            var timer = std.time.Timer.start() catch unreachable;
-            const timeout_ns = timeout_ms * std.time.ns_per_ms;
-
-            while ((self.queue.items_available == 0 or self.queue.is_frozen) and !self.queue.is_closed) {
-                const elapsed_ns = timer.read();
-                if (elapsed_ns >= timeout_ns) {
-                    if (self.queue.is_closed and self.queue.items_available == 0) {
-                        return error.QueueClosed;
-                    }
-                    if (self.queue.is_frozen) {
-                        return error.BufferFrozen;
-                    }
-                    return error.QueueEmpty;
-                }
-
-                const remaining_ns = timeout_ns - elapsed_ns;
-                self.queue.data_cond.timedWait(&self.queue.mutex, remaining_ns) catch {};
-            }
-
-            if (self.queue.is_closed and self.queue.items_available == 0) {
-                return error.QueueClosed;
-            }
-            if (self.queue.is_frozen) {
-                return error.BufferFrozen;
-            }
+            try self.queue.waitForDataInternal(timeout_ms);
         }
 
         /// Wait for more data to become available with timeout
