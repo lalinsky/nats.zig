@@ -871,13 +871,8 @@ pub const Connection = struct {
                 // Handle errors from readerIteration
                 switch (err) {
                     error.ShouldStop => break,
-                    error.EndOfStream => {
-                        // Zero read from server - trigger reconnect
-                        self.triggerReconnect(err);
-                        continue;
-                    },
                     else => {
-                        // Trigger reconnect for other errors
+                        // Trigger reconnect for all other errors (including EndOfStream)
                         self.triggerReconnect(err);
                         continue;
                     },
@@ -930,8 +925,6 @@ pub const Connection = struct {
                 // Handle errors from flusherIteration
                 switch (err) {
                     error.ShouldStop => break,
-                    error.QueueClosed => break,
-                    error.QueueEmpty, error.BufferFrozen => continue,
                     else => {
                         // Trigger reconnect for other errors
                         self.triggerReconnect(err);
@@ -950,14 +943,14 @@ pub const Connection = struct {
         const gather = self.write_buffer.gatherReadVectors(&iovecs, self.options.timeout_ms) catch |err| switch (err) {
             error.QueueEmpty, error.BufferFrozen => {
                 // No data to write or buffer is frozen during reconnection
-                return err;
+                return;
             },
-            error.QueueClosed => return err,
+            error.QueueClosed => return error.ShouldStop,
         };
 
         if (gather.iovecs.len == 0) {
             // No data to write
-            return error.QueueEmpty;
+            return;
         }
 
         // Now try to get a socket - blocks until available
@@ -1158,11 +1151,14 @@ pub const Connection = struct {
         self.socket = null;
         self.socket_cond.broadcast();
 
-        // Interrupt any ongoing I/O and close the old socket
+        // Interrupt any ongoing I/O and wait for socket to be released
         if (old_socket) |socket| {
             socket.shutdown(.both) catch |shutdown_err| {
                 log.debug("Socket shutdown failed: {}", .{shutdown_err});
             };
+            // Wait for socket references to be released before closing
+            const wait_ms: u64 = @min(self.options.timeout_ms, 200);
+            _ = self.waitForSocketUnused(wait_ms);
             socket.close();
         }
 
