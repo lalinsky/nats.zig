@@ -1,7 +1,7 @@
 const std = @import("std");
 const nats = @import("nats");
 
-const log = std.log.scoped(.testing);
+const log = std.log.default;
 
 pub const Node = enum(u16) {
     node1 = 14222,
