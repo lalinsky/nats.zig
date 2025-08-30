@@ -879,7 +879,10 @@ pub const Connection = struct {
             self.mutex.unlock();
             defer self.mutex.lock(); // Re-lock at end of iteration
 
-            const socket = self.acquireSocket() catch break orelse break;
+            const socket = self.acquireSocket() catch |err| switch (err) {
+                error.ConnectionClosed => break, // Connection is closed, stop reader
+                error.Disconnected => break, // No socket available (during reconnection), break, but TO BE CHANGED LATER
+            };
             defer self.releaseSocket();
 
             // Simple blocking read - shutdown() will wake us up
@@ -926,13 +929,11 @@ pub const Connection = struct {
         log.debug("Flusher loop started", .{});
 
         while (!self.should_stop.load(.acquire)) {
-            const socket = self.acquireSocket() catch break orelse break;
-            defer self.releaseSocket();
-
+            // First try to gather data from buffer - this will block when frozen during reconnection
             var iovecs: [16]std.posix.iovec_const = undefined;
             const gather = self.write_buffer.gatherReadVectors(&iovecs, self.options.timeout_ms) catch |err| switch (err) {
                 error.QueueEmpty, error.BufferFrozen => {
-                    // No data to write or buffer is frozen
+                    // No data to write or buffer is frozen during reconnection
                     continue;
                 },
                 error.QueueClosed => break,
@@ -943,6 +944,13 @@ pub const Connection = struct {
                 continue;
             }
 
+            // Now try to get a socket - handle different cases
+            const socket = self.acquireSocket() catch |err| switch (err) {
+                error.ConnectionClosed => break, // Connection is closed, stop flusher
+                error.Disconnected => continue, // No socket available (during reconnection), continue waiting
+            };
+            defer self.releaseSocket();
+
             const bytes_written = socket.writev(gather.iovecs) catch |err| switch (err) {
                 error.WouldBlock => {
                     // Write timeout from SO_SNDTIMEO - this is expected, continue writing
@@ -951,7 +959,7 @@ pub const Connection = struct {
                 else => {
                     log.err("Write error: {}", .{err});
                     self.triggerReconnect(err);
-                    break;
+                    continue;
                 },
             };
 
@@ -1276,14 +1284,6 @@ pub const Connection = struct {
                     continue; // Try next server
                 };
 
-                // Restart flusher thread for the new connection
-
-                self.flusher_thread = std.Thread.spawn(.{}, flusherLoop, .{self}) catch |err| {
-                    log.err("Failed to restart flusher thread: {}", .{err});
-                    self.triggerReconnect(err);
-                    continue; // Try next server
-                };
-
                 // Re-establish subscriptions (outside mutex like C library)
                 self.resendSubscriptions() catch |err| {
                     log.err("Failed to re-establish subscriptions: {}", .{err});
@@ -1390,14 +1390,14 @@ pub const Connection = struct {
     }
 
     /// Acquires a reference to the socket for safe concurrent use.
-    /// Returns a pointer to the socket if available, error if closed, null if not connected.
+    /// Returns a pointer to the socket if available, error if closed or disconnected.
     /// The caller MUST call releaseSocket() when done with the socket.
-    pub fn acquireSocket(self: *Self) ConnectionError!?*Socket {
+    pub fn acquireSocket(self: *Self) !*Socket {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         if (self.status == .closed) {
-            return ConnectionError.ConnectionClosed;
+            return error.ConnectionClosed;
         }
 
         if (self.socket) |*socket_ptr| {
@@ -1405,7 +1405,7 @@ pub const Connection = struct {
             return socket_ptr;
         }
 
-        return null;
+        return error.Disconnected;
     }
 
     /// Releases a reference to the socket obtained via acquireSocket().
