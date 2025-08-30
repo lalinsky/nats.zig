@@ -584,6 +584,7 @@ pub fn VectorGather(comptime T: type, comptime chunk_size: usize) type {
     return struct {
         reset_id: u64,
         first_chunk: *Chunk,
+        first_chunk_read_pos: usize,
         iovecs: []std.posix.iovec_const,
         total_bytes: usize,
         buffer: *ConcurrentWriteBuffer(chunk_size),
@@ -605,6 +606,11 @@ pub fn VectorGather(comptime T: type, comptime chunk_size: usize) type {
 
             // Validate we're still the only consumer (first chunk unchanged)
             if (self.buffer.queue.head != self.first_chunk) {
+                return error.ConcurrentConsumer;
+            }
+
+            // Validate read position hasn't been advanced by another consumer
+            if (self.first_chunk.read_pos != self.first_chunk_read_pos) {
                 return error.ConcurrentConsumer;
             }
 
@@ -701,6 +707,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             var total_bytes: usize = 0;
             var current = self.queue.head;
             const first_chunk = current.?; // Safe: waitForDataInternal ensures data exists
+            const first_chunk_read_pos = first_chunk.read_pos;
 
             while (current) |chunk| {
                 if (count >= iovecs.len) break;
@@ -724,6 +731,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             return Gather{
                 .reset_id = self.queue.reset_id,
                 .first_chunk = first_chunk,
+                .first_chunk_read_pos = first_chunk_read_pos,
                 .iovecs = iovecs[0..count],
                 .total_bytes = total_bytes,
                 .buffer = self,
