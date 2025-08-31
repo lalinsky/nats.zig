@@ -544,7 +544,12 @@ pub const Connection = struct {
             },
         }
 
-        try self.bufferWrite(buffer.items);
+        // Published messages go to pending_buffer during reconnection, otherwise write_buffer
+        if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
+            try self.pending_buffer.append(buffer.items);
+        } else {
+            try self.write_buffer.append(buffer.items);
+        }
 
         if (reply_to_use) |reply| {
             log.debug("Published message to {s} with reply {s}", .{ msg.subject, reply });
@@ -583,7 +588,7 @@ pub const Connection = struct {
         } else {
             try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
         }
-        try self.bufferWrite(buffer.items);
+        try self.write_buffer.append(buffer.items);
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
@@ -670,7 +675,7 @@ pub const Connection = struct {
 
         var buffer = ArrayList(u8).init(allocator);
         try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
-        try self.bufferWrite(buffer.items);
+        try self.write_buffer.append(buffer.items);
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
     }
@@ -684,7 +689,7 @@ pub const Connection = struct {
         }
 
         // Buffer the PING first (can fail on allocation)
-        try self.bufferWrite("PING\r\n");
+        try self.write_buffer.append("PING\r\n");
 
         // Only increment counter after successful buffering
         self.outgoing_pings += 1;
@@ -970,18 +975,6 @@ pub const Connection = struct {
         };
     }
 
-    fn bufferWrite(self: *Self, data: []const u8) !void {
-        // Assume mutex is already held by caller
-
-        // If we're reconnecting, buffer the message for later
-        if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
-            return self.pending_buffer.append(data);
-        }
-
-        // Buffer the data (mutex already held)
-        try self.write_buffer.append(data);
-    }
-
     // Parser callback methods
     pub fn processMsg(self: *Self, message: *Message) !void {
         if (self.should_stop.load(.acquire)) {
@@ -1072,7 +1065,7 @@ pub const Connection = struct {
         try buffer.writer().writeAll("PING\r\n");
 
         // Send via buffer (mutex already held)
-        try self.bufferWrite(buffer.items);
+        try self.write_buffer.append(buffer.items);
 
         log.debug("Sent CONNECT+PING during handshake", .{});
     }
@@ -1213,7 +1206,7 @@ pub const Connection = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        try self.bufferWrite("PONG\r\n");
+        try self.write_buffer.append("PONG\r\n");
     }
 
     // Reconnection Logic
