@@ -677,7 +677,7 @@ test "JetStream publish basic message" {
 
     // Verify publish acknowledgment
     try testing.expectEqualStrings(stream_name, pub_ack.value.stream);
-    try testing.expect(pub_ack.value.sequence > 0);
+    try testing.expect(pub_ack.value.seq > 0);
     try testing.expect(!pub_ack.value.duplicate);
 }
 
@@ -715,12 +715,12 @@ test "JetStream publish with message deduplication" {
 
     // Verify first publish was successful
     try testing.expectEqualStrings(stream_name, pub_ack1.value.stream);
-    try testing.expect(pub_ack1.value.sequence > 0);
+    try testing.expect(pub_ack1.value.seq > 0);
     try testing.expect(!pub_ack1.value.duplicate);
 
     // Verify second publish was deduplicated
     try testing.expectEqualStrings(stream_name, pub_ack2.value.stream);
-    try testing.expect(pub_ack2.value.sequence == pub_ack1.value.sequence);
+    try testing.expect(pub_ack2.value.seq == pub_ack1.value.seq);
     try testing.expect(pub_ack2.value.duplicate);
 }
 
@@ -750,10 +750,10 @@ test "JetStream publish with expected sequence" {
     defer pub_ack1.deinit();
 
     // Second publish with correct expected sequence
-    var pub_ack2 = try js.publish(subject, "second message", .{ .expected_last_seq = pub_ack1.value.sequence });
+    var pub_ack2 = try js.publish(subject, "second message", .{ .expected_last_seq = pub_ack1.value.seq });
     defer pub_ack2.deinit();
 
-    try testing.expect(pub_ack2.value.sequence == pub_ack1.value.sequence + 1);
+    try testing.expect(pub_ack2.value.seq == pub_ack1.value.seq + 1);
 
     // Third publish with incorrect expected sequence (should fail)
     const result = js.publish(subject, "third message", .{ .expected_last_seq = 999 });
@@ -795,5 +795,5 @@ test "JetStream publishMsg with pre-constructed message" {
 
     // Verify publish was successful
     try testing.expectEqualStrings(stream_name, pub_ack.value.stream);
-    try testing.expect(pub_ack.value.sequence > 0);
+    try testing.expect(pub_ack.value.seq > 0);
 }

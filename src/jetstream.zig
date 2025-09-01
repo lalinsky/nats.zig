@@ -360,7 +360,7 @@ pub const PubAck = struct {
     /// Stream that received the message
     stream: []const u8,
     /// Sequence number assigned by the stream
-    sequence: u64,
+    seq: u64,
     /// Whether this was a duplicate message
     duplicate: bool = false,
     /// JetStream domain (optional)
@@ -1238,15 +1238,7 @@ pub const JetStream = struct {
         try self.maybeParseErrorResponse(resp.?);
 
         // Parse the publish acknowledgment directly into PubAck
-        // Create temporary struct with same JSON field names as PubAck
-        const ParsedAck = struct {
-            stream: ?[]const u8 = null,
-            seq: ?u64 = null,
-            duplicate: ?bool = null,
-            domain: ?[]const u8 = null,
-        };
-
-        const parsed_resp = std.json.parseFromSlice(ParsedAck, self.allocator, resp.?.data, .{
+        const parsed_resp = std.json.parseFromSlice(PubAck, self.allocator, resp.?.data, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
         }) catch |parse_err| {
@@ -1255,27 +1247,6 @@ pub const JetStream = struct {
             return JetStreamPublishError.InvalidJSAck;
         };
 
-        // Validate required fields
-        const stream = parsed_resp.value.stream orelse {
-            parsed_resp.deinit();
-            return JetStreamPublishError.InvalidJSAck;
-        };
-        const sequence = parsed_resp.value.seq orelse {
-            parsed_resp.deinit();
-            return JetStreamPublishError.InvalidJSAck;
-        };
-
-        // Create PubAck using parsed data (no copying needed)
-        const pub_ack = PubAck{
-            .stream = stream,
-            .sequence = sequence,
-            .duplicate = parsed_resp.value.duplicate orelse false,
-            .domain = parsed_resp.value.domain,
-        };
-
-        return Result(PubAck){
-            .arena = parsed_resp.arena,
-            .value = pub_ack,
-        };
+        return parsed_resp;
     }
 };
