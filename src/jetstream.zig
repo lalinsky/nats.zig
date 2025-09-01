@@ -387,7 +387,7 @@ pub const PublishOptions = struct {
     /// Retry wait between attempts in nanoseconds (default: 250ms)
     retry_wait: u64 = 250_000_000,
     /// Number of retry attempts (default: 2)
-    retry_attempts: i32 = 2,
+    retry_attempts: u32 = 2,
 };
 
 /// Batch of messages returned from fetch operation
@@ -1209,7 +1209,7 @@ pub const JetStream = struct {
         // Send request with retry logic
         var resp: ?*Message = null;
         var err: ?anyerror = null;
-        var retry_count: i32 = 0;
+        var retry_count: u32 = 0;
 
         while (retry_count <= options.retry_attempts) {
             resp = self.nc.requestMsg(msg, self.opts.request_timeout_ms) catch |request_err| {
