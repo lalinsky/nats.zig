@@ -327,14 +327,6 @@ const MsgDeleteResponse = struct {
     success: bool,
 };
 
-/// Response from JetStream publish operations
-const PubAckResponse = struct {
-    stream: ?[]const u8 = null,
-    seq: ?u64 = null,
-    duplicate: ?bool = null,
-    domain: ?[]const u8 = null,
-};
-
 /// Response from $JS.API.STREAM.MSG.GET
 const GetMsgResponse = struct {
     message: StoredMessage,
@@ -1245,8 +1237,16 @@ pub const JetStream = struct {
         // Check for JetStream errors first
         try self.maybeParseErrorResponse(resp.?);
 
-        // Parse the publish acknowledgment
-        const parsed_resp = std.json.parseFromSlice(PubAckResponse, self.allocator, resp.?.data, .{
+        // Parse the publish acknowledgment directly into PubAck
+        // Create temporary struct with same JSON field names as PubAck
+        const ParsedAck = struct {
+            stream: ?[]const u8 = null,
+            seq: ?u64 = null,
+            duplicate: ?bool = null,
+            domain: ?[]const u8 = null,
+        };
+
+        const parsed_resp = std.json.parseFromSlice(ParsedAck, self.allocator, resp.?.data, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
         }) catch |parse_err| {
@@ -1265,8 +1265,7 @@ pub const JetStream = struct {
             return JetStreamPublishError.InvalidJSAck;
         };
 
-        // Create PubAck from parsed response (transfer ownership to result arena)
-        const result_arena = parsed_resp.arena;
+        // Create PubAck using parsed data (no copying needed)
         const pub_ack = PubAck{
             .stream = stream,
             .sequence = sequence,
@@ -1275,7 +1274,7 @@ pub const JetStream = struct {
         };
 
         return Result(PubAck){
-            .arena = result_arena,
+            .arena = parsed_resp.arena,
             .value = pub_ack,
         };
     }
