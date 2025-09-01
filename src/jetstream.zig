@@ -1216,18 +1216,18 @@ pub const JetStream = struct {
         while (retry_count <= options.retry_attempts) {
             resp = self.nc.requestMsg(msg, self.opts.request_timeout_ms) catch |request_err| {
                 err = request_err;
-                
+
                 // Only retry on NoResponders error
                 if (request_err != error.NoResponders or retry_count >= options.retry_attempts) {
                     break;
                 }
-                
+
                 // Wait before retry
                 std.time.sleep(options.retry_wait);
                 retry_count += 1;
                 continue;
             };
-            
+
             // Success - exit retry loop
             break;
         }

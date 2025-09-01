@@ -784,7 +784,7 @@ test "JetStream publishMsg with pre-constructed message" {
     // Create message with custom headers
     const msg = try conn.newMsg();
     defer msg.deinit();
-    
+
     try msg.setSubject(subject);
     try msg.setPayload("Custom message with headers");
     try msg.headerSet("Custom-Header", "custom-value");
