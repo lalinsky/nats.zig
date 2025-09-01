@@ -29,6 +29,22 @@ pub const SequencePair = jetstream_message.SequencePair;
 const default_api_prefix = "$JS.API.";
 const default_request_timeout_ms = 5000;
 
+// JetStream publish headers
+const MsgIdHdr = "Nats-Msg-Id";
+const ExpectedStreamHdr = "Nats-Expected-Stream";
+const ExpectedLastSeqHdr = "Nats-Expected-Last-Sequence";
+const ExpectedLastSubjSeqHdr = "Nats-Expected-Last-Subject-Sequence";
+const ExpectedLastSubjSeqSubjectHdr = "Nats-Expected-Last-Subject-Sequence-Subject";
+const ExpectedLastMsgIdHdr = "Nats-Expected-Last-Msg-Id";
+const MsgTTLHdr = "Nats-TTL";
+
+// JetStream publish errors
+pub const JetStreamPublishError = error{
+    InvalidJSAck,
+    NoStreamResponse,
+    Timeout,
+};
+
 fn isProhibitedChar(c: u8) bool {
     // Explicit prohibited characters
     if (c == '.' or c == '>' or c == '*' or c == '/' or c == '\\') {
@@ -338,6 +354,40 @@ pub const FetchRequest = struct {
     no_wait: bool = false,
     /// Heartbeat interval in nanoseconds for long requests
     idle_heartbeat: ?u64 = null,
+};
+
+/// Publishing acknowledgment from JetStream
+pub const PubAck = struct {
+    /// Stream that received the message
+    stream: []const u8,
+    /// Sequence number assigned by the stream
+    seq: u64,
+    /// Whether this was a duplicate message
+    duplicate: bool = false,
+    /// JetStream domain (optional)
+    domain: ?[]const u8 = null,
+};
+
+/// Options for JetStream publishing
+pub const PublishOptions = struct {
+    /// Message deduplication ID
+    msg_id: ?[]const u8 = null,
+    /// Expected target stream name
+    expected_stream: ?[]const u8 = null,
+    /// Expected last sequence number for optimistic concurrency control
+    expected_last_seq: ?u64 = null,
+    /// Expected last sequence number per subject
+    expected_last_subject_seq: ?u64 = null,
+    /// Override subject used for the per-subject sequence check
+    expected_last_subject_seq_subject: ?[]const u8 = null,
+    /// Expected last message ID
+    expected_last_msg_id: ?[]const u8 = null,
+    /// Message time-to-live in nanoseconds
+    msg_ttl: ?u64 = null,
+    /// Retry wait between attempts in nanoseconds (default: 250ms)
+    retry_wait: u64 = 250_000_000,
+    /// Number of retry attempts (default: 2)
+    retry_attempts: u32 = 2,
 };
 
 /// Batch of messages returned from fetch operation
@@ -1104,5 +1154,105 @@ pub const JetStream = struct {
         };
 
         return pull_subscription;
+    }
+
+    /// Publish a message to JetStream
+    pub fn publish(self: *JetStream, subject: []const u8, data: []const u8, options: PublishOptions) !Result(PubAck) {
+        // Create a temporary message
+        const msg = try self.nc.newMsg();
+        defer msg.deinit();
+
+        // Set message fields
+        try msg.setSubject(subject);
+        try msg.setPayload(data);
+
+        // Use publishMsg to handle the actual publishing
+        return self.publishMsgInternal(msg, options);
+    }
+
+    /// Publish a pre-constructed message to JetStream
+    pub fn publishMsg(self: *JetStream, msg: *Message, options: PublishOptions) !Result(PubAck) {
+        return self.publishMsgInternal(msg, options);
+    }
+
+    /// Internal function to publish a message with header processing and retry logic
+    fn publishMsgInternal(self: *JetStream, msg: *Message, options: PublishOptions) !Result(PubAck) {
+        // Set JetStream-specific headers based on options
+        if (options.msg_id) |id| {
+            try msg.headerSet(MsgIdHdr, id);
+        }
+        if (options.expected_stream) |stream| {
+            try msg.headerSet(ExpectedStreamHdr, stream);
+        }
+        if (options.expected_last_seq) |seq| {
+            const seq_str = try std.fmt.allocPrint(self.allocator, "{d}", .{seq});
+            defer self.allocator.free(seq_str);
+            try msg.headerSet(ExpectedLastSeqHdr, seq_str);
+        }
+        if (options.expected_last_subject_seq) |seq| {
+            const seq_str = try std.fmt.allocPrint(self.allocator, "{d}", .{seq});
+            defer self.allocator.free(seq_str);
+            try msg.headerSet(ExpectedLastSubjSeqHdr, seq_str);
+        }
+        if (options.expected_last_subject_seq_subject) |subject| {
+            try msg.headerSet(ExpectedLastSubjSeqSubjectHdr, subject);
+        }
+        if (options.expected_last_msg_id) |id| {
+            try msg.headerSet(ExpectedLastMsgIdHdr, id);
+        }
+        if (options.msg_ttl) |ttl| {
+            const ttl_str = try std.fmt.allocPrint(self.allocator, "{d}ns", .{ttl});
+            defer self.allocator.free(ttl_str);
+            try msg.headerSet(MsgTTLHdr, ttl_str);
+        }
+
+        // Send request with retry logic
+        var resp: ?*Message = null;
+        var err: ?anyerror = null;
+        var retry_count: u32 = 0;
+
+        while (retry_count <= options.retry_attempts) {
+            resp = self.nc.requestMsg(msg, self.opts.request_timeout_ms) catch |request_err| {
+                err = request_err;
+
+                // Only retry on NoResponders error
+                if (request_err != error.NoResponders or retry_count >= options.retry_attempts) {
+                    break;
+                }
+
+                // Wait before retry
+                std.time.sleep(options.retry_wait);
+                retry_count += 1;
+                continue;
+            };
+
+            // Success - exit retry loop
+            break;
+        }
+
+        if (resp == null) {
+            if (err) |actual_err| {
+                return if (actual_err == error.NoResponders) JetStreamPublishError.NoStreamResponse else actual_err;
+            } else {
+                return JetStreamPublishError.NoStreamResponse;
+            }
+        }
+
+        defer resp.?.deinit();
+
+        // Check for JetStream errors first
+        try self.maybeParseErrorResponse(resp.?);
+
+        // Parse the publish acknowledgment directly into PubAck
+        const parsed_resp = std.json.parseFromSlice(PubAck, self.allocator, resp.?.data, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch |parse_err| {
+            log.err("Failed to parse publish response: {}", .{parse_err});
+            log.debug("Full response: {s}", .{resp.?.data});
+            return JetStreamPublishError.InvalidJSAck;
+        };
+
+        return parsed_resp;
     }
 };

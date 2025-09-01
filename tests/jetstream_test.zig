@@ -648,3 +648,152 @@ test "delete consumer" {
 
 //     try testing.expect(final_info.state().messages == num_messages);
 // }
+
+test "JetStream publish basic message" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // Generate unique names
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(subject);
+
+    // Create stream
+    const stream_config = nats.StreamConfig{
+        .name = stream_name,
+        .subjects = &.{subject},
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Publish a message using JetStream publish
+    const test_data = "Hello JetStream!";
+    var pub_ack = try js.publish(subject, test_data, .{});
+    defer pub_ack.deinit();
+
+    // Verify publish acknowledgment
+    try testing.expectEqualStrings(stream_name, pub_ack.value.stream);
+    try testing.expect(pub_ack.value.seq > 0);
+    try testing.expect(!pub_ack.value.duplicate);
+}
+
+test "JetStream publish with message deduplication" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // Generate unique names
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(subject);
+
+    // Create stream with duplicate window
+    const stream_config = nats.StreamConfig{
+        .name = stream_name,
+        .subjects = &.{subject},
+        .duplicate_window = 60_000_000_000, // 60 seconds
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    const test_data = "Deduplicated message";
+    const msg_id = "unique-msg-id-12345";
+
+    // Publish the same message twice with the same message ID
+    var pub_ack1 = try js.publish(subject, test_data, .{ .msg_id = msg_id });
+    defer pub_ack1.deinit();
+
+    var pub_ack2 = try js.publish(subject, test_data, .{ .msg_id = msg_id });
+    defer pub_ack2.deinit();
+
+    // Verify first publish was successful
+    try testing.expectEqualStrings(stream_name, pub_ack1.value.stream);
+    try testing.expect(pub_ack1.value.seq > 0);
+    try testing.expect(!pub_ack1.value.duplicate);
+
+    // Verify second publish was deduplicated
+    try testing.expectEqualStrings(stream_name, pub_ack2.value.stream);
+    try testing.expect(pub_ack2.value.seq == pub_ack1.value.seq);
+    try testing.expect(pub_ack2.value.duplicate);
+}
+
+test "JetStream publish with expected sequence" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // Generate unique names
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(subject);
+
+    // Create stream
+    const stream_config = nats.StreamConfig{
+        .name = stream_name,
+        .subjects = &.{subject},
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // First publish (should succeed)
+    var pub_ack1 = try js.publish(subject, "first message", .{});
+    defer pub_ack1.deinit();
+
+    // Second publish with correct expected sequence
+    var pub_ack2 = try js.publish(subject, "second message", .{ .expected_last_seq = pub_ack1.value.seq });
+    defer pub_ack2.deinit();
+
+    try testing.expect(pub_ack2.value.seq == pub_ack1.value.seq + 1);
+
+    // Third publish with incorrect expected sequence (should fail)
+    const result = js.publish(subject, "third message", .{ .expected_last_seq = 999 });
+    try testing.expectError(error.JetStreamError, result);
+}
+
+test "JetStream publishMsg with pre-constructed message" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // Generate unique names
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(subject);
+
+    // Create stream
+    const stream_config = nats.StreamConfig{
+        .name = stream_name,
+        .subjects = &.{subject},
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Create message with custom headers
+    const msg = try conn.newMsg();
+    defer msg.deinit();
+
+    try msg.setSubject(subject);
+    try msg.setPayload("Custom message with headers");
+    try msg.headerSet("Custom-Header", "custom-value");
+
+    // Publish the pre-constructed message
+    var pub_ack = try js.publishMsg(msg, .{ .msg_id = "msg-with-headers" });
+    defer pub_ack.deinit();
+
+    // Verify publish was successful
+    try testing.expectEqualStrings(stream_name, pub_ack.value.stream);
+    try testing.expect(pub_ack.value.seq > 0);
+}
