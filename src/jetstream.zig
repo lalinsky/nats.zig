@@ -1171,7 +1171,7 @@ pub const JetStream = struct {
         return self.publishMsgInternal(msg, options);
     }
 
-    /// Internal function to publish a message with header processing and retry logic
+    /// Internal function to publish a message with header processing
     fn publishMsgInternal(self: *JetStream, msg: *Message, options: PublishOptions) !Result(PubAck) {
         // Set JetStream-specific headers based on options
         if (options.msg_id) |id| {
@@ -1209,17 +1209,12 @@ pub const JetStream = struct {
 
         defer resp.deinit();
 
-        // Check for JetStream errors first
-        try self.maybeParseErrorResponse(resp);
-
-        // Parse the publish acknowledgment directly into PubAck
-        const parsed_resp = std.json.parseFromSlice(PubAck, self.allocator, resp.data, .{
-            .allocate = .alloc_always,
-            .ignore_unknown_fields = true,
-        }) catch |parse_err| {
-            log.err("Failed to parse publish response: {}", .{parse_err});
-            log.debug("Full response: {s}", .{resp.data});
-            return JetStreamPublishError.InvalidJSAck;
+        // Parse the publish acknowledgment using parseResponse for consistency
+        const parsed_resp = self.parseResponse(PubAck, resp) catch |err| {
+            if (err == error.JetStreamParseError) {
+                return JetStreamPublishError.InvalidJSAck;
+            }
+            return err;
         };
 
         return parsed_resp;
