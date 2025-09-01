@@ -34,6 +34,7 @@ const MsgIdHdr = "Nats-Msg-Id";
 const ExpectedStreamHdr = "Nats-Expected-Stream";
 const ExpectedLastSeqHdr = "Nats-Expected-Last-Sequence";
 const ExpectedLastSubjSeqHdr = "Nats-Expected-Last-Subject-Sequence";
+const ExpectedLastSubjSeqSubjectHdr = "Nats-Expected-Last-Subject-Sequence-Subject";
 const ExpectedLastMsgIdHdr = "Nats-Expected-Last-Msg-Id";
 const MsgTTLHdr = "Nats-TTL";
 
@@ -377,6 +378,8 @@ pub const PublishOptions = struct {
     expected_last_seq: ?u64 = null,
     /// Expected last sequence number per subject
     expected_last_subject_seq: ?u64 = null,
+    /// Override subject used for the per-subject sequence check
+    expected_last_subject_seq_subject: ?[]const u8 = null,
     /// Expected last message ID
     expected_last_msg_id: ?[]const u8 = null,
     /// Message time-to-live in nanoseconds
@@ -1190,6 +1193,9 @@ pub const JetStream = struct {
             const seq_str = try std.fmt.allocPrint(self.allocator, "{d}", .{seq});
             defer self.allocator.free(seq_str);
             try msg.headerSet(ExpectedLastSubjSeqHdr, seq_str);
+        }
+        if (options.expected_last_subject_seq_subject) |subject| {
+            try msg.headerSet(ExpectedLastSubjSeqSubjectHdr, subject);
         }
         if (options.expected_last_msg_id) |id| {
             try msg.headerSet(ExpectedLastMsgIdHdr, id);
