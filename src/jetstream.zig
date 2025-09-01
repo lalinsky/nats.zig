@@ -384,10 +384,6 @@ pub const PublishOptions = struct {
     expected_last_msg_id: ?[]const u8 = null,
     /// Message time-to-live in nanoseconds
     msg_ttl: ?u64 = null,
-    /// Retry wait between attempts in nanoseconds (default: 250ms)
-    retry_wait: u64 = 250_000_000,
-    /// Number of retry attempts (default: 2)
-    retry_attempts: u32 = 2,
 };
 
 /// Batch of messages returned from fetch operation
@@ -1206,50 +1202,23 @@ pub const JetStream = struct {
             try msg.headerSet(MsgTTLHdr, ttl_str);
         }
 
-        // Send request with retry logic
-        var resp: ?*Message = null;
-        var err: ?anyerror = null;
-        var retry_count: u32 = 0;
+        // Send request without retry logic
+        const resp = self.nc.requestMsg(msg, self.opts.request_timeout_ms) catch |request_err| {
+            return if (request_err == error.NoResponders) JetStreamPublishError.NoStreamResponse else request_err;
+        };
 
-        while (retry_count <= options.retry_attempts) {
-            resp = self.nc.requestMsg(msg, self.opts.request_timeout_ms) catch |request_err| {
-                err = request_err;
-
-                // Only retry on NoResponders error
-                if (request_err != error.NoResponders or retry_count >= options.retry_attempts) {
-                    break;
-                }
-
-                // Wait before retry
-                std.time.sleep(options.retry_wait);
-                retry_count += 1;
-                continue;
-            };
-
-            // Success - exit retry loop
-            break;
-        }
-
-        if (resp == null) {
-            if (err) |actual_err| {
-                return if (actual_err == error.NoResponders) JetStreamPublishError.NoStreamResponse else actual_err;
-            } else {
-                return JetStreamPublishError.NoStreamResponse;
-            }
-        }
-
-        defer resp.?.deinit();
+        defer resp.deinit();
 
         // Check for JetStream errors first
-        try self.maybeParseErrorResponse(resp.?);
+        try self.maybeParseErrorResponse(resp);
 
         // Parse the publish acknowledgment directly into PubAck
-        const parsed_resp = std.json.parseFromSlice(PubAck, self.allocator, resp.?.data, .{
+        const parsed_resp = std.json.parseFromSlice(PubAck, self.allocator, resp.data, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
         }) catch |parse_err| {
             log.err("Failed to parse publish response: {}", .{parse_err});
-            log.debug("Full response: {s}", .{resp.?.data});
+            log.debug("Full response: {s}", .{resp.data});
             return JetStreamPublishError.InvalidJSAck;
         };
 
