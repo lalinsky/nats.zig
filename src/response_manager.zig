@@ -80,10 +80,8 @@ pub const ResponseManager = struct {
         self.pending_mutex.lock();
         defer self.pending_mutex.unlock();
 
-        // Explicitly release the resp_mux subscription to reduce callback races
-        if (self.resp_mux) |subscription| {
-            subscription.deinit();
-        }
+        // The subscription will be cleaned up by the Connection's deinit
+        // which already handles all subscriptions in the subscriptions HashMap
         self.resp_mux = null;
 
         self.is_closed = true;

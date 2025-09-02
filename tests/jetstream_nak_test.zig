@@ -99,7 +99,6 @@ test "NAK redelivery with delivery count verification" {
 
     var push_sub = try js.subscribe("TEST_NAK_STREAM", consumer_config, NakHandler.handle, .{&test_data});
     defer push_sub.deinit();
-    defer push_sub.unsubscribe() catch {};
 
     // Publish a test message
     const test_message = "NAK test message #42";
@@ -207,7 +206,6 @@ test "NAK with max delivery limit" {
 
     var push_sub = try js.subscribe("TEST_NAK_LIMIT_STREAM", consumer_config, AlwaysNakHandler.handle, .{&test_data});
     defer push_sub.deinit();
-    defer push_sub.unsubscribe() catch {};
 
     // Publish test message
     try conn.publish("test.nak.limit.msg", "Test max delivery limit");
@@ -314,7 +312,6 @@ test "JetStream message metadata parsing" {
 
     var push_sub = try js.subscribe("TEST_METADATA_STREAM", consumer_config, MetadataHandler.handle, .{ &received_message, &metadata_verified, &mutex });
     defer push_sub.deinit();
-    defer push_sub.unsubscribe() catch {};
 
     // Publish a test message
     try conn.publish("test.metadata.msg", "Test metadata parsing");

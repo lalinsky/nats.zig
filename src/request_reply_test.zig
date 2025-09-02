@@ -99,7 +99,6 @@ test "unsubscribe functionality" {
     const sub = try Subscription.init(allocator, 1, "test.subject", null);
     defer sub.deinit();
 
-    // Test that unsubscribe fails when disconnected
-    const result = conn.unsubscribe(sub);
-    try std.testing.expectError(ConnectionError.ConnectionClosed, result);
+    // Test that unsubscribe succeeds when disconnected (graceful cleanup)
+    try conn.unsubscribe(sub);
 }

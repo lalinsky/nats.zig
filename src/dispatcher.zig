@@ -116,7 +116,7 @@ pub const Dispatcher = struct {
 
     /// Process a single dispatch message
     fn processMessage(self: *Dispatcher, dispatch_msg: DispatchMessage) void {
-        _ = self; // unused
+        _ = self;
         defer dispatch_msg.deinit(); // Release subscription reference
 
         const subscription = dispatch_msg.subscription;

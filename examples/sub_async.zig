@@ -28,7 +28,7 @@ pub fn main() !void {
 
     // Subscribe with callback
     const sub = try conn.subscribe("foo", messageHandler, .{ &counter, prefix });
-    defer conn.unsubscribe(sub) catch {};
+    defer sub.deinit();
 
     std.log.info("Subscribed with callback handler. Waiting for messages (10 seconds)...", .{});
 
