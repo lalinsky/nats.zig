@@ -105,5 +105,9 @@ test "basic reconnection when server stops" {
     log.debug("Publishing after reconnection", .{});
     try nc.publish("test.after", "hello after reconnection");
 
-    try testing.expectEqual(1, tracker.reconnected_called);
+    // Verify both disconnected and reconnected callbacks were called
+    tracker.mutex.lock();
+    defer tracker.mutex.unlock();
+    try testing.expectEqual(@as(u32, 1), tracker.disconnected_called);
+    try testing.expectEqual(@as(u32, 1), tracker.reconnected_called);
 }

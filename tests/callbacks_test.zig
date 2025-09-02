@@ -5,10 +5,10 @@ const utils = @import("utils.zig");
 const log = std.log.default;
 
 const Counters = struct {
-    closed_cb_called: usize = 0,
+    closed_cb_called: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 
     pub fn reset(self: *Counters) void {
-        self.closed_cb_called = 0;
+        self.closed_cb_called.store(0, .monotonic);
     }
 };
 
@@ -22,12 +22,12 @@ test "close callback" {
             .closed_cb = struct {
                 fn close(_: *nats.Connection) void {
                     log.info("close callback", .{});
-                    counts.closed_cb_called += 1;
+                    _ = counts.closed_cb_called.fetchAdd(1, .monotonic);
                 }
             }.close,
         },
     });
 
     utils.closeConnection(conn);
-    try std.testing.expectEqual(1, counts.closed_cb_called);
+    try std.testing.expectEqual(@as(usize, 1), counts.closed_cb_called.load(.monotonic));
 }
