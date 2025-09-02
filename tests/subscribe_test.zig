@@ -15,7 +15,7 @@ test "subscribeSync smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = sub.nextMsg(1000) orelse return error.Timeout;
+    const msg = try sub.nextMsg(1000);
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test", msg.subject);
@@ -32,7 +32,7 @@ test "queueSubscribeSync smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = sub.nextMsg(1000) orelse return error.Timeout;
+    const msg = try sub.nextMsg(1000);
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test", msg.subject);

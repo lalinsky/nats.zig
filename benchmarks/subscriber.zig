@@ -39,15 +39,14 @@ pub fn main() !void {
     // Wait for messages in a loop
     while (bench_util.keep_running) {
         // Wait for the next message (with timeout)
-        if (sub.nextMsg(1000)) |msg| {
-            defer msg.deinit();
+        var msg = sub.nextMsg(1000) catch continue; // continue on timeout
+        defer msg.deinit();
 
-            stats.msg_count += 1;
+        stats.msg_count += 1;
 
-            // Print stats every REPORT_INTERVAL messages
-            if (stats.msg_count % REPORT_INTERVAL == 0) {
-                stats.printThroughput("Received");
-            }
+        // Print stats every REPORT_INTERVAL messages
+        if (stats.msg_count % REPORT_INTERVAL == 0) {
+            stats.printThroughput("Received");
         }
     }
 

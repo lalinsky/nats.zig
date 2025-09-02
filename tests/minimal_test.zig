@@ -29,14 +29,11 @@ test "basic publish and subscribe" {
     try conn.flush();
 
     // Try to receive the message
-    if (sub.nextMsg(100)) |msg| {
-        defer msg.deinit();
+    var msg = sub.nextMsg(100) catch return error.NoMessageReceived;
+    defer msg.deinit();
 
-        try std.testing.expectEqualStrings("test.minimal", msg.subject);
-        try std.testing.expectEqualStrings("Hello from minimal test!", msg.data);
-    } else {
-        return error.NoMessageReceived;
-    }
+    try std.testing.expectEqualStrings("test.minimal", msg.subject);
+    try std.testing.expectEqualStrings("Hello from minimal test!", msg.data);
 }
 
 test "async subscribe" {

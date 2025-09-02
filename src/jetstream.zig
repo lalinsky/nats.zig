@@ -510,9 +510,11 @@ pub const PullSubscription = struct {
 
                     try messages.append(js_msg_ptr);
                 }
-            } else {
-                // Timeout occurred
-                batch_complete = true;
+            } else |err| switch (err) {
+                error.Timeout => {
+                    // Timeout occurred
+                    batch_complete = true;
+                },
             }
         }
 
@@ -543,14 +545,14 @@ pub const JetStreamSubscription = struct {
     }
 
     /// Get the next JetStream message synchronously (for sync subscriptions)
-    pub fn nextMsg(self: *JetStreamSubscription, timeout_ms: u64) ?*JetStreamMessage {
+    pub fn nextMsg(self: *JetStreamSubscription, timeout_ms: u64) error{Timeout}!*JetStreamMessage {
         // Get the next message from the underlying subscription
-        const msg = self.subscription.nextMsg(timeout_ms) orelse return null;
+        const msg = self.subscription.nextMsg(timeout_ms) catch |err| return err;
 
         // Convert to JetStream message
         const js_msg = jetstream_message.createJetStreamMessage(self.js.nc, msg) catch {
             msg.deinit(); // Clean up on error
-            return null;
+            return error.Timeout; // Convert any error to Timeout for API consistency
         };
 
         return js_msg;
