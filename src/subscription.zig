@@ -121,7 +121,7 @@ pub const Subscription = struct {
         return self.messages.pop(timeout_ms) catch |err| switch (err) {
             error.BufferFrozen => error.Timeout,
             error.QueueEmpty => error.Timeout,
-            error.QueueClosed => error.Timeout,  // TODO: this should be mapped to ConnectionClosed
+            error.QueueClosed => error.Timeout, // TODO: this should be mapped to ConnectionClosed
         };
     }
 };
