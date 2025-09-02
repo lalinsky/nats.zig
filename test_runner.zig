@@ -77,6 +77,7 @@ pub fn testLogFn(
 
 // Override std.log with our custom function
 pub const std_options: std.Options = .{
+    .log_level = .debug,
     .logFn = testLogFn,
 };
 
