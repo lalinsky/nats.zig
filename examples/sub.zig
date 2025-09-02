@@ -17,6 +17,7 @@ pub fn main() !void {
 
     // Subscribe to subject (sync)
     const sub = try conn.subscribeSync("foo");
+    defer sub.deinit();
 
     std.log.info("Waiting for message (5 second timeout)...", .{});
 
