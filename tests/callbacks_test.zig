@@ -17,7 +17,7 @@ var counts: Counters = Counters{};
 test "close callback" {
     counts.reset();
 
-    const conn = try utils.createConnectionOption(.node1, .{
+    const conn = try utils.createConnection(.node1, .{
         .callbacks = .{
             .closed_cb = struct {
                 fn close(_: *nats.Connection) void {

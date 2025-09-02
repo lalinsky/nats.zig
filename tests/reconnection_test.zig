@@ -90,10 +90,7 @@ test "basic reconnection when server stops" {
     log.debug("Restarting nats-1", .{});
     try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
 
-    // Verify connection works after reconnection
-    log.debug("Trying to publish after reconnection", .{});
-    try nc.publish("test.after", "hello after reconnection");
-
+    // Wait for reconnection before publishing
     var timer = try std.time.Timer.start();
     while (!nc.isConnected()) {
         const elapsed = timer.read();
@@ -103,6 +100,10 @@ test "basic reconnection when server stops" {
 
         std.time.sleep(10 * std.time.ns_per_ms);
     }
+
+    // Verify connection works after reconnection
+    log.debug("Publishing after reconnection", .{});
+    try nc.publish("test.after", "hello after reconnection");
 
     try testing.expectEqual(1, tracker.reconnected_called);
 }

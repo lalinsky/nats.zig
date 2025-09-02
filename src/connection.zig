@@ -209,6 +209,7 @@ pub const Connection = struct {
     // Threading
     reader_thread: ?std.Thread = null,
     flusher_thread: ?std.Thread = null,
+    reconnect_thread: ?std.Thread = null,
     should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     should_stop_cond: std.Thread.Condition = .{}, // Signals when should_stop becomes true
 
@@ -268,6 +269,10 @@ pub const Connection = struct {
         if (self.reader_thread) |thread| {
             thread.join();
             self.reader_thread = null;
+        }
+        if (self.reconnect_thread) |thread| {
+            thread.join();
+            self.reconnect_thread = null;
         }
 
         // Release global dispatcher pool
@@ -861,11 +866,6 @@ pub const Connection = struct {
         log.debug("Reader loop started", .{});
 
         while (!self.should_stop.load(.acquire)) {
-            if (self.getStatus() == .disconnected) {
-                self.doReconnect();
-                continue;
-            }
-
             self.readerIteration() catch |err| {
                 // Handle errors from readerIteration
                 switch (err) {
@@ -1297,10 +1297,36 @@ pub const Connection = struct {
         self.status = .disconnected;
         self.cleanupFailedConnection(err, false);
 
+        // Spawn reconnect thread if not already running
+        if (self.reconnect_thread == null) {
+            self.reconnect_thread = std.Thread.spawn(.{}, doReconnectThread, .{self}) catch |spawn_err| {
+                log.err("Failed to spawn reconnect thread: {}", .{spawn_err});
+                // Fall back to closing connection
+                needs_close = true;
+                return;
+            };
+        }
+
         // Invoke disconnected callback
         if (self.options.callbacks.disconnected_cb) |cb| {
             callback = cb;
         }
+    }
+
+    fn doReconnectThread(self: *Self) void {
+        defer {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // Detach thread and mark as null
+            if (self.reconnect_thread) |thread| {
+                thread.detach();
+                self.reconnect_thread = null;
+            }
+        }
+
+        // Run existing doReconnect logic
+        self.doReconnect();
     }
 
     fn doReconnect(self: *Self) void {
