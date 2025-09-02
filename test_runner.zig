@@ -41,6 +41,8 @@ const LogCapture = struct {
             buf.writer().print(scope_prefix ++ format ++ "\n", args) catch unreachable;
         } else {
             // Normal logging to stderr when not capturing
+            std.debug.lockStdErr();
+            defer std.debug.unlockStdErr();
             const stderr = std.io.getStdErr().writer();
             stderr.print(scope_prefix ++ format ++ "\n", args) catch unreachable;
         }
