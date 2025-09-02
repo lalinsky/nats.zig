@@ -28,15 +28,13 @@ const LogCapture = struct {
         comptime format: []const u8,
         args: anytype,
     ) void {
-        _ = level; // Suppress unused parameter warning
-
         self.mutex.lock();
         defer self.mutex.unlock();
 
         const scope_prefix = "(" ++ switch (scope) {
             std.log.default_log_scope => @tagName(scope),
             else => @tagName(scope),
-        } ++ "): ";
+        } ++ "/" ++ @tagName(level) ++ "): ";
 
         if (self.captured_log_buffer) |buf| {
             // Capture to buffer during test execution

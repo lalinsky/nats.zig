@@ -746,7 +746,7 @@ fn parseInChunks(parser: *Parser, conn: *MockConnection, data: []const u8, chunk
 test "parser split msg" {
     const data = "MSG foo 1 11\r\nhello world\r\n";
     for (1..data.len) |chunk_size| {
-        log.info("chunk_size: {}", .{chunk_size});
+        log.debug("chunk_size: {}", .{chunk_size});
 
         var parser = Parser.init(std.testing.allocator);
         defer parser.deinit();
