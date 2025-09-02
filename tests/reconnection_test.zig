@@ -8,37 +8,61 @@ const testing = std.testing;
 var tracker: CallbackTracker = .{};
 
 const CallbackTracker = struct {
-    disconnected_called: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    reconnected_called: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    closed_called: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    error_called: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    disconnected_called: u32 = 0,
+    reconnected_called: u32 = 0,
+    closed_called: u32 = 0,
+    error_called: u32 = 0,
+    mutex: std.Thread.Mutex = .{},
+    cond: std.Thread.Condition = .{},
 
     fn reset(self: *@This()) void {
-        self.disconnected_called.store(false, .release);
-        self.reconnected_called.store(false, .release);
-        self.closed_called.store(false, .release);
-        self.error_called.store(false, .release);
+        self.disconnected_called = 0;
+        self.reconnected_called = 0;
+        self.closed_called = 0;
+        self.error_called = 0;
     }
 
     fn disconnectedCallback(conn: *nats.Connection) void {
+        var self = &tracker;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.disconnected_called += 1;
+        self.cond.signal();
         _ = conn;
-        tracker.disconnected_called.store(true, .release);
     }
 
     fn reconnectedCallback(conn: *nats.Connection) void {
+        var self = &tracker;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.reconnected_called += 1;
+        self.cond.signal();
         _ = conn;
-        tracker.reconnected_called.store(true, .release);
     }
 
     fn closedCallback(conn: *nats.Connection) void {
+        var self = &tracker;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.closed_called += 1;
+        self.cond.signal();
         _ = conn;
-        tracker.closed_called.store(true, .release);
     }
 
     fn errorCallback(conn: *nats.Connection, msg: []const u8) void {
+        var self = &tracker;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.error_called += 1;
+        self.cond.signal();
         _ = conn;
         _ = msg;
-        tracker.error_called.store(true, .release);
+    }
+
+    fn timedWait(self: *@This(), timeout_ms: u32) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.cond.timedWait(self.mutex, timeout_ms * std.time.ns_per_ms);
     }
 };
 
@@ -62,7 +86,6 @@ test "basic reconnection when server stops" {
     // Publish a test message to ensure connection works
     log.debug("Publishing test message before", .{});
     try nc.publish("test.before", "hello before");
-    try nc.flush();
 
     log.debug("Restarting nats-1", .{});
     try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
@@ -70,7 +93,16 @@ test "basic reconnection when server stops" {
     // Verify connection works after reconnection
     log.debug("Trying to publish after reconnection", .{});
     try nc.publish("test.after", "hello after reconnection");
-    try nc.flush();
 
-    try testing.expectEqual(true, tracker.reconnected_called.load(.acquire));
+    var timer = try std.time.Timer.start();
+    while (!nc.isConnected()) {
+        const elapsed = timer.read();
+        if (elapsed >= 10000 * std.time.ns_per_ms) {
+            return error.StillNotConnected;
+        }
+
+        std.time.sleep(10 * std.time.ns_per_ms);
+    }
+
+    try testing.expectEqual(1, tracker.reconnected_called);
 }
