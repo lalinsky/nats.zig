@@ -10,7 +10,7 @@ test "subscribeSync smoke test" {
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("test");
-    defer conn.unsubscribe(sub);
+    defer sub.deinit();
 
     try conn.publish("test", "Hello world!");
     try conn.flush();
@@ -27,7 +27,7 @@ test "queueSubscribeSync smoke test" {
     defer utils.closeConnection(conn);
 
     const sub = try conn.queueSubscribeSync("test", "workers");
-    defer conn.unsubscribe(sub);
+    defer sub.deinit();
 
     try conn.publish("test", "Hello world!");
     try conn.flush();
@@ -81,7 +81,7 @@ test "subscribe smoke test" {
     defer collector.deinit();
 
     const sub = try conn.subscribe("test", MessageCollector.processMsg, .{&collector});
-    defer conn.unsubscribe(sub);
+    defer sub.deinit();
 
     try conn.publish("test", "Hello world!");
     try conn.flush();
@@ -99,7 +99,7 @@ test "queueSubscribe smoke test" {
     defer collector.deinit();
 
     const sub = try conn.queueSubscribe("test", "workers", MessageCollector.processMsg, .{&collector});
-    defer conn.unsubscribe(sub);
+    defer sub.deinit();
 
     try conn.publish("test", "Hello world!");
     try conn.flush();

@@ -286,7 +286,7 @@ pub const Connection = struct {
         // Clean up subscriptions - release connection's references first
         var iter = self.subscriptions.iterator();
         while (iter.next()) |entry| {
-            entry.value_ptr.*.release(self.allocator); // Release connection's ownership reference
+            entry.value_ptr.*.release(); // Release connection's ownership reference
         }
         self.subscriptions.deinit();
 
@@ -600,8 +600,8 @@ pub const Connection = struct {
         errdefer handler.cleanup(self.allocator);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.create(self.allocator, sid, subject, null, handler);
-        errdefer sub.release(self.allocator);
+        const sub = try Subscription.create(self, sid, subject, null, handler);
+        errdefer sub.release();
 
         try self.ensureDispatcherPool();
         sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
@@ -615,8 +615,8 @@ pub const Connection = struct {
     /// Subscribe to a subject, the code is responsible for handling the fetching
     pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.create(self.allocator, sid, subject, null, null);
-        errdefer sub.release(self.allocator);
+        const sub = try Subscription.create(self, sid, subject, null, null);
+        errdefer sub.release();
 
         try self.subscribeInternal(sub);
 
@@ -631,8 +631,8 @@ pub const Connection = struct {
         errdefer handler.cleanup(self.allocator);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.create(self.allocator, sid, subject, queue, handler);
-        errdefer sub.release(self.allocator);
+        const sub = try Subscription.create(self, sid, subject, queue, handler);
+        errdefer sub.release();
 
         try self.ensureDispatcherPool();
         sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
@@ -648,8 +648,8 @@ pub const Connection = struct {
         if (queue.len == 0) return error.EmptyQueueGroupName;
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.create(self.allocator, sid, subject, queue, null);
-        errdefer sub.release(self.allocator);
+        const sub = try Subscription.create(self, sid, subject, queue, null);
+        errdefer sub.release();
 
         try self.subscribeInternal(sub);
 
@@ -688,7 +688,7 @@ pub const Connection = struct {
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
 
-        sub.release(self.allocator);
+        sub.release();
     }
 
     pub fn flush(self: *Self) !void {
@@ -999,7 +999,7 @@ pub const Connection = struct {
         defer if (owns_message) message.deinit();
 
         if (sub) |s| {
-            defer s.release(self.allocator); // Release when done
+            defer s.release(); // Release when done
 
             // Log before consuming message (to avoid use-after-free)
             log.debug("Delivering message to subscription {d}: {s}", .{ message.sid, message.data });

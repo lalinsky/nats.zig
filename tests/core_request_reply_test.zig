@@ -43,7 +43,7 @@ test "basic request reply" {
     defer utils.closeConnection(conn);
 
     const replier_sub = try conn.subscribe("test.echo", echoHandler, .{conn});
-    defer conn.unsubscribe(replier_sub);
+    defer replier_sub.deinit();
 
     // Give the subscription time to register
     std.time.sleep(10_000_000); // 10ms
@@ -62,7 +62,7 @@ test "simple request reply functionality" {
 
     // Create a replier that echoes back the request
     const replier_sub = try conn.subscribe("test.simple.echo", simpleEchoHandler, .{conn});
-    defer conn.unsubscribe(replier_sub);
+    defer replier_sub.deinit();
 
     // Give the subscription time to register
     std.time.sleep(10_000_000); // 10ms
@@ -80,7 +80,7 @@ test "concurrent request reply" {
 
     // Create echo handler
     const replier_sub = try conn.subscribe("test.concurrent", echoHandler, .{conn});
-    defer conn.unsubscribe(replier_sub);
+    defer replier_sub.deinit();
 
     std.time.sleep(10_000_000); // 10ms
 
@@ -121,7 +121,7 @@ test "request timeout with slow responder" {
 
     // Set up a slow responder that takes 200ms to respond
     const slow_sub = try conn.subscribe("test.slow", slowEchoHandler, .{conn});
-    defer conn.unsubscribe(slow_sub);
+    defer slow_sub.deinit();
 
     std.time.sleep(10_000_000); // 10ms
 
@@ -138,10 +138,10 @@ test "request with different subjects" {
 
     // Set up multiple echo handlers on different subjects
     const replier1 = try conn.subscribe("test.subject1", echoHandler, .{conn});
-    defer conn.unsubscribe(replier1);
+    defer replier1.deinit();
 
     const replier2 = try conn.subscribe("test.subject2", echoHandler, .{conn});
-    defer conn.unsubscribe(replier2);
+    defer replier2.deinit();
 
     std.time.sleep(10_000_000); // 10ms
 
@@ -161,7 +161,7 @@ test "requestMsg basic functionality" {
 
     // Create echo handler
     const replier_sub = try conn.subscribe("test.requestmsg", simpleEchoHandler, .{conn});
-    defer conn.unsubscribe(replier_sub);
+    defer replier_sub.deinit();
 
     std.time.sleep(10_000_000); // 10ms
 
@@ -185,7 +185,7 @@ test "requestMsg with headers" {
 
     // Create handler that echoes back with headers
     const replier_sub = try conn.subscribe("test.requestmsg.headers", echoHandler, .{conn});
-    defer conn.unsubscribe(replier_sub);
+    defer replier_sub.deinit();
 
     std.time.sleep(10_000_000); // 10ms
 
@@ -241,7 +241,7 @@ test "requestMany with max_messages" {
 
     // Set up handler that sends multiple responses
     const replier_sub = try conn.subscribe("test.many", multiResponder, .{conn});
-    defer conn.unsubscribe(replier_sub);
+    defer replier_sub.deinit();
 
     // Request with max 2 messages
     var messages = try conn.requestMany("test.many", "get many", 1000, .{ .max_messages = 2 });
@@ -262,7 +262,7 @@ test "requestMany with timeout collecting all" {
 
     // Set up handler that sends multiple responses
     const replier_sub = try conn.subscribe("test.many.all", multiResponder, .{conn});
-    defer conn.unsubscribe(replier_sub);
+    defer replier_sub.deinit();
 
     // Request with no max, should collect all 3 and timeout
     var messages = try conn.requestMany("test.many.all", "get all", 100, .{});
@@ -299,7 +299,7 @@ test "requestMany with sentinel function" {
 
     // Set up handler that sends responses with sentinel
     const replier_sub = try conn.subscribe("test.sentinel", sentinelResponder, .{conn});
-    defer conn.unsubscribe(replier_sub);
+    defer replier_sub.deinit();
 
     std.time.sleep(10_000_000); // 10ms
 

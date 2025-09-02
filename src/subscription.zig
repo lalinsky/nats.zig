@@ -39,6 +39,7 @@ pub const MsgHandler = struct {
 };
 
 pub const Subscription = struct {
+    nc: *Connection,
     sid: u64,
     subject: []const u8,
     queue: ?[]const u8 = null,
@@ -55,36 +56,41 @@ pub const Subscription = struct {
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
-    pub fn create(allocator: std.mem.Allocator, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
-        const sub = try allocator.create(Subscription);
-        errdefer allocator.destroy(sub);
+    pub fn create(nc: *Connection, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
+        const sub = try nc.allocator.create(Subscription);
+        errdefer nc.allocator.destroy(sub);
 
-        const subject_copy = try allocator.dupe(u8, subject);
-        errdefer allocator.free(subject_copy);
+        const subject_copy = try nc.allocator.dupe(u8, subject);
+        errdefer nc.allocator.free(subject_copy);
 
-        const queue_group_copy = if (queue_group) |group| try allocator.dupe(u8, group) else null;
-        errdefer if (queue_group_copy) |group| allocator.free(group);
+        const queue_group_copy = if (queue_group) |group| try nc.allocator.dupe(u8, group) else null;
+        errdefer if (queue_group_copy) |group| nc.allocator.free(group);
 
         sub.* = Subscription{
+            .nc = nc,
             .sid = sid,
             .subject = subject_copy,
             .queue = queue_group_copy,
-            .messages = MessageQueue.init(allocator, .{}),
+            .messages = MessageQueue.init(nc.allocator, .{}),
             .handler = handler,
         };
         return sub;
     }
 
-    fn destroy(self: *Subscription, allocator: std.mem.Allocator) void {
-        allocator.free(self.subject);
+    pub fn deinit(self: *Subscription) void {
+        self.nc.unsubscribe(self);
+    }
+
+    fn destroy(self: *Subscription) void {
+        self.nc.allocator.free(self.subject);
 
         if (self.queue) |queue_group| {
-            allocator.free(queue_group);
+            self.nc.allocator.free(queue_group);
         }
 
         // Clean up handler context if present
         if (self.handler) |handler| {
-            handler.cleanup(allocator);
+            handler.cleanup(self.nc.allocator);
         }
 
         // Close the queue to prevent new messages and clean up pending messages
@@ -94,17 +100,17 @@ pub const Subscription = struct {
         }
         self.messages.deinit();
 
-        allocator.destroy(self);
+        self.nc.allocator.destroy(self);
     }
 
     pub fn retain(self: *Subscription) void {
         self.ref_counter.incr();
     }
 
-    pub fn release(self: *Subscription, allocator: std.mem.Allocator) void {
+    pub fn release(self: *Subscription) void {
         if (self.ref_counter.decr()) {
             // Last reference - actually free the subscription
-            self.destroy(allocator);
+            self.destroy();
         }
     }
 

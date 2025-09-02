@@ -30,9 +30,7 @@ pub fn main() !void {
         std.debug.print("Failed to subscribe: {}\n", .{err});
         return err;
     };
-    defer {
-        conn.unsubscribe(sub);
-    }
+    defer sub.deinit();
 
     std.debug.print("Echo server listening on subject 'echo'...\n", .{});
     std.debug.print("Press Ctrl+C to stop\n", .{});
