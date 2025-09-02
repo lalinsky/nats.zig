@@ -112,13 +112,10 @@ pub const ConnectionError = error{
 } || PublishError || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
 
 pub const ConnectionStatus = enum {
-    disconnected,
+    closed,
     connecting,
     connected,
     reconnecting,
-    closed,
-    draining_subs,
-    draining_pubs,
 };
 
 pub const HandshakeState = enum {
@@ -186,7 +183,7 @@ pub const Connection = struct {
     allocator: Allocator,
     options: ConnectionOptions,
 
-    status: ConnectionStatus = .disconnected,
+    status: ConnectionStatus = .closed,
 
     // Network
     socket: ?Socket = null,
@@ -211,6 +208,7 @@ pub const Connection = struct {
     // Threading
     reader_thread: ?std.Thread = null,
     flusher_thread: ?std.Thread = null,
+    reconnect_thread: ?std.Thread = null,
     should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     should_stop_cond: std.Thread.Condition = .{}, // Signals when should_stop becomes true
 
@@ -271,6 +269,10 @@ pub const Connection = struct {
             thread.join();
             self.reader_thread = null;
         }
+        if (self.reconnect_thread) |thread| {
+            thread.join();
+            self.reconnect_thread = null;
+        }
 
         // Release global dispatcher pool
         if (self.dispatcher_pool != null) {
@@ -323,7 +325,7 @@ pub const Connection = struct {
     }
 
     pub fn connect(self: *Self, url: []const u8) !void {
-        if (self.status != .disconnected) {
+        if (self.status != .closed) {
             return ConnectionError.ConnectionFailed;
         }
 
@@ -350,7 +352,7 @@ pub const Connection = struct {
 
         // Get server using C library's GetNextServer algorithm
         const selected_server = try self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) orelse {
-            self.status = .disconnected;
+            self.status = .closed;
             return ConnectionError.ConnectionFailed;
         };
 
@@ -359,14 +361,14 @@ pub const Connection = struct {
         selected_server.reconnects += 1;
 
         // Establish connection (under mutex for consistent state management)
-        self.establishConnection(selected_server) catch {
-            self.status = .disconnected;
-            return ConnectionError.ConnectionFailed;
+        self.establishConnection(selected_server) catch |err| {
+            self.status = .closed;
+            self.cleanupFailedConnection(err, true);
+            return err;
         };
 
         // Socket is now established and connection state is set up
         self.should_stop.store(false, .monotonic);
-        self.status = .connecting;
 
         // Start reader thread - it will handle the handshake
         self.reader_thread = try std.Thread.spawn(.{}, readerLoop, .{self});
@@ -377,9 +379,8 @@ pub const Connection = struct {
         // Wait for handshake completion
         self.waitForHandshakeCompletion() catch |err| {
             // Clean up failed handshake state and close socket
-            self.status = .disconnected;
+            self.status = .closed;
             self.cleanupFailedConnection(err, true);
-
             return err;
         };
 
@@ -448,6 +449,15 @@ pub const Connection = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.status;
+    }
+
+    pub fn isConnected(self: *Self) bool {
+        return self.getStatus() == .connected;
+    }
+
+    pub fn isConnecting(self: *Self) bool {
+        const status = self.getStatus();
+        return status == .connecting or status == .reconnecting;
     }
 
     /// Publishes data on a subject.
@@ -535,11 +545,13 @@ pub const Connection = struct {
             try buffer_writer.writeAll("\r\n");
         }
 
+        log.debug("status = {}", .{self.status});
+
         // Allow publishes when connected or reconnecting (buffered).
         // Reject when not usable for sending.
         switch (self.status) {
             .connected, .reconnecting => {},
-            .closed, .connecting, .disconnected, .draining_subs, .draining_pubs => {
+            else => {
                 return ConnectionError.ConnectionClosed;
             },
         }
@@ -823,7 +835,11 @@ pub const Connection = struct {
             return err;
         };
 
-        // Setup connection state (assuming mutex is held by caller)
+        if (self.options.trace) {
+            log.debug("Connected, starting handshake...", .{});
+        }
+
+        // Setup connection state
         self.socket = socket;
         self.socket_available_cond.broadcast();
 
@@ -849,15 +865,6 @@ pub const Connection = struct {
         log.debug("Reader loop started", .{});
 
         while (!self.should_stop.load(.acquire)) {
-            self.mutex.lock();
-            const status = self.status;
-            self.mutex.unlock();
-
-            if (status == .reconnecting) {
-                self.doReconnect();
-                continue;
-            }
-
             self.readerIteration() catch |err| {
                 // Handle errors from readerIteration
                 switch (err) {
@@ -1289,10 +1296,36 @@ pub const Connection = struct {
         self.status = .reconnecting;
         self.cleanupFailedConnection(err, false);
 
+        // Spawn reconnect thread if not already running
+        if (self.reconnect_thread == null) {
+            self.reconnect_thread = std.Thread.spawn(.{}, doReconnectThread, .{self}) catch |spawn_err| {
+                log.err("Failed to spawn reconnect thread: {}", .{spawn_err});
+                // Fall back to closing connection
+                needs_close = true;
+                return;
+            };
+        }
+
         // Invoke disconnected callback
         if (self.options.callbacks.disconnected_cb) |cb| {
             callback = cb;
         }
+    }
+
+    fn doReconnectThread(self: *Self) void {
+        defer {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // Detach thread and mark as null
+            if (self.reconnect_thread) |thread| {
+                thread.detach();
+                self.reconnect_thread = null;
+            }
+        }
+
+        // Run existing doReconnect logic
+        self.doReconnect();
     }
 
     fn doReconnect(self: *Self) void {
@@ -1359,27 +1392,20 @@ pub const Connection = struct {
             server.reconnects += 1;
             total_attempts += 1;
             server_cycle_count += 1;
-            self.status = .connecting;
 
-            // Try to establish connection (no mutex needed for network I/O)
             log.debug("Reconnection attempt {} to {s}:{d}", .{ total_attempts, server.parsed_url.host, server.parsed_url.port });
 
+            // Try to establish connection
             self.establishConnection(server) catch |err| {
-                self.status = .reconnecting;
                 log.debug("Reconnection attempt {} failed: {}", .{ total_attempts, err });
+                self.cleanupFailedConnection(err, true);
                 continue;
             };
 
-            // Socket established and connection state set up by establishConnection
-            self.status = .connecting;
-
-            // Wait for handshake completion
+            // Try to execute the handshake procedure
             self.waitForHandshakeCompletion() catch |err| {
-                // Clean up failed handshake state and close socket
-                self.status = .reconnecting;
-                self.cleanupFailedConnection(err, true);
-
                 log.debug("Reconnect handshake failed: {}", .{err});
+                self.cleanupFailedConnection(err, true);
                 continue;
             };
 
