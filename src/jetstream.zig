@@ -538,16 +538,8 @@ pub const JetStreamSubscription = struct {
 
     pub fn deinit(self: *JetStreamSubscription) void {
         self.consumer_info.deinit();
-
-        // Clean up the underlying subscription (this will clean up the handler context)
-        self.js.nc.unsubscribe(self.subscription);
-
+        self.subscription.deinit();
         self.js.allocator.destroy(self);
-    }
-
-    /// Unsubscribe from the delivery subject
-    pub fn unsubscribe(self: *JetStreamSubscription) void {
-        self.js.nc.unsubscribe(self.subscription);
     }
 
     /// Get the next JetStream message synchronously (for sync subscriptions)
