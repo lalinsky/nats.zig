@@ -22,7 +22,10 @@ pub fn main() !void {
     std.log.info("Waiting for messages...", .{});
 
     while (true) {
-        var msg = sub.nextMsg(1000) catch continue;
+        var msg = sub.nextMsg(1000) catch |err| {
+            if (err == error.Timeout) continue;
+            return err;
+        };
         defer msg.deinit();
 
         std.log.info("Received message: {s} - {s}", .{ msg.subject, msg.data });
