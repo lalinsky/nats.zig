@@ -17,24 +17,15 @@ pub fn main() !void {
 
     // Subscribe to subject (sync)
     const sub = try conn.subscribeSync("foo");
+    defer sub.deinit();
 
-    std.log.info("Waiting for message (5 second timeout)...", .{});
+    std.log.info("Waiting for messages...", .{});
 
-    // Wait for message (poll every 100ms for 5 seconds)
-    var attempts: u32 = 0;
-    const max_attempts = 50; // 50 * 100ms = 5 seconds
-
-    while (attempts < max_attempts) {
-        var msg = sub.nextMsg(100) catch {
-            std.time.sleep(100 * std.time.ns_per_ms);
-            attempts += 1;
-            continue;
-        };
+    while (true) {
+        var msg = sub.nextMsg(1000) catch continue;
         defer msg.deinit();
 
         std.log.info("Received message: {s} - {s}", .{ msg.subject, msg.data });
         return;
     }
-
-    std.log.info("No message received within timeout", .{});
 }
