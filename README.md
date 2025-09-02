@@ -55,7 +55,7 @@ while (true) {
     defer msg.deinit();
 
     counter += 1;
-    std.debug.print("Message #{d}: {s}\n", .{ counter.*, msg.data });
+    std.debug.print("Message #{d}: {s}\n", .{ counter, msg.data });
 }
 ```
 
