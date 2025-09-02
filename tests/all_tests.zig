@@ -21,13 +21,20 @@ test {
     _ = @import("jetstream_large_list_test.zig");
 }
 
+test "tests:beforeEach" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try utils.waitForHealthyServices(allocator, 10_000);
+}
+
 test "tests:beforeAll" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     try utils.runDockerCompose(allocator, &.{ "up", "-d" });
-    try utils.waitForHealthyServices(allocator, 10_000);
 }
 
 test "tests:afterAll" {
