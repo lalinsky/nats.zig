@@ -348,18 +348,18 @@ test "requestMany with stall timeout" {
             // Wait for the request message
             const request_msg = sub.nextMsg(1000) catch return;
             defer request_msg.deinit();
-            
+
             const reply_subject = request_msg.reply orelse return;
-            
+
             // Send first response immediately
             connection.publish(reply_subject, "response-1") catch return;
-            
-            // Send second response after 10ms (within stall timeout)  
+
+            // Send second response after 10ms (within stall timeout)
             std.time.sleep(10_000_000); // 10ms
             connection.publish(reply_subject, "response-2") catch return;
-            
+
             // Wait 150ms (longer than 100ms stall timeout) then try to send third response
-            std.time.sleep(150_000_000); // 150ms  
+            std.time.sleep(150_000_000); // 150ms
             connection.publish(reply_subject, "response-3") catch return;
         }
     };
