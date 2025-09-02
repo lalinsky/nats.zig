@@ -115,7 +115,6 @@ pub const ConnectionStatus = enum {
     closed,
     connecting,
     connected,
-    disconnected,
     reconnecting,
 };
 
@@ -551,7 +550,7 @@ pub const Connection = struct {
         // Allow publishes when connected or reconnecting (buffered).
         // Reject when not usable for sending.
         switch (self.status) {
-            .connected, .connecting, .reconnecting => {},
+            .connected, .reconnecting => {},
             else => {
                 return ConnectionError.ConnectionClosed;
             },
@@ -1294,7 +1293,7 @@ pub const Connection = struct {
         log.info("Connection lost: {}", .{err});
 
         // Perform connection cleanup (don't close socket - let reconnect handle it)
-        self.status = .disconnected;
+        self.status = .reconnecting;
         self.cleanupFailedConnection(err, false);
 
         // Spawn reconnect thread if not already running
@@ -1340,11 +1339,9 @@ pub const Connection = struct {
         defer self.mutex.unlock();
 
         // Check if we should still reconnect (could have been closed)
-        if (self.status != .disconnected) {
+        if (self.status != .reconnecting) {
             return;
         }
-
-        self.status = .reconnecting;
 
         log.debug("Starting reconnection", .{});
 
