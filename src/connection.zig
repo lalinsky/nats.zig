@@ -670,24 +670,23 @@ pub const Connection = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.status != .connected) {
-            return ConnectionError.ConnectionClosed;
-        }
-
-        // Remove from subscriptions map
+        // Remove from subscriptions map (always do local cleanup)
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
         if (self.subscriptions.remove(sub.sid)) {
             sub.release(); // Release connection's ownership reference
         }
 
-        // Send UNSUB command
-        const allocator = self.scratch.allocator();
-        defer self.resetScratch();
+        // Only send UNSUB command if connected
+        if (self.status == .connected) {
+            // Send UNSUB command
+            const allocator = self.scratch.allocator();
+            defer self.resetScratch();
 
-        var buffer = ArrayList(u8).init(allocator);
-        try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
-        try self.write_buffer.append(buffer.items);
+            var buffer = ArrayList(u8).init(allocator);
+            try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
+            try self.write_buffer.append(buffer.items);
+        }
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
     }
