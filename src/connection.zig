@@ -280,19 +280,19 @@ pub const Connection = struct {
             self.dispatcher_pool = null;
         }
 
+        // Clean up response manager
+        self.response_manager.deinit();
+
         // Clean up subscriptions - release connection's references first
         var iter = self.subscriptions.iterator();
         while (iter.next()) |entry| {
-            entry.value_ptr.*.release(); // Release connection's ownership reference
+            entry.value_ptr.*.release(self.allocator); // Release connection's ownership reference
         }
         self.subscriptions.deinit();
 
         // Clean up the buffers
         self.pending_buffer.deinit();
         self.write_buffer.deinit();
-
-        // Clean up response manager
-        self.response_manager.deinit();
 
         // Clean up server pool
         self.server_pool.deinit();
@@ -545,8 +545,6 @@ pub const Connection = struct {
             try buffer_writer.writeAll("\r\n");
         }
 
-        log.debug("status = {}", .{self.status});
-
         // Allow publishes when connected or reconnecting (buffered).
         // Reject when not usable for sending.
         switch (self.status) {
@@ -582,20 +580,14 @@ pub const Connection = struct {
         defer self.subs_mutex.unlock();
 
         try self.subscriptions.put(sub.sid, sub);
-        sub.retain(); // Connection takes ownership reference
-
-        errdefer {
-            if (self.subscriptions.remove(sub.sid)) {
-                sub.release();
-            }
-        }
+        errdefer _ = self.subscriptions.remove(sub.sid);
 
         // Send SUB command via buffer
         const allocator = self.scratch.allocator();
         defer self.resetScratch();
 
         var buffer = ArrayList(u8).init(allocator);
-        if (sub.queue_group) |group| {
+        if (sub.queue) |group| {
             try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, group, sub.sid });
         } else {
             try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
@@ -608,8 +600,8 @@ pub const Connection = struct {
         errdefer handler.cleanup(self.allocator);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject, null, handler);
-        errdefer sub.deinit();
+        const sub = try Subscription.create(self.allocator, sid, subject, null, handler);
+        errdefer sub.release(self.allocator);
 
         try self.ensureDispatcherPool();
         sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
@@ -623,8 +615,8 @@ pub const Connection = struct {
     /// Subscribe to a subject, the code is responsible for handling the fetching
     pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject, null, null);
-        errdefer sub.deinit();
+        const sub = try Subscription.create(self.allocator, sid, subject, null, null);
+        errdefer sub.release(self.allocator);
 
         try self.subscribeInternal(sub);
 
@@ -632,63 +624,71 @@ pub const Connection = struct {
         return sub;
     }
 
-    pub fn queueSubscribe(self: *Self, subject: []const u8, queue_group: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
-        if (queue_group.len == 0) return error.EmptyQueueGroupName;
+    pub fn queueSubscribe(self: *Self, subject: []const u8, queue: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
+        if (queue.len == 0) return error.EmptyQueueGroupName;
 
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
         errdefer handler.cleanup(self.allocator);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject, queue_group, handler);
-        errdefer sub.deinit();
+        const sub = try Subscription.create(self.allocator, sid, subject, queue, handler);
+        errdefer sub.release(self.allocator);
 
         try self.ensureDispatcherPool();
         sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
 
         try self.subscribeInternal(sub);
 
-        log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (async)", .{ sub.subject, queue_group, sub.sid });
+        log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (async)", .{ sub.subject, queue, sub.sid });
         return sub;
     }
 
     /// Subscribe to a subject, the code is responsible for handling the fetching
-    pub fn queueSubscribeSync(self: *Self, subject: []const u8, queue_group: []const u8) !*Subscription {
-        if (queue_group.len == 0) return error.EmptyQueueGroupName;
+    pub fn queueSubscribeSync(self: *Self, subject: []const u8, queue: []const u8) !*Subscription {
+        if (queue.len == 0) return error.EmptyQueueGroupName;
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject, queue_group, null);
-        errdefer sub.deinit();
+        const sub = try Subscription.create(self.allocator, sid, subject, queue, null);
+        errdefer sub.release(self.allocator);
 
         try self.subscribeInternal(sub);
 
-        log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (sync)", .{ sub.subject, queue_group, sub.sid });
+        log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (sync)", .{ sub.subject, queue, sub.sid });
         return sub;
     }
 
-    pub fn unsubscribe(self: *Self, sub: *Subscription) !void {
-        // Lock asaply like C library
+    pub fn unsubscribeInternal(self: *Self, sid: u64) void {
+        var buffer: [256]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buffer);
+        var writer = stream.writer();
+
+        writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
+
+        self.write_buffer.append(stream.getWritten()) catch |err| {
+            log.err("Failed to enqueue UNSUB message for sid {d}: {}", .{ sid, err });
+        };
+    }
+
+    pub fn unsubscribe(self: *Self, sub: *Subscription) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Remove from subscriptions map (always do local cleanup)
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
-        if (self.subscriptions.remove(sub.sid)) {
-            sub.release(); // Release connection's ownership reference
+
+        if (!self.subscriptions.remove(sub.sid)) {
+            // Nothing to do, already unsubscribed
+            return;
         }
 
-        // Only send UNSUB command if connected
-        if (self.status == .connected) {
-            // Send UNSUB command
-            const allocator = self.scratch.allocator();
-            defer self.resetScratch();
-
-            var buffer = ArrayList(u8).init(allocator);
-            try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
-            try self.write_buffer.append(buffer.items);
-        }
+        // Try to send UNSUB command. Even if it fails internally,
+        // processMsg will keep sending UNSUB commands once
+        // it receives a message with unknown sid.
+        self.unsubscribeInternal(sub.sid);
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
+
+        sub.release(self.allocator);
     }
 
     pub fn flush(self: *Self) !void {
@@ -995,8 +995,11 @@ pub const Connection = struct {
         }
         self.subs_mutex.unlock();
 
+        var owns_message = true;
+        defer if (owns_message) message.deinit();
+
         if (sub) |s| {
-            defer s.release(); // Release when done
+            defer s.release(self.allocator); // Release when done
 
             // Log before consuming message (to avoid use-after-free)
             log.debug("Delivering message to subscription {d}: {s}", .{ message.sid, message.data });
@@ -1006,12 +1009,11 @@ pub const Connection = struct {
                 if (s.dispatcher) |dispatcher| {
                     dispatcher.enqueue(s, message) catch |err| {
                         log.err("Failed to dispatch message for sid {d}: {}", .{ message.sid, err });
-                        message.deinit();
                         return;
                     };
+                    owns_message = false;
                 } else {
                     log.err("Async subscription {} has no assigned dispatcher", .{message.sid});
-                    message.deinit();
                     return;
                 }
             } else {
@@ -1021,21 +1023,20 @@ pub const Connection = struct {
                         error.QueueClosed => {
                             // Queue is closed; drop gracefully.
                             log.debug("Queue closed for sid {d}; dropping message", .{message.sid});
-                            message.deinit();
                             return;
                         },
                         else => {
                             // Allocation or unexpected push failure; log and tear down the connection.
                             log.err("Failed to enqueue message for sid {d}: {}", .{ message.sid, err });
-                            message.deinit();
                             return err;
                         },
                     }
                 };
+                owns_message = false;
             }
         } else {
-            // No subscription found, clean up message
-            message.deinit();
+            // No sub subscription found, try to send UNSUB command
+            self.unsubscribeInternal(message.sid);
         }
     }
 
@@ -1474,8 +1475,8 @@ pub const Connection = struct {
             const sub = entry.value_ptr.*;
 
             // Send SUB command
-            if (sub.queue_group) |queue_group| {
-                try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, queue_group, sub.sid });
+            if (sub.queue) |queue| {
+                try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, queue, sub.sid });
             } else {
                 try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
             }

@@ -31,8 +31,7 @@ pub fn main() !void {
         return err;
     };
     defer {
-        conn.unsubscribe(sub) catch {};
-        sub.deinit();
+        conn.unsubscribe(sub);
     }
 
     std.debug.print("Echo server listening on subject 'echo'...\n", .{});

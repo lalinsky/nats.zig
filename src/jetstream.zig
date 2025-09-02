@@ -426,7 +426,7 @@ pub const PullSubscription = struct {
 
     pub fn deinit(self: *PullSubscription) void {
         self.consumer_info.deinit();
-        self.inbox_subscription.deinit();
+        self.js.nc.unsubscribe(self.inbox_subscription);
         self.js.allocator.free(self.inbox_prefix);
         self.js.allocator.destroy(self);
     }
@@ -540,14 +540,14 @@ pub const JetStreamSubscription = struct {
         self.consumer_info.deinit();
 
         // Clean up the underlying subscription (this will clean up the handler context)
-        self.subscription.deinit();
+        self.js.nc.unsubscribe(self.subscription);
 
         self.js.allocator.destroy(self);
     }
 
     /// Unsubscribe from the delivery subject
-    pub fn unsubscribe(self: *JetStreamSubscription) !void {
-        try self.js.nc.unsubscribe(self.subscription);
+    pub fn unsubscribe(self: *JetStreamSubscription) void {
+        self.js.nc.unsubscribe(self.subscription);
     }
 
     /// Get the next JetStream message synchronously (for sync subscriptions)
@@ -1095,7 +1095,7 @@ pub const JetStream = struct {
 
         // Create synchronous subscription (no callback handler)
         const subscription = try self.nc.subscribeSync(deliver_subject);
-        errdefer subscription.deinit();
+        errdefer self.nc.unsubscribe(subscription);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.allocator.create(JetStreamSubscription);
@@ -1136,7 +1136,7 @@ pub const JetStream = struct {
 
         // Create the persistent wildcard inbox subscription
         const inbox_subscription = try self.nc.subscribeSync(wildcard_subject);
-        errdefer inbox_subscription.deinit();
+        errdefer self.nc.unsubscribe(inbox_subscription);
 
         // Allocate PullSubscription
         const pull_subscription = try self.allocator.create(PullSubscription);

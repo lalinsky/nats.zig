@@ -10,7 +10,7 @@ test "publish and receive message with headers" {
 
     // Create a subscription
     const sub = try conn.subscribeSync("test.headers");
-    defer sub.deinit();
+    defer conn.unsubscribe(sub);
 
     var msg = try conn.newMsg();
     defer msg.deinit();
@@ -53,7 +53,7 @@ test "publish message without headers using publishMsg" {
 
     // Create a subscription
     const sub = try conn.subscribeSync("test.no-headers");
-    defer sub.deinit();
+    defer conn.unsubscribe(sub);
 
     var msg = try conn.newMsg();
     defer msg.deinit();
@@ -120,7 +120,7 @@ test "message with reply and headers" {
 
     // Create a subscription
     const sub = try conn.subscribeSync("test.reply-headers");
-    defer sub.deinit();
+    defer conn.unsubscribe(sub);
 
     var msg = try conn.newMsg();
     defer msg.deinit();

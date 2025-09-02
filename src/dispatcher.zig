@@ -32,8 +32,8 @@ pub const DispatchMessage = struct {
         };
     }
 
-    pub fn deinit(self: *const DispatchMessage) void {
-        self.subscription.release();
+    pub fn deinit(self: *const DispatchMessage, allocator: Allocator) void {
+        self.subscription.release(allocator);
     }
 };
 
@@ -58,7 +58,7 @@ pub const Dispatcher = struct {
         while (self.queue.tryPop()) |dispatch_msg| {
             log.warn("Dropping unprocessed message for subscription {}", .{dispatch_msg.subscription.sid});
             dispatch_msg.message.deinit();
-            dispatch_msg.deinit(); // Release subscription reference
+            dispatch_msg.deinit(self.allocator); // Release subscription reference
         }
         self.queue.deinit();
     }
@@ -85,7 +85,7 @@ pub const Dispatcher = struct {
     /// Enqueue a message for dispatch
     pub fn enqueue(self: *Dispatcher, subscription: *Subscription, message: *Message) !void {
         const dispatch_msg = DispatchMessage.init(subscription, message);
-        errdefer dispatch_msg.deinit();
+        errdefer dispatch_msg.deinit(self.allocator);
         try self.queue.push(dispatch_msg);
     }
 
@@ -116,8 +116,7 @@ pub const Dispatcher = struct {
 
     /// Process a single dispatch message
     fn processMessage(self: *Dispatcher, dispatch_msg: DispatchMessage) void {
-        _ = self; // unused
-        defer dispatch_msg.deinit(); // Release subscription reference
+        defer dispatch_msg.deinit(self.allocator); // Release subscription reference
 
         const subscription = dispatch_msg.subscription;
         const message = dispatch_msg.message;

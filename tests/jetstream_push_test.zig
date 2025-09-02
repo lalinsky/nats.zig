@@ -51,7 +51,7 @@ test "basic push subscription" {
     // Subscribe to push consumer
     var push_sub = try js.subscribe("TEST_PUSH_STREAM", consumer_config, MessageHandler.handle, .{&message_count});
     defer push_sub.deinit();
-    defer push_sub.unsubscribe() catch {};
+    defer push_sub.unsubscribe();
 
     // Publish some test messages
     try conn.publish("orders.new", "Order #1");
@@ -112,7 +112,7 @@ test "push subscription with flow control" {
 
     var push_sub = try js.subscribe("TEST_PUSH_FC_STREAM", consumer_config, TaskHandler.handle, .{&processed_count});
     defer push_sub.deinit();
-    defer push_sub.unsubscribe() catch {};
+    defer push_sub.unsubscribe();
 
     // Publish several tasks
     for (0..5) |i| {

@@ -59,7 +59,7 @@ test "ack should succeed on first call" {
 
     var push_sub = try js.subscribe("TEST_DUP_ACK_STREAM", consumer_config, AckHandler.handle, .{&test_data});
     defer push_sub.deinit();
-    defer push_sub.unsubscribe() catch {};
+    defer push_sub.unsubscribe();
 
     // Publish test message
     try conn.publish("test.dup.ack.msg", "test ack message");
@@ -147,7 +147,7 @@ test "ack should fail on second call" {
 
     var push_sub = try js.subscribe("TEST_DUP_ACK2_STREAM", consumer_config, DoubleAckHandler.handle, .{&test_data});
     defer push_sub.deinit();
-    defer push_sub.unsubscribe() catch {};
+    defer push_sub.unsubscribe();
 
     // Publish test message
     try conn.publish("test.dup.ack2.msg", "test double ack message");
@@ -236,7 +236,7 @@ test "nak should fail after ack" {
 
     var push_sub = try js.subscribe("TEST_ACK_NAK_STREAM", consumer_config, AckNakHandler.handle, .{&test_data});
     defer push_sub.deinit();
-    defer push_sub.unsubscribe() catch {};
+    defer push_sub.unsubscribe();
 
     // Publish test message
     try conn.publish("test.ack.nak.msg", "test ack then nak message");
@@ -332,7 +332,7 @@ test "inProgress can be called multiple times" {
 
     var push_sub = try js.subscribe("TEST_PROGRESS_STREAM", consumer_config, ProgressHandler.handle, .{&test_data});
     defer push_sub.deinit();
-    defer push_sub.unsubscribe() catch {};
+    defer push_sub.unsubscribe();
 
     // Publish test message
     try conn.publish("test.progress.msg", "test progress message");

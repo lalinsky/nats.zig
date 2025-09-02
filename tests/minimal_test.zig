@@ -22,7 +22,7 @@ test "basic publish and subscribe" {
 
     // Create a subscription
     const sub = try conn.subscribeSync("test.minimal");
-    defer sub.deinit();
+    defer conn.unsubscribe(sub);
 
     // Publish a message
     try conn.publish("test.minimal", "Hello from minimal test!");
@@ -69,7 +69,7 @@ test "async subscribe" {
 
     // Create async subscription
     const sub = try conn.subscribe("test.async", Handler.handleMsg, .{&handler});
-    defer sub.deinit();
+    defer conn.unsubscribe(sub);
 
     // Publish a message
     try conn.publish("test.async", "Hello from async test!");

@@ -17,6 +17,7 @@ const Message = @import("message.zig").Message;
 const RefCounter = @import("ref_counter.zig").RefCounter;
 const ConcurrentQueue = @import("queue.zig").ConcurrentQueue;
 const Dispatcher = @import("dispatcher.zig").Dispatcher;
+const Connection = @import("connection.zig").Connection;
 
 const log = @import("log.zig").log;
 
@@ -40,9 +41,8 @@ pub const MsgHandler = struct {
 pub const Subscription = struct {
     sid: u64,
     subject: []const u8,
-    queue_group: ?[]const u8 = null,
+    queue: ?[]const u8 = null,
     messages: MessageQueue,
-    allocator: Allocator,
 
     // Reference counting for safe cleanup
     ref_counter: RefCounter(u32) = RefCounter(u32).init(),
@@ -55,7 +55,7 @@ pub const Subscription = struct {
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
-    pub fn init(allocator: Allocator, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
+    pub fn create(allocator: std.mem.Allocator, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
         const sub = try allocator.create(Subscription);
         errdefer allocator.destroy(sub);
 
@@ -68,35 +68,23 @@ pub const Subscription = struct {
         sub.* = Subscription{
             .sid = sid,
             .subject = subject_copy,
-            .queue_group = queue_group_copy,
+            .queue = queue_group_copy,
             .messages = MessageQueue.init(allocator, .{}),
-            .allocator = allocator,
             .handler = handler,
         };
         return sub;
     }
 
-    pub fn retain(self: *Subscription) void {
-        self.ref_counter.incr();
-    }
+    fn destroy(self: *Subscription, allocator: std.mem.Allocator) void {
+        allocator.free(self.subject);
 
-    pub fn release(self: *Subscription) void {
-        if (self.ref_counter.decr()) {
-            // Last reference - actually free the subscription
-            self.deinitInternal();
-        }
-    }
-
-    fn deinitInternal(self: *Subscription) void {
-        self.allocator.free(self.subject);
-
-        if (self.queue_group) |queue_group| {
-            self.allocator.free(queue_group);
+        if (self.queue) |queue_group| {
+            allocator.free(queue_group);
         }
 
         // Clean up handler context if present
         if (self.handler) |handler| {
-            handler.cleanup(self.allocator);
+            handler.cleanup(allocator);
         }
 
         // Close the queue to prevent new messages and clean up pending messages
@@ -106,15 +94,18 @@ pub const Subscription = struct {
         }
         self.messages.deinit();
 
-        // Clear dispatcher reference (no explicit unsubscription needed - reference counting handles it)
-        self.dispatcher = null;
-
-        self.allocator.destroy(self);
+        allocator.destroy(self);
     }
 
-    /// Public API method - users call this to clean up subscriptions
-    pub fn deinit(self: *Subscription) void {
-        self.release();
+    pub fn retain(self: *Subscription) void {
+        self.ref_counter.incr();
+    }
+
+    pub fn release(self: *Subscription, allocator: std.mem.Allocator) void {
+        if (self.ref_counter.decr()) {
+            // Last reference - actually free the subscription
+            self.destroy(allocator);
+        }
     }
 
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) ?*Message {
