@@ -35,7 +35,7 @@ pub fn main() !void {
     // Wait for messages in a loop
     while (true) {
         // Wait for the next message (blocks until one arrives)
-        if (sub.nextMsg(1000)) |msg| {
+        if (sub.nextMsg(1000) catch null) |msg| {
             defer msg.deinit();
 
             std.debug.print("Received msg: {s} - {s}\n", .{ msg.subject, msg.data });

@@ -29,7 +29,7 @@ test "basic publish and subscribe" {
     try conn.flush();
 
     // Try to receive the message
-    if (sub.nextMsg(100)) |msg| {
+    if (sub.nextMsg(100) catch null) |msg| {
         defer msg.deinit();
 
         try std.testing.expectEqualStrings("test.minimal", msg.subject);

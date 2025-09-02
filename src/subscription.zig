@@ -117,8 +117,8 @@ pub const Subscription = struct {
         self.release();
     }
 
-    pub fn nextMsg(self: *Subscription, timeout_ms: u64) ?*Message {
-        return self.messages.pop(timeout_ms) catch null;
+    pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {
+        return self.messages.pop(timeout_ms) catch error.Timeout;
     }
 };
 

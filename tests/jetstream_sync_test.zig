@@ -37,10 +37,7 @@ test "JetStream synchronous subscription basic functionality" {
     try conn.publish("test.sync.message", test_message);
 
     // Wait for message using nextMsg
-    const js_msg = sync_sub.nextMsg(5000) orelse {
-        try testing.expect(false); // Should have received a message
-        return;
-    };
+    const js_msg = try sync_sub.nextMsg(5000);
     defer js_msg.deinit(); // This cleans up everything via arena.deinit()
 
     // Verify message content
@@ -79,12 +76,12 @@ test "JetStream synchronous subscription timeout" {
     defer sync_sub.deinit();
     defer sync_sub.unsubscribe() catch {};
 
-    // Test timeout (should return null after timeout)
+    // Test timeout (should return error.Timeout after timeout)
     const start = std.time.milliTimestamp();
-    const js_msg = sync_sub.nextMsg(100); // 100ms timeout
+    const result = sync_sub.nextMsg(100); // 100ms timeout
     const duration = std.time.milliTimestamp() - start;
 
-    try testing.expectEqual(@as(?*nats.JetStreamMessage, null), js_msg);
+    try testing.expectError(error.Timeout, result);
     try testing.expect(duration >= 100); // Should have waited at least 100ms
 
     log.info("Synchronous subscription timeout test completed successfully", .{});
@@ -125,11 +122,7 @@ test "JetStream synchronous subscription multiple messages" {
 
     // Receive and verify all messages
     for (messages, 0..) |expected, i| {
-        const js_msg = sync_sub.nextMsg(5000) orelse {
-            log.err("Failed to receive message {}", .{i});
-            try testing.expect(false);
-            return;
-        };
+        const js_msg = try sync_sub.nextMsg(5000);
         defer js_msg.deinit(); // This cleans up everything via arena.deinit()
 
         try testing.expectEqualStrings(expected, js_msg.msg.data);

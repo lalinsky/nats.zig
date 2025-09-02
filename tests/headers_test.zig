@@ -25,7 +25,7 @@ test "publish and receive message with headers" {
     try conn.flush();
 
     // Receive the message
-    if (sub.nextMsg(1000)) |received_msg| {
+    if (sub.nextMsg(1000) catch null) |received_msg| {
         defer received_msg.deinit();
 
         // Verify basic message properties
@@ -66,7 +66,7 @@ test "publish message without headers using publishMsg" {
     try conn.flush();
 
     // Receive the message
-    if (sub.nextMsg(1000)) |received_msg| {
+    if (sub.nextMsg(1000) catch null) |received_msg| {
         defer received_msg.deinit();
 
         // Verify basic message properties
@@ -136,7 +136,7 @@ test "message with reply and headers" {
     try conn.flush();
 
     // Receive the message
-    if (sub.nextMsg(1000)) |received_msg| {
+    if (sub.nextMsg(1000) catch null) |received_msg| {
         defer received_msg.deinit();
 
         // Verify message properties
