@@ -42,7 +42,7 @@ pub fn main() !void {
     // Wait for messages in a loop
     while (bench_util.keep_running) {
         // Wait for the next message (with timeout)
-        var msg = sub.nextMsg(1000) catch break;
+        var msg = sub.nextMsg(1000) catch continue; // continue on timeout
         defer msg.deinit();
 
         stats.msg_count += 1;
