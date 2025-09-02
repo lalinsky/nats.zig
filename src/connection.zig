@@ -112,13 +112,10 @@ pub const ConnectionError = error{
 } || PublishError || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
 
 pub const ConnectionStatus = enum {
-    disconnected,
+    closed,
     connecting,
     connected,
     reconnecting,
-    closed,
-    draining_subs,
-    draining_pubs,
 };
 
 pub const HandshakeState = enum {
@@ -186,7 +183,7 @@ pub const Connection = struct {
     allocator: Allocator,
     options: ConnectionOptions,
 
-    status: ConnectionStatus = .disconnected,
+    status: ConnectionStatus = .closed,
 
     // Network
     socket: ?Socket = null,
@@ -211,6 +208,7 @@ pub const Connection = struct {
     // Threading
     reader_thread: ?std.Thread = null,
     flusher_thread: ?std.Thread = null,
+    reconnect_thread: ?std.Thread = null,
     should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     should_stop_cond: std.Thread.Condition = .{}, // Signals when should_stop becomes true
 
@@ -271,12 +269,19 @@ pub const Connection = struct {
             thread.join();
             self.reader_thread = null;
         }
+        if (self.reconnect_thread) |thread| {
+            thread.join();
+            self.reconnect_thread = null;
+        }
 
         // Release global dispatcher pool
         if (self.dispatcher_pool != null) {
             dispatcher_mod.releaseGlobalPool();
             self.dispatcher_pool = null;
         }
+
+        // Clean up response manager
+        self.response_manager.deinit();
 
         // Clean up subscriptions - release connection's references first
         var iter = self.subscriptions.iterator();
@@ -288,9 +293,6 @@ pub const Connection = struct {
         // Clean up the buffers
         self.pending_buffer.deinit();
         self.write_buffer.deinit();
-
-        // Clean up response manager
-        self.response_manager.deinit();
 
         // Clean up server pool
         self.server_pool.deinit();
@@ -323,7 +325,7 @@ pub const Connection = struct {
     }
 
     pub fn connect(self: *Self, url: []const u8) !void {
-        if (self.status != .disconnected) {
+        if (self.status != .closed) {
             return ConnectionError.ConnectionFailed;
         }
 
@@ -350,7 +352,7 @@ pub const Connection = struct {
 
         // Get server using C library's GetNextServer algorithm
         const selected_server = try self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) orelse {
-            self.status = .disconnected;
+            self.status = .closed;
             return ConnectionError.ConnectionFailed;
         };
 
@@ -359,14 +361,14 @@ pub const Connection = struct {
         selected_server.reconnects += 1;
 
         // Establish connection (under mutex for consistent state management)
-        self.establishConnection(selected_server) catch {
-            self.status = .disconnected;
-            return ConnectionError.ConnectionFailed;
+        self.establishConnection(selected_server) catch |err| {
+            self.status = .closed;
+            self.cleanupFailedConnection(err, true);
+            return err;
         };
 
         // Socket is now established and connection state is set up
         self.should_stop.store(false, .monotonic);
-        self.status = .connecting;
 
         // Start reader thread - it will handle the handshake
         self.reader_thread = try std.Thread.spawn(.{}, readerLoop, .{self});
@@ -377,9 +379,8 @@ pub const Connection = struct {
         // Wait for handshake completion
         self.waitForHandshakeCompletion() catch |err| {
             // Clean up failed handshake state and close socket
-            self.status = .disconnected;
+            self.status = .closed;
             self.cleanupFailedConnection(err, true);
-
             return err;
         };
 
@@ -448,6 +449,15 @@ pub const Connection = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.status;
+    }
+
+    pub fn isConnected(self: *Self) bool {
+        return self.getStatus() == .connected;
+    }
+
+    pub fn isConnecting(self: *Self) bool {
+        const status = self.getStatus();
+        return status == .connecting or status == .reconnecting;
     }
 
     /// Publishes data on a subject.
@@ -539,7 +549,7 @@ pub const Connection = struct {
         // Reject when not usable for sending.
         switch (self.status) {
             .connected, .reconnecting => {},
-            .closed, .connecting, .disconnected, .draining_subs, .draining_pubs => {
+            else => {
                 return ConnectionError.ConnectionClosed;
             },
         }
@@ -570,20 +580,14 @@ pub const Connection = struct {
         defer self.subs_mutex.unlock();
 
         try self.subscriptions.put(sub.sid, sub);
-        sub.retain(); // Connection takes ownership reference
-
-        errdefer {
-            if (self.subscriptions.remove(sub.sid)) {
-                sub.release();
-            }
-        }
+        errdefer _ = self.subscriptions.remove(sub.sid);
 
         // Send SUB command via buffer
         const allocator = self.scratch.allocator();
         defer self.resetScratch();
 
         var buffer = ArrayList(u8).init(allocator);
-        if (sub.queue_group) |group| {
+        if (sub.queue) |group| {
             try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, group, sub.sid });
         } else {
             try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
@@ -596,8 +600,8 @@ pub const Connection = struct {
         errdefer handler.cleanup(self.allocator);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject, null, handler);
-        errdefer sub.deinit();
+        const sub = try Subscription.create(self, sid, subject, null, handler);
+        errdefer sub.release();
 
         try self.ensureDispatcherPool();
         sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
@@ -611,8 +615,8 @@ pub const Connection = struct {
     /// Subscribe to a subject, the code is responsible for handling the fetching
     pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject, null, null);
-        errdefer sub.deinit();
+        const sub = try Subscription.create(self, sid, subject, null, null);
+        errdefer sub.release();
 
         try self.subscribeInternal(sub);
 
@@ -620,64 +624,71 @@ pub const Connection = struct {
         return sub;
     }
 
-    pub fn queueSubscribe(self: *Self, subject: []const u8, queue_group: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
-        if (queue_group.len == 0) return error.EmptyQueueGroupName;
+    pub fn queueSubscribe(self: *Self, subject: []const u8, queue: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
+        if (queue.len == 0) return error.EmptyQueueGroupName;
 
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
         errdefer handler.cleanup(self.allocator);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject, queue_group, handler);
-        errdefer sub.deinit();
+        const sub = try Subscription.create(self, sid, subject, queue, handler);
+        errdefer sub.release();
 
         try self.ensureDispatcherPool();
         sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
 
         try self.subscribeInternal(sub);
 
-        log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (async)", .{ sub.subject, queue_group, sub.sid });
+        log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (async)", .{ sub.subject, queue, sub.sid });
         return sub;
     }
 
     /// Subscribe to a subject, the code is responsible for handling the fetching
-    pub fn queueSubscribeSync(self: *Self, subject: []const u8, queue_group: []const u8) !*Subscription {
-        if (queue_group.len == 0) return error.EmptyQueueGroupName;
+    pub fn queueSubscribeSync(self: *Self, subject: []const u8, queue: []const u8) !*Subscription {
+        if (queue.len == 0) return error.EmptyQueueGroupName;
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
-        const sub = try Subscription.init(self.allocator, sid, subject, queue_group, null);
-        errdefer sub.deinit();
+        const sub = try Subscription.create(self, sid, subject, queue, null);
+        errdefer sub.release();
 
         try self.subscribeInternal(sub);
 
-        log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (sync)", .{ sub.subject, queue_group, sub.sid });
+        log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (sync)", .{ sub.subject, queue, sub.sid });
         return sub;
     }
 
-    pub fn unsubscribe(self: *Self, sub: *Subscription) !void {
-        // Lock asaply like C library
+    pub fn unsubscribeInternal(self: *Self, sid: u64) void {
+        var buffer: [256]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buffer);
+        var writer = stream.writer();
+
+        writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
+
+        self.write_buffer.append(stream.getWritten()) catch |err| {
+            log.err("Failed to enqueue UNSUB message for sid {d}: {}", .{ sid, err });
+        };
+    }
+
+    pub fn unsubscribe(self: *Self, sub: *Subscription) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.status != .connected) {
-            return ConnectionError.ConnectionClosed;
-        }
-
-        // Remove from subscriptions map
         self.subs_mutex.lock();
         defer self.subs_mutex.unlock();
-        if (self.subscriptions.remove(sub.sid)) {
-            sub.release(); // Release connection's ownership reference
+
+        if (!self.subscriptions.remove(sub.sid)) {
+            // Nothing to do, already unsubscribed
+            return;
         }
 
-        // Send UNSUB command
-        const allocator = self.scratch.allocator();
-        defer self.resetScratch();
-
-        var buffer = ArrayList(u8).init(allocator);
-        try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
-        try self.write_buffer.append(buffer.items);
+        // Try to send UNSUB command. Even if it fails internally,
+        // processMsg will keep sending UNSUB commands once
+        // it receives a message with unknown sid.
+        self.unsubscribeInternal(sub.sid);
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
+
+        sub.release();
     }
 
     pub fn flush(self: *Self) !void {
@@ -823,7 +834,11 @@ pub const Connection = struct {
             return err;
         };
 
-        // Setup connection state (assuming mutex is held by caller)
+        if (self.options.trace) {
+            log.debug("Connected, starting handshake...", .{});
+        }
+
+        // Setup connection state
         self.socket = socket;
         self.socket_available_cond.broadcast();
 
@@ -849,15 +864,6 @@ pub const Connection = struct {
         log.debug("Reader loop started", .{});
 
         while (!self.should_stop.load(.acquire)) {
-            self.mutex.lock();
-            const status = self.status;
-            self.mutex.unlock();
-
-            if (status == .reconnecting) {
-                self.doReconnect();
-                continue;
-            }
-
             self.readerIteration() catch |err| {
                 // Handle errors from readerIteration
                 switch (err) {
@@ -989,6 +995,9 @@ pub const Connection = struct {
         }
         self.subs_mutex.unlock();
 
+        var owns_message = true;
+        defer if (owns_message) message.deinit();
+
         if (sub) |s| {
             defer s.release(); // Release when done
 
@@ -1000,12 +1009,11 @@ pub const Connection = struct {
                 if (s.dispatcher) |dispatcher| {
                     dispatcher.enqueue(s, message) catch |err| {
                         log.err("Failed to dispatch message for sid {d}: {}", .{ message.sid, err });
-                        message.deinit();
                         return;
                     };
+                    owns_message = false;
                 } else {
                     log.err("Async subscription {} has no assigned dispatcher", .{message.sid});
-                    message.deinit();
                     return;
                 }
             } else {
@@ -1015,21 +1023,20 @@ pub const Connection = struct {
                         error.QueueClosed => {
                             // Queue is closed; drop gracefully.
                             log.debug("Queue closed for sid {d}; dropping message", .{message.sid});
-                            message.deinit();
                             return;
                         },
                         else => {
                             // Allocation or unexpected push failure; log and tear down the connection.
                             log.err("Failed to enqueue message for sid {d}: {}", .{ message.sid, err });
-                            message.deinit();
                             return err;
                         },
                     }
                 };
+                owns_message = false;
             }
         } else {
-            // No subscription found, clean up message
-            message.deinit();
+            // No sub subscription found, try to send UNSUB command
+            self.unsubscribeInternal(message.sid);
         }
     }
 
@@ -1289,10 +1296,36 @@ pub const Connection = struct {
         self.status = .reconnecting;
         self.cleanupFailedConnection(err, false);
 
+        // Spawn reconnect thread if not already running
+        if (self.reconnect_thread == null) {
+            self.reconnect_thread = std.Thread.spawn(.{}, doReconnectThread, .{self}) catch |spawn_err| {
+                log.err("Failed to spawn reconnect thread: {}", .{spawn_err});
+                // Fall back to closing connection
+                needs_close = true;
+                return;
+            };
+        }
+
         // Invoke disconnected callback
         if (self.options.callbacks.disconnected_cb) |cb| {
             callback = cb;
         }
+    }
+
+    fn doReconnectThread(self: *Self) void {
+        defer {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // Detach thread and mark as null
+            if (self.reconnect_thread) |thread| {
+                thread.detach();
+                self.reconnect_thread = null;
+            }
+        }
+
+        // Run existing doReconnect logic
+        self.doReconnect();
     }
 
     fn doReconnect(self: *Self) void {
@@ -1359,27 +1392,20 @@ pub const Connection = struct {
             server.reconnects += 1;
             total_attempts += 1;
             server_cycle_count += 1;
-            self.status = .connecting;
 
-            // Try to establish connection (no mutex needed for network I/O)
             log.debug("Reconnection attempt {} to {s}:{d}", .{ total_attempts, server.parsed_url.host, server.parsed_url.port });
 
+            // Try to establish connection
             self.establishConnection(server) catch |err| {
-                self.status = .reconnecting;
                 log.debug("Reconnection attempt {} failed: {}", .{ total_attempts, err });
+                self.cleanupFailedConnection(err, true);
                 continue;
             };
 
-            // Socket established and connection state set up by establishConnection
-            self.status = .connecting;
-
-            // Wait for handshake completion
+            // Try to execute the handshake procedure
             self.waitForHandshakeCompletion() catch |err| {
-                // Clean up failed handshake state and close socket
-                self.status = .reconnecting;
-                self.cleanupFailedConnection(err, true);
-
                 log.debug("Reconnect handshake failed: {}", .{err});
+                self.cleanupFailedConnection(err, true);
                 continue;
             };
 
@@ -1449,8 +1475,8 @@ pub const Connection = struct {
             const sub = entry.value_ptr.*;
 
             // Send SUB command
-            if (sub.queue_group) |queue_group| {
-                try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, queue_group, sub.sid });
+            if (sub.queue) |queue| {
+                try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, queue, sub.sid });
             } else {
                 try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
             }

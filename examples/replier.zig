@@ -25,10 +25,7 @@ pub fn main() !void {
         std.debug.print("Failed to subscribe: {}\n", .{err});
         std.process.exit(2);
     };
-    defer {
-        conn.unsubscribe(sub) catch {};
-        sub.deinit();
-    }
+    defer sub.deinit();
 
     std.debug.print("Waiting for requests...\n", .{});
 

@@ -17,6 +17,7 @@ const Message = @import("message.zig").Message;
 const RefCounter = @import("ref_counter.zig").RefCounter;
 const ConcurrentQueue = @import("queue.zig").ConcurrentQueue;
 const Dispatcher = @import("dispatcher.zig").Dispatcher;
+const Connection = @import("connection.zig").Connection;
 
 const log = @import("log.zig").log;
 
@@ -38,11 +39,11 @@ pub const MsgHandler = struct {
 };
 
 pub const Subscription = struct {
+    nc: *Connection,
     sid: u64,
     subject: []const u8,
-    queue_group: ?[]const u8 = null,
+    queue: ?[]const u8 = null,
     messages: MessageQueue,
-    allocator: Allocator,
 
     // Reference counting for safe cleanup
     ref_counter: RefCounter(u32) = RefCounter(u32).init(),
@@ -55,48 +56,41 @@ pub const Subscription = struct {
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
-    pub fn init(allocator: Allocator, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
-        const sub = try allocator.create(Subscription);
-        errdefer allocator.destroy(sub);
+    pub fn create(nc: *Connection, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
+        const sub = try nc.allocator.create(Subscription);
+        errdefer nc.allocator.destroy(sub);
 
-        const subject_copy = try allocator.dupe(u8, subject);
-        errdefer allocator.free(subject_copy);
+        const subject_copy = try nc.allocator.dupe(u8, subject);
+        errdefer nc.allocator.free(subject_copy);
 
-        const queue_group_copy = if (queue_group) |group| try allocator.dupe(u8, group) else null;
-        errdefer if (queue_group_copy) |group| allocator.free(group);
+        const queue_group_copy = if (queue_group) |group| try nc.allocator.dupe(u8, group) else null;
+        errdefer if (queue_group_copy) |group| nc.allocator.free(group);
 
         sub.* = Subscription{
+            .nc = nc,
             .sid = sid,
             .subject = subject_copy,
-            .queue_group = queue_group_copy,
-            .messages = MessageQueue.init(allocator, .{}),
-            .allocator = allocator,
+            .queue = queue_group_copy,
+            .messages = MessageQueue.init(nc.allocator, .{}),
             .handler = handler,
         };
         return sub;
     }
 
-    pub fn retain(self: *Subscription) void {
-        self.ref_counter.incr();
+    pub fn deinit(self: *Subscription) void {
+        self.nc.unsubscribe(self);
     }
 
-    pub fn release(self: *Subscription) void {
-        if (self.ref_counter.decr()) {
-            // Last reference - actually free the subscription
-            self.deinitInternal();
-        }
-    }
+    fn destroy(self: *Subscription) void {
+        self.nc.allocator.free(self.subject);
 
-    fn deinitInternal(self: *Subscription) void {
-        self.allocator.free(self.subject);
-
-        if (self.queue_group) |queue_group| {
-            self.allocator.free(queue_group);
+        if (self.queue) |queue_group| {
+            self.nc.allocator.free(queue_group);
         }
 
         // Clean up handler context if present
         if (self.handler) |handler| {
-            handler.cleanup(self.allocator);
+            handler.cleanup(self.nc.allocator);
         }
 
         // Close the queue to prevent new messages and clean up pending messages
@@ -106,15 +100,18 @@ pub const Subscription = struct {
         }
         self.messages.deinit();
 
-        // Clear dispatcher reference (no explicit unsubscription needed - reference counting handles it)
-        self.dispatcher = null;
-
-        self.allocator.destroy(self);
+        self.nc.allocator.destroy(self);
     }
 
-    /// Public API method - users call this to clean up subscriptions
-    pub fn deinit(self: *Subscription) void {
-        self.release();
+    pub fn retain(self: *Subscription) void {
+        self.ref_counter.incr();
+    }
+
+    pub fn release(self: *Subscription) void {
+        if (self.ref_counter.decr()) {
+            // Last reference - actually free the subscription
+            self.destroy();
+        }
     }
 
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {

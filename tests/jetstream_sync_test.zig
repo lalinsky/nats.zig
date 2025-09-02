@@ -30,7 +30,6 @@ test "JetStream synchronous subscription basic functionality" {
 
     var sync_sub = try js.subscribeSync("TEST_SYNC_STREAM", consumer_config);
     defer sync_sub.deinit();
-    defer sync_sub.unsubscribe() catch {};
 
     // Publish a test message
     const test_message = "Sync test message";
@@ -74,7 +73,6 @@ test "JetStream synchronous subscription timeout" {
 
     var sync_sub = try js.subscribeSync("TEST_SYNC_TIMEOUT_STREAM", consumer_config);
     defer sync_sub.deinit();
-    defer sync_sub.unsubscribe() catch {};
 
     // Test timeout (should return error.Timeout after timeout)
     const start = std.time.milliTimestamp();
@@ -112,7 +110,6 @@ test "JetStream synchronous subscription multiple messages" {
 
     var sync_sub = try js.subscribeSync("TEST_SYNC_MULTI_STREAM", consumer_config);
     defer sync_sub.deinit();
-    defer sync_sub.unsubscribe() catch {};
 
     // Publish multiple test messages
     const messages = [_][]const u8{ "Message 1", "Message 2", "Message 3" };
