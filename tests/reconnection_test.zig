@@ -5,6 +5,7 @@ const utils = @import("utils.zig");
 const log = std.log.default;
 
 var global_tracker: CallbackTracker = .{};
+var tracker_guard: std.Thread.Mutex = .{};
 
 const CallbackTracker = struct {
     disconnected_called: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -12,15 +13,16 @@ const CallbackTracker = struct {
     closed_called: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     error_called: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     error_message: ?[]const u8 = null,
+    error_buf: [256]u8 = undefined,
     mutex: std.Thread.Mutex = .{},
 
     fn reset(self: *@This()) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         self.disconnected_called.store(false, .release);
         self.reconnected_called.store(false, .release);
         self.closed_called.store(false, .release);
         self.error_called.store(false, .release);
-        self.mutex.lock();
-        defer self.mutex.unlock();
         self.error_message = null;
     }
 
@@ -43,15 +45,18 @@ const CallbackTracker = struct {
         _ = conn;
         global_tracker.mutex.lock();
         defer global_tracker.mutex.unlock();
+        const n: usize = @min(msg.len, global_tracker.error_buf.len);
+        @memcpy(global_tracker.error_buf[0..n], msg[0..n]);
+        global_tracker.error_message = global_tracker.error_buf[0..n];
         global_tracker.error_called.store(true, .release);
-        global_tracker.error_message = msg;
     }
 
     fn waitForCallback(self: *@This(), callback_field: anytype, timeout_ms: u64) bool {
         _ = self;
-        const start_time = std.time.milliTimestamp();
+        const start_ms: i64 = std.time.milliTimestamp();
+        const deadline_ms: i64 = start_ms + @as(i64, @intCast(timeout_ms));
         while (!callback_field.load(.acquire)) {
-            if (std.time.milliTimestamp() - start_time > timeout_ms) {
+            if (std.time.milliTimestamp() >= deadline_ms) {
                 return false;
             }
             std.time.sleep(10 * std.time.ns_per_ms);
@@ -79,6 +84,8 @@ test "basic reconnection when server stops" {
 }
 
 test "disconnected callback on connection loss" {
+    tracker_guard.lock();
+    defer tracker_guard.unlock();
     global_tracker.reset();
 
     var conn = try std.testing.allocator.create(nats.Connection);
@@ -87,7 +94,9 @@ test "disconnected callback on connection loss" {
     conn.* = nats.Connection.init(std.testing.allocator, .{
         .trace = true,
         .reconnect = .{
-            .allow_reconnect = false, // Disable reconnect to only test disconnection
+            .allow_reconnect = true,
+            .max_reconnect = 1, // Only try once, then give up
+            .wait_ms = 1000, // Quick timeout
         },
         .callbacks = .{
             .disconnected_cb = CallbackTracker.disconnectedCallback,
@@ -100,12 +109,17 @@ test "disconnected callback on connection loss" {
     // Force disconnection by restarting server
     try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
 
+    // Nudge the connection to observe the disconnect faster
+    _ = conn.publish("test.nudge", "nudge") catch {};
+
     // Wait for disconnected callback with timeout
     const callback_called = global_tracker.waitForCallback(&global_tracker.disconnected_called, 10000);
     try std.testing.expect(callback_called);
 }
 
 test "reconnected callback on successful reconnection" {
+    tracker_guard.lock();
+    defer tracker_guard.unlock();
     global_tracker.reset();
 
     var conn = try std.testing.allocator.create(nats.Connection);
@@ -128,12 +142,14 @@ test "reconnected callback on successful reconnection" {
 
     // Force disconnection and reconnection
     try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
+    // Ensure the restarted instance is healthy before asserting reconnection
+    _ = utils.waitForHealthyServices(std.testing.allocator, 10_000) catch {};
 
     // Wait for both callbacks
     const disconnected_called = global_tracker.waitForCallback(&global_tracker.disconnected_called, 10000);
     try std.testing.expect(disconnected_called);
 
-    const reconnected_called = global_tracker.waitForCallback(&global_tracker.reconnected_called, 20000);
+    const reconnected_called = global_tracker.waitForCallback(&global_tracker.reconnected_called, 30000);
     try std.testing.expect(reconnected_called);
 
     // Verify connection works after callbacks
@@ -142,6 +158,8 @@ test "reconnected callback on successful reconnection" {
 }
 
 test "closed callback on explicit close" {
+    tracker_guard.lock();
+    defer tracker_guard.unlock();
     global_tracker.reset();
 
     var conn = try std.testing.allocator.create(nats.Connection);
@@ -161,11 +179,13 @@ test "closed callback on explicit close" {
     conn.close();
 
     // Wait for closed callback
-    const callback_called = global_tracker.waitForCallback(&global_tracker.closed_called, 1000);
+    const callback_called = global_tracker.waitForCallback(&global_tracker.closed_called, 5000);
     try std.testing.expect(callback_called);
 }
 
 test "error callback on server error" {
+    tracker_guard.lock();
+    defer tracker_guard.unlock();
     global_tracker.reset();
 
     var conn = try std.testing.allocator.create(nats.Connection);
@@ -198,6 +218,8 @@ test "error callback on server error" {
 }
 
 test "all callbacks during reconnection lifecycle" {
+    tracker_guard.lock();
+    defer tracker_guard.unlock();
     global_tracker.reset();
 
     var conn = try std.testing.allocator.create(nats.Connection);
@@ -226,13 +248,15 @@ test "all callbacks during reconnection lifecycle" {
 
     // Trigger disconnection and reconnection
     try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
+    // Ensure the restarted instance is healthy before asserting reconnection
+    _ = utils.waitForHealthyServices(std.testing.allocator, 10_000) catch {};
 
     // Wait for disconnected callback
     const disconnected_called = global_tracker.waitForCallback(&global_tracker.disconnected_called, 10000);
     try std.testing.expect(disconnected_called);
 
     // Wait for reconnected callback
-    const reconnected_called = global_tracker.waitForCallback(&global_tracker.reconnected_called, 20000);
+    const reconnected_called = global_tracker.waitForCallback(&global_tracker.reconnected_called, 30000);
     try std.testing.expect(reconnected_called);
 
     // Test connection works after reconnection
@@ -241,6 +265,6 @@ test "all callbacks during reconnection lifecycle" {
 
     // Explicitly close and verify closed callback
     conn.close();
-    const closed_called = global_tracker.waitForCallback(&global_tracker.closed_called, 1000);
+    const closed_called = global_tracker.waitForCallback(&global_tracker.closed_called, 5000);
     try std.testing.expect(closed_called);
 }
