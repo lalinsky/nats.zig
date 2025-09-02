@@ -51,7 +51,10 @@ const sub = try nc.subscribeSync("hello");
 
 // Wait for message with 5 second timeout
 while (true) {
-    var msg = sub.nextMsg(5000) catch continue;  // continue on timeout
+    var msg = sub.nextMsg(5000) catch |err| {
+        if (err == error.Timeout) continue;
+        return err;
+    };
     defer msg.deinit();
 
     counter += 1;
