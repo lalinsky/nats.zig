@@ -46,12 +46,16 @@ try nc.publish("hello", "Hello, NATS!");
 
 ```zig
 // Create synchronous subscription
+var counter: u32 = 0;
 const sub = try nc.subscribeSync("hello");
 
 // Wait for message with 5 second timeout
-if (sub.nextMsg(5000)) |msg| {
+while (true) {
+    var msg = sub.nextMsg(5000) catch continue;  // continue on timeout
     defer msg.deinit();
-    std.debug.print("Received: {s}\n", .{msg.data});
+
+    counter += 1;
+    std.debug.print("Message #{d}: {s}\n", .{ counter, msg.data });
 }
 ```
 
@@ -61,6 +65,7 @@ if (sub.nextMsg(5000)) |msg| {
 // Define message handler
 fn messageHandler(msg: *nats.Message, counter: *u32) void {
     defer msg.deinit();
+
     counter.* += 1;
     std.debug.print("Message #{d}: {s}\n", .{ counter.*, msg.data });
 }

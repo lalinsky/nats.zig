@@ -25,26 +25,23 @@ test "publish and receive message with headers" {
     try conn.flush();
 
     // Receive the message
-    if (sub.nextMsg(1000)) |received_msg| {
-        defer received_msg.deinit();
+    var received_msg = sub.nextMsg(1000) catch return error.NoMessageReceived;
+    defer received_msg.deinit();
 
-        // Verify basic message properties
-        try std.testing.expectEqualStrings("test.headers", received_msg.subject);
-        try std.testing.expectEqualStrings("Hello with headers!", received_msg.data);
+    // Verify basic message properties
+    try std.testing.expectEqualStrings("test.headers", received_msg.subject);
+    try std.testing.expectEqualStrings("Hello with headers!", received_msg.data);
 
-        // Verify headers
-        const test_key_value = try received_msg.headerGet("X-Test-Key");
-        try std.testing.expect(test_key_value != null);
-        try std.testing.expectEqualStrings("test-value", test_key_value.?);
+    // Verify headers
+    const test_key_value = try received_msg.headerGet("X-Test-Key");
+    try std.testing.expect(test_key_value != null);
+    try std.testing.expectEqualStrings("test-value", test_key_value.?);
 
-        const another_key_value = try received_msg.headerGet("X-Another-Key");
-        try std.testing.expect(another_key_value != null);
-        try std.testing.expectEqualStrings("another-value", another_key_value.?);
+    const another_key_value = try received_msg.headerGet("X-Another-Key");
+    try std.testing.expect(another_key_value != null);
+    try std.testing.expectEqualStrings("another-value", another_key_value.?);
 
-        log.info("Headers test passed - received message with headers", .{});
-    } else {
-        return error.NoMessageReceived;
-    }
+    log.info("Headers test passed - received message with headers", .{});
 }
 
 test "publish message without headers using publishMsg" {
@@ -66,17 +63,14 @@ test "publish message without headers using publishMsg" {
     try conn.flush();
 
     // Receive the message
-    if (sub.nextMsg(1000)) |received_msg| {
-        defer received_msg.deinit();
+    var received_msg = sub.nextMsg(1000) catch return error.NoMessageReceived;
+    defer received_msg.deinit();
 
-        // Verify basic message properties
-        try std.testing.expectEqualStrings("test.no-headers", received_msg.subject);
-        try std.testing.expectEqualStrings("Hello without headers!", received_msg.data);
+    // Verify basic message properties
+    try std.testing.expectEqualStrings("test.no-headers", received_msg.subject);
+    try std.testing.expectEqualStrings("Hello without headers!", received_msg.data);
 
-        log.info("No headers test passed - received message without headers", .{});
-    } else {
-        return error.NoMessageReceived;
-    }
+    log.info("No headers test passed - received message without headers", .{});
 }
 
 test "header manipulation API" {
@@ -136,27 +130,24 @@ test "message with reply and headers" {
     try conn.flush();
 
     // Receive the message
-    if (sub.nextMsg(1000)) |received_msg| {
-        defer received_msg.deinit();
+    var received_msg = sub.nextMsg(1000) catch return error.NoMessageReceived;
+    defer received_msg.deinit();
 
-        // Verify message properties
-        try std.testing.expectEqualStrings("test.reply-headers", received_msg.subject);
-        try std.testing.expectEqualStrings("reply.subject", received_msg.reply.?);
-        try std.testing.expectEqualStrings("Request with headers", received_msg.data);
+    // Verify message properties
+    try std.testing.expectEqualStrings("test.reply-headers", received_msg.subject);
+    try std.testing.expectEqualStrings("reply.subject", received_msg.reply.?);
+    try std.testing.expectEqualStrings("Request with headers", received_msg.data);
 
-        // Verify headers
-        const request_id = try received_msg.headerGet("Request-ID");
-        try std.testing.expect(request_id != null);
-        try std.testing.expectEqualStrings("12345", request_id.?);
+    // Verify headers
+    const request_id = try received_msg.headerGet("Request-ID");
+    try std.testing.expect(request_id != null);
+    try std.testing.expectEqualStrings("12345", request_id.?);
 
-        const content_type = try received_msg.headerGet("Content-Type");
-        try std.testing.expect(content_type != null);
-        try std.testing.expectEqualStrings("text/plain", content_type.?);
+    const content_type = try received_msg.headerGet("Content-Type");
+    try std.testing.expect(content_type != null);
+    try std.testing.expectEqualStrings("text/plain", content_type.?);
 
-        log.info("Reply with headers test passed", .{});
-    } else {
-        return error.NoMessageReceived;
-    }
+    log.info("Reply with headers test passed", .{});
 }
 
 test "no responders header detection" {
