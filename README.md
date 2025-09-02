@@ -49,10 +49,12 @@ try nc.publish("hello", "Hello, NATS!");
 const sub = try nc.subscribeSync("hello");
 
 // Wait for message with 5 second timeout
-if (sub.nextMsg(5000)) |msg| {
-    defer msg.deinit();
-    std.debug.print("Received: {s}\n", .{msg.data});
-}
+var msg = sub.nextMsg(5000) catch |err| {
+    std.debug.print("No message received: {}\n", .{err});
+    return;
+};
+defer msg.deinit();
+std.debug.print("Received: {s}\n", .{msg.data});
 ```
 
 ### Asynchronous Subscribe with Callback

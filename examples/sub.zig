@@ -25,15 +25,15 @@ pub fn main() !void {
     const max_attempts = 50; // 50 * 100ms = 5 seconds
 
     while (attempts < max_attempts) {
-        if (sub.nextMsg(100) catch null) |msg| {
-            defer msg.deinit();
+        var msg = sub.nextMsg(100) catch {
+            std.time.sleep(100 * std.time.ns_per_ms);
+            attempts += 1;
+            continue;
+        };
+        defer msg.deinit();
 
-            std.log.info("Received message: {s} - {s}", .{ msg.subject, msg.data });
-            return;
-        }
-
-        std.time.sleep(100 * std.time.ns_per_ms);
-        attempts += 1;
+        std.log.info("Received message: {s} - {s}", .{ msg.subject, msg.data });
+        return;
     }
 
     std.log.info("No message received within timeout", .{});

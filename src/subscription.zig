@@ -118,7 +118,11 @@ pub const Subscription = struct {
     }
 
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {
-        return self.messages.pop(timeout_ms) catch error.Timeout;
+        return self.messages.pop(timeout_ms) catch |err| switch (err) {
+            error.QueueEmpty => error.Timeout,
+            error.QueueClosed => unreachable,
+            error.BufferFrozen => unreachable,
+        };
     }
 };
 

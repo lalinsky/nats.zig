@@ -41,26 +41,25 @@ pub fn main() !void {
     // Wait for messages in a loop
     while (bench_util.keep_running) {
         // Wait for the next message (with timeout)
-        if (sub.nextMsg(1000) catch null) |msg| {
-            defer msg.deinit();
+        var msg = sub.nextMsg(1000) catch break;
+        defer msg.deinit();
 
-            stats.msg_count += 1;
+        stats.msg_count += 1;
 
-            // Send echo reply if there's a reply subject
-            if (msg.reply) |reply_subject| {
-                const result = conn.publish(reply_subject, msg.data);
-                if (result) {
-                    stats.success_count += 1;
-                } else |err| {
-                    std.debug.print("Failed to send echo reply: {}\n", .{err});
-                    stats.error_count += 1;
-                }
+        // Send echo reply if there's a reply subject
+        if (msg.reply) |reply_subject| {
+            const result = conn.publish(reply_subject, msg.data);
+            if (result) {
+                stats.success_count += 1;
+            } else |err| {
+                std.debug.print("Failed to send echo reply: {}\n", .{err});
+                stats.error_count += 1;
             }
+        }
 
-            // Print stats every REPORT_INTERVAL messages
-            if (stats.msg_count % REPORT_INTERVAL == 0) {
-                stats.printThroughput("Processed");
-            }
+        // Print stats every REPORT_INTERVAL messages
+        if (stats.msg_count % REPORT_INTERVAL == 0) {
+            stats.printThroughput("Processed");
         }
     }
 

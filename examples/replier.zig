@@ -27,7 +27,7 @@ pub fn main() !void {
     };
     defer {
         conn.unsubscribe(sub) catch {};
-        sub.deinit(allocator);
+        sub.deinit();
     }
 
     std.debug.print("Waiting for requests...\n", .{});
@@ -35,21 +35,17 @@ pub fn main() !void {
     // Wait for messages in a loop
     while (true) {
         // Wait for the next message (blocks until one arrives)
-        if (sub.nextMsg(1000) catch null) |msg| {
-            defer msg.deinit();
+        var msg = sub.nextMsg(1000) catch break;
+        defer msg.deinit();
 
-            std.debug.print("Received msg: {s} - {s}\n", .{ msg.subject, msg.data });
+        std.debug.print("Received msg: {s} - {s}\n", .{ msg.subject, msg.data });
 
-            // Send a reply if there's a reply subject
-            if (msg.reply) |reply_subject| {
-                conn.publish(reply_subject, "here's some help") catch |err| {
-                    std.debug.print("Failed to send reply: {}\n", .{err});
-                };
-                std.debug.print("Sent reply to: {s}\n", .{reply_subject});
-            }
-        } else {
-            // Sleep a bit if no message
-            std.time.sleep(100 * std.time.ns_per_ms);
+        // Send a reply if there's a reply subject
+        if (msg.reply) |reply_subject| {
+            conn.publish(reply_subject, "here's some help") catch |err| {
+                std.debug.print("Failed to send reply: {}\n", .{err});
+            };
+            std.debug.print("Sent reply to: {s}\n", .{reply_subject});
         }
     }
 }
