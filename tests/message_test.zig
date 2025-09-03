@@ -40,8 +40,12 @@ test "Message with headers" {
     const raw_headers = "NATS/1.0\r\nContent-Type: application/json\r\nX-Custom: test-value\r\n\r\n";
 
     // Create message with headers
-    var msg = try Message.initWithHeaders(allocator, "test.subject", "reply.to", "hello world", raw_headers);
+    var msg = Message.init(allocator);
     defer msg.deinit();
+    try msg.setSubject("test.subject");
+    try msg.setReply("reply.to");
+    try msg.setPayload("hello world");
+    try msg.parseHeaders(raw_headers);
 
     // Verify data was copied (not same pointers)
     try testing.expectEqualStrings("test.subject", msg.subject);
@@ -89,8 +93,11 @@ test "Message eager header parsing" {
     // Raw headers as they would come from network
     const raw_headers = "NATS/1.0\r\nContent-Type: application/json\r\nX-Custom: test-value\r\n\r\n";
 
-    var msg = try Message.initWithHeaders(allocator, "test.subject", null, "hello world", raw_headers);
+    var msg = Message.init(allocator);
     defer msg.deinit();
+    try msg.setSubject("test.subject");
+    try msg.setPayload("hello world");
+    try msg.parseHeaders(raw_headers);
 
     // Headers are already parsed during initialization
     const content_type = msg.headerGet("Content-Type");

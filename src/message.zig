@@ -89,21 +89,6 @@ pub const Message = struct {
         };
     }
 
-    // Create message with headers pre-parsed
-    pub fn initWithHeaders(allocator: std.mem.Allocator, subject: []const u8, reply: ?[]const u8, data: []const u8, raw_headers: []const u8) !Self {
-        var msg = Self.init(allocator);
-        errdefer msg.deinit();
-
-        try msg.setSubject(subject);
-        if (reply) |r| {
-            try msg.setReply(r);
-        }
-        try msg.setPayload(data);
-        try msg.parseHeaders(raw_headers);
-
-        return msg;
-    }
-
     pub fn deinit(self: *Self) void {
         if (self.pool) |pool| {
             pool.release(self);
