@@ -38,12 +38,7 @@ const ExpectedLastSubjSeqSubjectHdr = "Nats-Expected-Last-Subject-Sequence-Subje
 const ExpectedLastMsgIdHdr = "Nats-Expected-Last-Msg-Id";
 const MsgTTLHdr = "Nats-TTL";
 
-// JetStream publish errors
-pub const JetStreamPublishError = error{
-    InvalidJSAck,
-    NoStreamResponse,
-    Timeout,
-};
+const jetstream_errors = @import("jetstream_errors.zig");
 
 fn isProhibitedChar(c: u8) bool {
     // Explicit prohibited characters
@@ -606,8 +601,8 @@ pub const JetStream = struct {
         log.err("JetStream error: code={d} err_code={d} description={s}", .{ info.code, info.err_code, info.description });
         log.debug("Full response: {s}", .{msg.data});
 
-        // TODO: Handle specific error cases
-        return error.JetStreamError;
+        // Map specific JetStream error codes to proper error types
+        return jetstream_errors.mapErrorCode(info.err_code);
     }
 
     /// Parse a response from the server, handling errors if present.
@@ -1200,7 +1195,7 @@ pub const JetStream = struct {
 
         // Send request without retry logic
         const resp = self.nc.requestMsg(msg, self.opts.request_timeout_ms) catch |request_err| {
-            return if (request_err == error.NoResponders) JetStreamPublishError.NoStreamResponse else request_err;
+            return if (request_err == error.NoResponders) error.NoStreamResponse else request_err;
         };
 
         defer resp.deinit();
@@ -1208,7 +1203,7 @@ pub const JetStream = struct {
         // Parse the publish acknowledgment using parseResponse for consistency
         const parsed_resp = self.parseResponse(PubAck, resp) catch |err| {
             if (err == error.JetStreamParseError) {
-                return JetStreamPublishError.InvalidJSAck;
+                return error.InvalidJSAck;
             }
             return err;
         };
