@@ -13,14 +13,19 @@
 
 const std = @import("std");
 const testing = std.testing;
-const Message = @import("message.zig").Message;
+const message = @import("message.zig");
+const Message = message.Message;
+const STATUS_NO_RESPONSE = 503;
 
 test "Message owned data lifecycle" {
     const allocator = testing.allocator;
 
     // Create message that owns its data
-    const msg = try Message.init(allocator, "test.subject", "reply.to", "hello world");
+    var msg = Message.init(allocator);
     defer msg.deinit();
+    try msg.setSubject("test.subject");
+    try msg.setReply("reply.to");
+    try msg.setPayload("hello world");
 
     // Verify data
     try testing.expectEqualStrings("test.subject", msg.subject);
@@ -36,8 +41,12 @@ test "Message with headers" {
     const raw_headers = "NATS/1.0\r\nContent-Type: application/json\r\nX-Custom: test-value\r\n\r\n";
 
     // Create message with headers
-    const msg = try Message.initWithHeaders(allocator, "test.subject", "reply.to", "hello world", raw_headers);
+    var msg = Message.init(allocator);
     defer msg.deinit();
+    try msg.setSubject("test.subject");
+    try msg.setReply("reply.to");
+    try msg.setPayload("hello world");
+    try msg.setRawHeaders(raw_headers);
 
     // Verify data was copied (not same pointers)
     try testing.expectEqualStrings("test.subject", msg.subject);
@@ -52,8 +61,10 @@ test "Message with headers" {
 test "Message header management" {
     const allocator = testing.allocator;
 
-    const msg = try Message.init(allocator, "test", null, "data");
+    var msg = Message.init(allocator);
     defer msg.deinit();
+    try msg.setSubject("test");
+    try msg.setPayload("data");
 
     // Set headers
     try msg.headerSet("Content-Type", "application/json");
@@ -67,7 +78,7 @@ test "Message header management" {
     try testing.expectEqualStrings("value1", custom.?);
 
     // Non-existent header
-    const missing = try msg.headerGet("Missing");
+    const missing = msg.headerGet("Missing");
     try testing.expectEqual(@as(?[]const u8, null), missing);
 
     // Delete header
@@ -82,8 +93,11 @@ test "Message header parsing" {
     // Raw headers as they would come from network
     const raw_headers = "NATS/1.0\r\nContent-Type: application/json\r\nX-Custom: test-value\r\n\r\n";
 
-    const msg = try Message.initWithHeaders(allocator, "test.subject", null, "hello world", raw_headers);
+    var msg = Message.init(allocator);
     defer msg.deinit();
+    try msg.setSubject("test.subject");
+    try msg.setPayload("hello world");
+    try msg.setRawHeaders(raw_headers);
 
     // Parse headers explicitly
     try msg.parseHeaders();
@@ -125,8 +139,10 @@ test "Message no responders detection" {
 test "Message header encoding" {
     const allocator = testing.allocator;
 
-    const msg = try Message.init(allocator, "test", null, "data");
+    var msg = Message.init(allocator);
     defer msg.deinit();
+    try msg.setSubject("test");
+    try msg.setPayload("data");
 
     try msg.headerSet("Content-Type", "application/json");
     try msg.headerSet("X-Custom", "value");
@@ -194,8 +210,11 @@ test "Message memory patterns" {
     const allocator = testing.allocator;
 
     // Test that all messages copy their data (using arena)
-    const msg1 = try Message.init(allocator, "test", "reply", "data");
+    var msg1 = Message.init(allocator);
     defer msg1.deinit();
+    try msg1.setSubject("test");
+    try msg1.setReply("reply");
+    try msg1.setPayload("data");
 
     // Verify data was copied into arena
     try testing.expectEqualStrings("test", msg1.subject);
@@ -207,13 +226,15 @@ test "Message error handling" {
     const allocator = testing.allocator;
 
     // These should work fine
-    const msg = try Message.init(allocator, "", null, "");
+    var msg = Message.init(allocator);
     defer msg.deinit();
+    try msg.setSubject("");
+    try msg.setPayload("");
 
     // Empty header operations should work
     try msg.headerSet("", "value");
-    try msg.headerDelete("nonexistent");
+    msg.headerDelete("nonexistent");
 
-    const result = try msg.headerGet("");
+    const result = msg.headerGet("");
     try testing.expectEqualStrings("value", result.?);
 }

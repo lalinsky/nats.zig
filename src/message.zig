@@ -334,3 +334,7 @@ pub const MessagePool = struct {
         }
     }
 };
+
+test {
+    _ = @import("message_test.zig");
+}
