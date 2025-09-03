@@ -32,6 +32,8 @@ pub const inbox = @import("inbox.zig");
 // JetStream types
 pub const JetStream = @import("jetstream.zig").JetStream;
 pub const JetStreamOptions = @import("jetstream.zig").JetStreamOptions;
+pub const JetStreamError = @import("jetstream_errors.zig").JetStreamError;
+pub const PublishOptions = @import("jetstream.zig").PublishOptions;
 pub const StreamConfig = @import("jetstream.zig").StreamConfig;
 pub const StreamInfo = @import("jetstream.zig").StreamInfo;
 pub const StreamPurgeRequest = @import("jetstream.zig").StreamPurgeRequest;

@@ -120,7 +120,7 @@ test "delete message" {
 
     // Attempting to get deleted message should fail
     const get_deleted_result = js.getMsg("TEST_MSG_DELETE", 2);
-    try testing.expectError(error.JetStreamError, get_deleted_result);
+    try testing.expectError(nats.JetStreamError.NoMessageFound, get_deleted_result);
 }
 
 test "erase message" {
@@ -164,7 +164,7 @@ test "erase message" {
 
     // Attempting to get erased message should fail
     const get_erased_result = js.getMsg("TEST_MSG_ERASE", 2);
-    try testing.expectError(error.JetStreamError, get_erased_result);
+    try testing.expectError(nats.JetStreamError.NoMessageFound, get_erased_result);
 }
 
 test "get message with headers" {
@@ -224,7 +224,7 @@ test "message operations error cases" {
 
     // Test with non-existent stream
     const get_nonexistent_stream = js.getMsg("NON_EXISTENT_STREAM", 1);
-    try testing.expectError(error.JetStreamError, get_nonexistent_stream);
+    try testing.expectError(nats.JetStreamError.StreamNotFound, get_nonexistent_stream);
 
     // Create stream for other error tests
     const stream_config = nats.StreamConfig{
@@ -236,13 +236,13 @@ test "message operations error cases" {
 
     // Test getting non-existent message by sequence
     const get_nonexistent_msg = js.getMsg("TEST_MSG_ERRORS", 999);
-    try testing.expectError(error.JetStreamError, get_nonexistent_msg);
+    try testing.expectError(nats.JetStreamError.NoMessageFound, get_nonexistent_msg);
 
     // Test getting non-existent message by subject
     const get_nonexistent_subject = js.getLastMsg("TEST_MSG_ERRORS", "non.existent.subject");
-    try testing.expectError(error.JetStreamError, get_nonexistent_subject);
+    try testing.expectError(nats.JetStreamError.NoMessageFound, get_nonexistent_subject);
 
     // Test deleting non-existent message
     const delete_result = js.deleteMsg("TEST_MSG_ERRORS", 999);
-    try testing.expectError(error.JetStreamError, delete_result);
+    try testing.expectError(nats.JetStreamError.StreamMsgDeleteFailed, delete_result);
 }

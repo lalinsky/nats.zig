@@ -755,9 +755,46 @@ test "JetStream publish with expected sequence" {
 
     try testing.expect(pub_ack2.value.seq == pub_ack1.value.seq + 1);
 
-    // Third publish with incorrect expected sequence (should fail)
+    // Third publish with incorrect expected sequence (should fail with specific error)
     const result = js.publish(subject, "third message", .{ .expected_last_seq = 999 });
-    try testing.expectError(error.JetStreamError, result);
+    try testing.expectError(nats.JetStreamError.StreamWrongLastSequence, result);
+}
+
+test "JetStream publish with expected last subject sequence" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+    defer js.deinit();
+
+    // Generate unique names
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(subject);
+
+    // Create stream
+    const stream_config = nats.StreamConfig{
+        .name = stream_name,
+        .subjects = &.{subject},
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // First publish to this subject (should succeed)
+    var pub_ack1 = try js.publish(subject, "first message on subject", .{});
+    defer pub_ack1.deinit();
+
+    // Second publish with correct expected_last_subject_seq
+    var pub_ack2 = try js.publish(subject, "second message on subject", .{ .expected_last_subject_seq = 1 });
+    defer pub_ack2.deinit();
+
+    try testing.expect(pub_ack2.value.seq == pub_ack1.value.seq + 1);
+
+    // Third publish with incorrect expected_last_subject_seq (should fail)
+    // Note: Current NATS server (2.10.29) returns error 10071 for both expected_last_seq and expected_last_subject_seq
+    const wrong_result = js.publish(subject, "wrong subject seq", .{ .expected_last_subject_seq = 999 });
+    try testing.expectError(nats.JetStreamError.StreamWrongLastSequence, wrong_result);
 }
 
 test "JetStream publishMsg with pre-constructed message" {
