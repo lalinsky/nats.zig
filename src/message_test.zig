@@ -45,7 +45,7 @@ test "Message with headers" {
     try testing.expectEqualStrings("hello world", msg.data);
 
     // Verify headers
-    const content_type = try msg.headerGet("Content-Type");
+    const content_type = msg.headerGet("Content-Type");
     try testing.expectEqualStrings("application/json", content_type.?);
 }
 
@@ -60,10 +60,10 @@ test "Message header management" {
     try msg.headerSet("Custom-Header", "value1");
 
     // Get headers
-    const content_type = try msg.headerGet("Content-Type");
+    const content_type = msg.headerGet("Content-Type");
     try testing.expectEqualStrings("application/json", content_type.?);
 
-    const custom = try msg.headerGet("Custom-Header");
+    const custom = msg.headerGet("Custom-Header");
     try testing.expectEqualStrings("value1", custom.?);
 
     // Non-existent header
@@ -71,12 +71,12 @@ test "Message header management" {
     try testing.expectEqual(@as(?[]const u8, null), missing);
 
     // Delete header
-    try msg.headerDelete("Content-Type");
-    const deleted = try msg.headerGet("Content-Type");
+    msg.headerDelete("Content-Type");
+    const deleted = msg.headerGet("Content-Type");
     try testing.expectEqual(@as(?[]const u8, null), deleted);
 }
 
-test "Message lazy header parsing" {
+test "Message header parsing" {
     const allocator = testing.allocator;
 
     // Raw headers as they would come from network
@@ -85,18 +85,15 @@ test "Message lazy header parsing" {
     const msg = try Message.initWithHeaders(allocator, "test.subject", null, "hello world", raw_headers);
     defer msg.deinit();
 
-    // Headers should need parsing initially
-    try testing.expect(msg.needs_header_parsing);
+    // Parse headers explicitly
+    try msg.parseHeaders();
 
-    // First access should parse headers
-    const content_type = try msg.headerGet("Content-Type");
+    // Verify headers were parsed
+    const content_type = msg.headerGet("Content-Type");
     try testing.expectEqualStrings("application/json", content_type.?);
 
-    // Should no longer need parsing
-    try testing.expect(!msg.needs_header_parsing);
-
     // Verify other headers were parsed
-    const custom = try msg.headerGet("X-Custom");
+    const custom = msg.headerGet("X-Custom");
     try testing.expectEqualStrings("test-value", custom.?);
 }
 

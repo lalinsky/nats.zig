@@ -509,7 +509,7 @@ pub const PullSubscription = struct {
                 // The timestamp in the ACK subject ensures messages belong to this fetch request
                 // (timestamps are monotonically increasing and unique per message delivery)
 
-                if (try raw_msg.headerGet("Status")) |status_code| {
+                if (raw_msg.headerGet("Status")) |status_code| {
                     if (std.mem.eql(u8, status_code, "404")) {
                         // No messages available
                         raw_msg.deinit();
@@ -946,7 +946,6 @@ pub const JetStream = struct {
             const decoded_headers = try arena_allocator.alloc(u8, hdrs_len);
             try decoder.decode(decoded_headers, hdrs_b64);
             msg.raw_headers = decoded_headers;
-            msg.needs_header_parsing = true;
         }
 
         // Parse time from RFC3339 format
@@ -996,7 +995,9 @@ pub const JetStream = struct {
 
     /// Internal function for direct get messages from any stream replica
     fn getMsgDirect(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
+        log.debug("getMsgDirect: Starting with stream_name={s}", .{stream_name});
         try validateStreamName(stream_name);
+        log.debug("getMsgDirect: Stream name validation passed", .{});
 
         // Build the subject for the direct get API call
         const subject = try std.fmt.allocPrint(self.allocator, "DIRECT.GET.{s}", .{stream_name});
@@ -1018,27 +1019,37 @@ pub const JetStream = struct {
         const resp = try self.sendRequest(subject, request_json);
         errdefer resp.deinit();
 
+        log.debug("getMsgDirect: Got response, raw_headers: {s}", .{resp.raw_headers orelse "null"});
+        log.debug("getMsgDirect: Response data: {s}", .{resp.data});
+
         // For direct get, we get a raw NATS message back, not a JSON response
         // The message should have JetStream headers like Nats-Stream, Nats-Sequence, etc.
-        try resp.ensureHeadersParsed();
+        log.debug("getMsgDirect: About to call parseHeaders", .{});
+        try resp.parseHeaders();
+        log.debug("getMsgDirect: parseHeaders completed successfully", .{});
 
         // Check for error status codes in headers
-        if (try resp.headerGet("Status")) |status| {
+        log.debug("getMsgDirect: About to call headerGet for Status", .{});
+        if (resp.headerGet("Status")) |status| {
+            log.debug("getMsgDirect: Found Status header: {s}", .{status});
             if (std.mem.eql(u8, status, "404")) {
+                log.debug("getMsgDirect: Returning MessageNotFound error", .{});
                 return error.MessageNotFound;
             } else if (std.mem.eql(u8, status, "408")) {
                 return error.BadRequest;
             } else if (std.mem.eql(u8, status, "413")) {
                 return error.TooManySubjects;
             }
+        } else {
+            log.debug("getMsgDirect: No Status header found", .{});
         }
 
         // For direct get, extract metadata from JetStream headers
-        if (try resp.headerGet("Nats-Subject")) |nats_subject| {
+        if (resp.headerGet("Nats-Subject")) |nats_subject| {
             resp.subject = nats_subject;
         }
         
-        if (try resp.headerGet("Nats-Sequence")) |nats_seq_str| {
+        if (resp.headerGet("Nats-Sequence")) |nats_seq_str| {
             resp.seq = std.fmt.parseInt(u64, nats_seq_str, 10) catch 0;
         }
 

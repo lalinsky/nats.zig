@@ -218,6 +218,7 @@ pub const Parser = struct {
 
                     if (needed == 0) {
                         self.ma.msg = null; // transfer ownership
+                        try msg.parseHeaders(); // Parse headers before processing message
                         try conn.processMsg(msg);
                         self.state = .MSG_END;
                     }
@@ -562,9 +563,6 @@ pub const Parser = struct {
         // pre-allocate full payload buffer
         var payload_buffer = try allocator.alloc(u8, total_len);
 
-        if (hdr_len > 0) {
-            msg.needs_header_parsing = true;
-        }
         msg.raw_headers = payload_buffer[0..hdr_len];
         msg.data = payload_buffer[hdr_len..];
 

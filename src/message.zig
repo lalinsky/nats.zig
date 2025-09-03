@@ -71,9 +71,8 @@ pub const Message = struct {
     // Headers
     headers: std.hash_map.StringHashMapUnmanaged(ArrayListUnmanaged([]const u8)) = .{},
 
-    // Raw header data for lazy parsing
+    // Raw header data for parsing
     raw_headers: ?[]const u8 = null,
-    needs_header_parsing: bool = false,
 
     // Memory management - much simpler with arena
     arena: std.heap.ArenaAllocator,
@@ -115,13 +114,10 @@ pub const Message = struct {
 
     pub fn setRawHeaders(self: *Self, headers: []const u8) !void {
         self.raw_headers = try self.arena.allocator().dupe(u8, headers);
-        self.needs_header_parsing = true;
     }
 
-    // Lazy header parsing
-    pub fn ensureHeadersParsed(self: *Self) !void {
-        if (!self.needs_header_parsing) return;
-
+    // Parse headers from raw header data
+    pub fn parseHeaders(self: *Self) !void {
         const raw = self.raw_headers orelse return;
 
         // Parse headers like Go NATS library
@@ -186,12 +182,10 @@ pub const Message = struct {
             try result.value_ptr.append(arena_allocator, owned_value);
         }
 
-        self.needs_header_parsing = false;
     }
 
     // Header API
     pub fn headerSet(self: *Self, key: []const u8, value: []const u8) !void {
-        try self.ensureHeadersParsed();
 
         const arena_allocator = self.arena.allocator();
 
@@ -208,9 +202,7 @@ pub const Message = struct {
         try self.headers.put(arena_allocator, owned_key, values);
     }
 
-    pub fn headerGet(self: *Self, key: []const u8) !?[]const u8 {
-        try self.ensureHeadersParsed();
-
+    pub fn headerGet(self: *Self, key: []const u8) ?[]const u8 {
         if (self.headers.get(key)) |values| {
             if (values.items.len > 0) {
                 return values.items[0];
@@ -220,9 +212,7 @@ pub const Message = struct {
         return null;
     }
 
-    pub fn headerGetAll(self: *Self, key: []const u8) !?[]const []const u8 {
-        try self.ensureHeadersParsed();
-
+    pub fn headerGetAll(self: *Self, key: []const u8) ?[]const []const u8 {
         if (self.headers.get(key)) |values| {
             return values.items; // No copy needed - arena owns the data
         }
@@ -230,9 +220,7 @@ pub const Message = struct {
         return null;
     }
 
-    pub fn headerDelete(self: *Self, key: []const u8) !void {
-        try self.ensureHeadersParsed();
-
+    pub fn headerDelete(self: *Self, key: []const u8) void {
         // Arena will clean up memory automatically
         _ = self.headers.fetchRemove(key);
     }
@@ -241,13 +229,12 @@ pub const Message = struct {
     pub fn isNoResponders(self: *Self) bool {
         if (self.data.len != 0) return false;
 
-        const status = self.headerGet(HDR_STATUS) catch return false;
+        const status = self.headerGet(HDR_STATUS);
         return status != null and std.mem.eql(u8, status.?, HDR_STATUS_NO_RESPONSE);
     }
 
     // Encode headers for transmission
     pub fn encodeHeaders(self: *Self, writer: anytype) !void {
-        try self.ensureHeadersParsed();
 
         if (self.headers.count() == 0) return;
 
@@ -274,9 +261,8 @@ pub const Message = struct {
         self.data = &[_]u8{};
         self.sid = 0;
         self.seq = 0;
-        self.headers.clearRetainingCapacity();
+        self.headers = .{}; // Completely reset HashMap instead of clearRetainingCapacity()
         self.raw_headers = null;
-        self.needs_header_parsing = false;
         self.next = null;
         // Note: pool and arena are intentionally preserved
     }

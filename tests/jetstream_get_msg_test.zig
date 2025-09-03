@@ -209,11 +209,11 @@ test "get message with headers" {
     try testing.expectEqual(@as(u64, 1), retrieved.seq);
 
     // Check headers
-    const custom_header = try retrieved.headerGet("X-Custom-Header");
+    const custom_header = retrieved.headerGet("X-Custom-Header");
     try testing.expect(custom_header != null);
     try testing.expectEqualStrings("custom-value", custom_header.?);
 
-    const test_id = try retrieved.headerGet("X-Test-ID");
+    const test_id = retrieved.headerGet("X-Test-ID");
     try testing.expect(test_id != null);
     try testing.expectEqualStrings("12345", test_id.?);
 }

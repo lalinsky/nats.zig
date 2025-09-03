@@ -185,7 +185,8 @@ test "get message with headers using direct API" {
     try msg.headerSet("X-Test-Mode", "direct");
 
     // Publish the message
-    _ = try js.publishMsg(msg, .{});
+    const pub_ack = try js.publishMsg(msg, .{});
+    defer pub_ack.deinit();
 
     // Get the message back using direct API
     const retrieved = try js.getMsg(stream_name, .{ .seq = 1, .direct = true });
@@ -195,24 +196,24 @@ test "get message with headers using direct API" {
     try testing.expectEqualStrings("Direct message with headers", retrieved.data);
 
     // Check original headers
-    const direct_header = try retrieved.headerGet("X-Direct-Header");
+    const direct_header = retrieved.headerGet("X-Direct-Header");
     try testing.expect(direct_header != null);
     try testing.expectEqualStrings("direct-value", direct_header.?);
 
-    const test_mode = try retrieved.headerGet("X-Test-Mode");
+    const test_mode = retrieved.headerGet("X-Test-Mode");
     try testing.expect(test_mode != null);
     try testing.expectEqualStrings("direct", test_mode.?);
 
     // Check JetStream headers added by direct get
-    const nats_stream = try retrieved.headerGet("Nats-Stream");
+    const nats_stream = retrieved.headerGet("Nats-Stream");
     try testing.expect(nats_stream != null);
     try testing.expectEqualStrings(stream_name, nats_stream.?);
 
-    const nats_sequence = try retrieved.headerGet("Nats-Sequence");
+    const nats_sequence = retrieved.headerGet("Nats-Sequence");
     try testing.expect(nats_sequence != null);
     try testing.expectEqualStrings("1", nats_sequence.?);
 
-    const nats_subject = try retrieved.headerGet("Nats-Subject");
+    const nats_subject = retrieved.headerGet("Nats-Subject");
     try testing.expect(nats_subject != null);
     try testing.expectEqualStrings(subject, nats_subject.?);
 }
