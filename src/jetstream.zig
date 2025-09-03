@@ -1215,4 +1215,16 @@ pub const JetStream = struct {
 
         return parsed_resp;
     }
+
+    /// Create a KV manager for bucket operations
+    pub fn kvManager(self: *JetStream) @import("jetstream_kv.zig").KVManager {
+        const jetstream_kv = @import("jetstream_kv.zig");
+        return jetstream_kv.KVManager.init(self.allocator, self);
+    }
+
+    /// Open an existing KV bucket
+    pub fn kvBucket(self: *JetStream, bucket_name: []const u8) !*@import("jetstream_kv.zig").KV {
+        var manager = self.kvManager();
+        return try manager.openBucket(bucket_name);
+    }
 };

@@ -50,10 +50,23 @@ pub const PullSubscription = @import("jetstream.zig").PullSubscription;
 pub const FetchRequest = @import("jetstream.zig").FetchRequest;
 pub const MessageBatch = @import("jetstream.zig").MessageBatch;
 
+// JetStream KV types
+pub const KV = @import("jetstream_kv.zig").KV;
+pub const KVManager = @import("jetstream_kv.zig").KVManager;
+pub const KVEntry = @import("jetstream_kv.zig").KVEntry;
+pub const KVStatus = @import("jetstream_kv.zig").KVStatus;
+pub const KVConfig = @import("jetstream_kv.zig").KVConfig;
+pub const PutOptions = @import("jetstream_kv.zig").PutOptions;
+pub const KVOperation = @import("jetstream_kv.zig").KVOperation;
+pub const KVError = @import("jetstream_kv.zig").KVError;
+pub const validateKey = @import("jetstream_kv.zig").validateKey;
+pub const validateBucketName = @import("jetstream_kv.zig").validateBucketName;
+
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("jetstream.zig");
     _ = @import("jetstream_message.zig");
+    _ = @import("jetstream_kv.zig");
 }
