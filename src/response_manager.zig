@@ -238,9 +238,18 @@ pub const ResponseManager = struct {
         }
     }
 
+    /// Options for controlling requestMany behavior (ADR-47 compliant)
     pub const WaitForMultiResponseOptions = struct {
+        /// Maximum number of messages to collect before stopping
         max_messages: ?usize = null,
+
+        /// Sentinel function: return true to continue processing, false to stop (ADR-47)
+        /// This follows ADR-47 specification (differs from Go implementation)
         sentinelFn: ?fn (*Message) bool = null,
+
+        /// Stall timeout in milliseconds: max time to wait between subsequent messages
+        /// After first message, if no new messages arrive within this time, collection stops
+        stall_ms: ?u64 = null,
     };
 
     pub fn waitForMultiResponse(self: *ResponseManager, handle: RequestHandle, timeout_ns: u64, options: WaitForMultiResponseOptions) !MessageList {
@@ -287,9 +296,10 @@ pub const ResponseManager = struct {
                     }
                 }
 
+                // ADR-47: Sentinel function returns true to continue, false to stop
                 if (options.sentinelFn) |sentinelFn| {
                     if (msgs.tail) |last_msg| {
-                        if (sentinelFn(last_msg)) {
+                        if (!sentinelFn(last_msg)) {
                             done = true;
                             break;
                         }
@@ -319,8 +329,23 @@ pub const ResponseManager = struct {
                 return error.Timeout;
             }
 
+            // Calculate wait timeout: use stall timeout after first message, if configured
+            var wait_timeout_ns = timeout_ns - elapsed;
+            if (msgs.len > 0) {
+                if (options.stall_ms) |stall_ms| {
+                    wait_timeout_ns = @min(wait_timeout_ns, stall_ms * std.time.ns_per_ms);
+                }
+            }
+
             // After this call, any entry pointers become invalid due to potential HashMap modifications
-            self.pending_condition.timedWait(&self.pending_mutex, timeout_ns - elapsed) catch {};
+            self.pending_condition.timedWait(&self.pending_mutex, wait_timeout_ns) catch {
+                // Timeout occurred - return what we have collected so far
+                cleanup = true;
+                if (msgs.len > 0) {
+                    return msgs;
+                }
+                return error.Timeout;
+            };
         }
     }
 

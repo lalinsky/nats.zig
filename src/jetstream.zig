@@ -349,9 +349,9 @@ pub const FetchRequest = struct {
     /// Maximum bytes to fetch (optional)
     max_bytes: ?u64 = null,
     /// Request timeout in nanoseconds (default: 30 seconds)
-    expires: u64 = 30_000_000_000,
+    expires: ?u64 = null,
     /// Don't wait if no messages are available immediately
-    no_wait: bool = false,
+    no_wait: ?bool = null,
     /// Heartbeat interval in nanoseconds for long requests
     idle_heartbeat: ?u64 = null,
 };
@@ -451,7 +451,9 @@ pub const PullSubscription = struct {
         };
 
         // Serialize the fetch request to JSON
-        const request_json = try std.json.stringifyAlloc(self.js.allocator, request, .{});
+        const request_json = try std.json.stringifyAlloc(self.js.allocator, request, .{
+            .emit_null_optional_fields = false,
+        });
         defer self.js.allocator.free(request_json);
 
         // Build the full API subject
