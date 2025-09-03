@@ -39,7 +39,11 @@ pub const ParserState = enum {
     MSG_ARG,
     MSG_PAYLOAD,
     MSG_END,
-    HMSG_HEADERS,
+    HMSG_HEADER_START,
+    HMSG_HEADER_NAME,
+    HMSG_HEADER_COLON,
+    HMSG_HEADER_VALUE,
+    HMSG_HEADER_CR,
     OP_H,
     OP_P,
     OP_PI,
@@ -62,6 +66,10 @@ pub const MsgArg = struct {
     payload_writer: std.io.FixedBufferStream([]u8) = undefined,
     hdr_len: usize = 0,
     hdr_parsed: usize = 0,
+    // Header parsing state
+    header_name_start: usize = 0,
+    header_value_start: usize = 0,
+    current_header_name: ?[]const u8 = null,
 };
 
 // Forward declaration for connection
@@ -192,7 +200,8 @@ pub const Parser = struct {
 
                             // Choose next state based on whether we have headers
                             if (self.ma.hdr_len > 0) {
-                                self.state = .HMSG_HEADERS;
+                                self.state = .HMSG_HEADER_START;
+                                self.ma.header_name_start = i + 1;
                             } else {
                                 self.state = .MSG_PAYLOAD;
                             }
@@ -212,24 +221,138 @@ pub const Parser = struct {
                     }
                 },
 
-                .HMSG_HEADERS => {
-                    const msg = self.ma.msg orelse unreachable;
+                .HMSG_HEADER_START => {
+                    // Copy header byte into payload buffer for later access
+                    self.ma.payload_buffer[self.ma.hdr_parsed] = b;
+                    self.ma.hdr_parsed += 1;
 
+                    switch (b) {
+                        '\r' => {
+                            // Empty line - end of headers
+                            self.state = .HMSG_HEADER_CR;
+                        },
+                        'N' => {
+                            // Potential start of NATS/1.0 status line or regular header
+                            self.state = .HMSG_HEADER_NAME;
+                            self.ma.header_name_start = self.ma.hdr_parsed - 1;
+                        },
+                        else => {
+                            // Start of regular header name
+                            self.state = .HMSG_HEADER_NAME;
+                            self.ma.header_name_start = self.ma.hdr_parsed - 1;
+                        },
+                    }
+                },
+
+                .HMSG_HEADER_NAME => {
                     // Copy header byte into payload buffer
                     self.ma.payload_buffer[self.ma.hdr_parsed] = b;
                     self.ma.hdr_parsed += 1;
 
-                    // Check if we've read all header bytes
-                    if (self.ma.hdr_parsed == self.ma.hdr_len) {
-                        // Parse headers immediately
-                        const raw_headers = self.ma.payload_buffer[0..self.ma.hdr_len];
-                        try self.parseHeadersIntoMessage(msg, raw_headers);
+                    switch (b) {
+                        ':' => {
+                            // Found colon - extract header name
+                            const header_name_slice = self.ma.payload_buffer[self.ma.header_name_start .. self.ma.hdr_parsed - 1];
+                            const trimmed_name = std.mem.trim(u8, header_name_slice, " \t");
 
-                        // Advance payload writer to skip header portion
-                        self.ma.payload_writer.pos = self.ma.hdr_len;
+                            if (trimmed_name.len > 0) {
+                                const msg = self.ma.msg orelse unreachable;
+                                const arena_allocator = msg.arena.allocator();
+                                self.ma.current_header_name = try arena_allocator.dupe(u8, trimmed_name);
+                            }
 
-                        // Transition directly to payload parsing
-                        self.state = .MSG_PAYLOAD;
+                            self.state = .HMSG_HEADER_COLON;
+                        },
+                        '\r' => {
+                            // End of line without colon - could be NATS/1.0 status line
+                            const header_line = self.ma.payload_buffer[self.ma.header_name_start .. self.ma.hdr_parsed - 1];
+
+                            // Check if this is a NATS status line
+                            if (std.mem.startsWith(u8, header_line, "NATS/1.0")) {
+                                try self.parseStatusLine(header_line);
+                            }
+
+                            self.state = .HMSG_HEADER_CR;
+                        },
+                        else => {
+                            // Continue reading header name or status line
+                        },
+                    }
+                },
+
+                .HMSG_HEADER_COLON => {
+                    // Copy header byte into payload buffer
+                    self.ma.payload_buffer[self.ma.hdr_parsed] = b;
+                    self.ma.hdr_parsed += 1;
+
+                    switch (b) {
+                        ' ', '\t' => {
+                            // Skip whitespace after colon
+                        },
+                        else => {
+                            // Start of header value
+                            self.state = .HMSG_HEADER_VALUE;
+                            self.ma.header_value_start = self.ma.hdr_parsed - 1;
+                        },
+                    }
+                },
+
+                .HMSG_HEADER_VALUE => {
+                    // Copy header byte into payload buffer
+                    self.ma.payload_buffer[self.ma.hdr_parsed] = b;
+                    self.ma.hdr_parsed += 1;
+
+                    switch (b) {
+                        '\r' => {
+                            // End of header value - extract and add to HashMap
+                            if (self.ma.current_header_name) |header_name| {
+                                const header_value_slice = self.ma.payload_buffer[self.ma.header_value_start .. self.ma.hdr_parsed - 1];
+                                const trimmed_value = std.mem.trim(u8, header_value_slice, " \t");
+
+                                const msg = self.ma.msg orelse unreachable;
+                                const arena_allocator = msg.arena.allocator();
+
+                                if (trimmed_value.len > 0) {
+                                    const owned_value = try arena_allocator.dupe(u8, trimmed_value);
+
+                                    const result = try msg.headers.getOrPut(arena_allocator, header_name);
+                                    if (!result.found_existing) {
+                                        result.value_ptr.* = .{};
+                                    }
+                                    try result.value_ptr.append(arena_allocator, owned_value);
+                                }
+
+                                self.ma.current_header_name = null;
+                            }
+
+                            self.state = .HMSG_HEADER_CR;
+                        },
+                        else => {
+                            // Continue reading header value
+                        },
+                    }
+                },
+
+                .HMSG_HEADER_CR => {
+                    // Copy header byte into payload buffer
+                    self.ma.payload_buffer[self.ma.hdr_parsed] = b;
+                    self.ma.hdr_parsed += 1;
+
+                    switch (b) {
+                        '\n' => {
+                            // Check if we've read all header bytes
+                            if (self.ma.hdr_parsed == self.ma.hdr_len) {
+                                // Headers complete - advance payload writer and transition to payload
+                                self.ma.payload_writer.pos = self.ma.hdr_len;
+                                self.state = .MSG_PAYLOAD;
+                            } else {
+                                // More headers to parse
+                                self.state = .HMSG_HEADER_START;
+                            }
+                        },
+                        else => {
+                            return error.InvalidProtocol;
+                        },
                     }
                 },
 
@@ -525,6 +648,48 @@ pub const Parser = struct {
         self.arg_buf = &self.arg_buf_rec;
     }
 
+    fn parseStatusLine(self: *Self, status_line: []const u8) !void {
+        const msg = self.ma.msg orelse unreachable;
+        const arena_allocator = msg.arena.allocator();
+
+        // Check if we have an inlined status (like "NATS/1.0 503" or "NATS/1.0 503 No Responders")
+        if (std.mem.startsWith(u8, status_line, "NATS/1.0") and status_line.len > "NATS/1.0".len) {
+            const status_part = std.mem.trim(u8, status_line["NATS/1.0".len..], " \t");
+            if (status_part.len > 0) {
+                // Extract status code (first 3 characters if available)
+                const status_len = 3; // Like Go's statusLen
+                var status: []const u8 = undefined;
+                var description: ?[]const u8 = null;
+
+                if (status_part.len == status_len) {
+                    status = status_part;
+                } else if (status_part.len > status_len) {
+                    status = status_part[0..status_len];
+                    const desc_part = std.mem.trim(u8, status_part[status_len..], " \t");
+                    if (desc_part.len > 0) {
+                        description = desc_part;
+                    }
+                } else {
+                    status = status_part; // Less than 3 chars, use as-is
+                }
+
+                // Add Status header
+                const owned_status = try arena_allocator.dupe(u8, status);
+                var status_list = ArrayListUnmanaged([]const u8){};
+                try status_list.append(arena_allocator, owned_status);
+                try msg.headers.put(arena_allocator, "Status", status_list);
+
+                // Add Description header if present
+                if (description) |desc| {
+                    const owned_desc = try arena_allocator.dupe(u8, desc);
+                    var desc_list = ArrayListUnmanaged([]const u8){};
+                    try desc_list.append(arena_allocator, owned_desc);
+                    try msg.headers.put(arena_allocator, "Description", desc_list);
+                }
+            }
+        }
+    }
+
     fn processMsgArgs(self: *Self, args: []const u8) !void {
         var parts = std.mem.tokenizeScalar(u8, args, ' ');
 
@@ -602,73 +767,6 @@ pub const Parser = struct {
             .hdr_len = hdr_len,
             .hdr_parsed = 0,
         };
-    }
-
-    fn parseHeadersIntoMessage(self: *Self, msg: *Message, raw_headers: []const u8) !void {
-        _ = self;
-        const arena_allocator = msg.arena.allocator();
-
-        // Parse headers like Go NATS library
-        var lines = std.mem.splitSequence(u8, raw_headers, "\r\n");
-        const first_line = lines.next() orelse return;
-
-        // Check if we have an inlined status (like "NATS/1.0 503" or "NATS/1.0 503 No Responders")
-        if (std.mem.startsWith(u8, first_line, "NATS/1.0") and first_line.len > "NATS/1.0".len) {
-            const status_part = std.mem.trim(u8, first_line["NATS/1.0".len..], " \t");
-            if (status_part.len > 0) {
-                // Extract status code (first 3 characters if available)
-                const status_len = 3; // Like Go's statusLen
-                var status: []const u8 = undefined;
-                var description: ?[]const u8 = null;
-
-                if (status_part.len == status_len) {
-                    status = status_part;
-                } else if (status_part.len > status_len) {
-                    status = status_part[0..status_len];
-                    const desc_part = std.mem.trim(u8, status_part[status_len..], " \t");
-                    if (desc_part.len > 0) {
-                        description = desc_part;
-                    }
-                } else {
-                    status = status_part; // Less than 3 chars, use as-is
-                }
-
-                // Add Status header
-                const owned_status = try arena_allocator.dupe(u8, status);
-                var status_list = ArrayListUnmanaged([]const u8){};
-                try status_list.append(arena_allocator, owned_status);
-                try msg.headers.put(arena_allocator, "Status", status_list);
-
-                // Add Description header if present
-                if (description) |desc| {
-                    const owned_desc = try arena_allocator.dupe(u8, desc);
-                    var desc_list = ArrayListUnmanaged([]const u8){};
-                    try desc_list.append(arena_allocator, owned_desc);
-                    try msg.headers.put(arena_allocator, "Description", desc_list);
-                }
-            }
-        }
-
-        while (lines.next()) |line| {
-            if (line.len == 0) break; // End of headers
-
-            const colon_pos = std.mem.indexOf(u8, line, ":") orelse continue;
-            const key = std.mem.trim(u8, line[0..colon_pos], " \t");
-            const value = std.mem.trim(u8, line[colon_pos + 1 ..], " \t");
-
-            if (key.len == 0) continue;
-
-            // Copy key and value using arena
-            const owned_key = try arena_allocator.dupe(u8, key);
-            const owned_value = try arena_allocator.dupe(u8, value);
-
-            const result = try msg.headers.getOrPut(arena_allocator, owned_key);
-            if (!result.found_existing) {
-                result.value_ptr.* = .{};
-            }
-
-            try result.value_ptr.append(arena_allocator, owned_value);
-        }
     }
 };
 
