@@ -256,9 +256,7 @@ pub const Parser = struct {
                             const trimmed_name = std.mem.trim(u8, header_name_slice, " \t");
 
                             if (trimmed_name.len > 0) {
-                                const msg = self.ma.msg orelse unreachable;
-                                const arena_allocator = msg.arena.allocator();
-                                self.ma.current_header_name = try arena_allocator.dupe(u8, trimmed_name);
+                                self.ma.current_header_name = trimmed_name;
                             }
 
                             self.state = .HMSG_HEADER_COLON;
@@ -313,13 +311,11 @@ pub const Parser = struct {
                                 const arena_allocator = msg.arena.allocator();
 
                                 if (trimmed_value.len > 0) {
-                                    const owned_value = try arena_allocator.dupe(u8, trimmed_value);
-
                                     const result = try msg.headers.getOrPut(arena_allocator, header_name);
                                     if (!result.found_existing) {
                                         result.value_ptr.* = .{};
                                     }
-                                    try result.value_ptr.append(arena_allocator, owned_value);
+                                    try result.value_ptr.append(arena_allocator, trimmed_value);
                                 }
 
                                 self.ma.current_header_name = null;
@@ -674,16 +670,14 @@ pub const Parser = struct {
                 }
 
                 // Add Status header
-                const owned_status = try arena_allocator.dupe(u8, status);
                 var status_list = ArrayListUnmanaged([]const u8){};
-                try status_list.append(arena_allocator, owned_status);
+                try status_list.append(arena_allocator, status);
                 try msg.headers.put(arena_allocator, "Status", status_list);
 
                 // Add Description header if present
                 if (description) |desc| {
-                    const owned_desc = try arena_allocator.dupe(u8, desc);
                     var desc_list = ArrayListUnmanaged([]const u8){};
-                    try desc_list.append(arena_allocator, owned_desc);
+                    try desc_list.append(arena_allocator, desc);
                     try msg.headers.put(arena_allocator, "Description", desc_list);
                 }
             }
