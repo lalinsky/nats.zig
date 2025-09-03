@@ -237,11 +237,11 @@ test "KV status operation" {
     const status = try kv.status();
     defer status.deinit();
 
-    try testing.expectEqualStrings(bucket_name, status.bucket);
-    try testing.expect(status.values >= 2); // At least 2 messages
-    try testing.expect(status.history == 3);
-    try testing.expect(status.is_compressed == true);
-    try testing.expectEqualStrings("JetStream", status.backing_store);
+    try testing.expectEqualStrings(bucket_name, status.value.bucket);
+    try testing.expect(status.value.values >= 2); // At least 2 messages
+    try testing.expect(status.value.history == 3);
+    try testing.expect(status.value.is_compressed == true);
+    try testing.expectEqualStrings("JetStream", status.value.backing_store);
 }
 
 test "KV validation" {

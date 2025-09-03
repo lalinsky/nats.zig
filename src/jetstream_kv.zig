@@ -113,8 +113,6 @@ pub const KVEntry = struct {
 
 /// KV Status provides information about a KV bucket
 pub const KVStatus = struct {
-    /// Allocator for cleanup
-    allocator: std.mem.Allocator,
     /// Bucket name
     bucket: []const u8,
     /// Number of messages/entries in the bucket
@@ -131,12 +129,6 @@ pub const KVStatus = struct {
     backing_store: []const u8,
     /// Total bytes used by bucket
     bytes: u64,
-
-    pub fn deinit(self: *KVStatus) void {
-        self.allocator.free(self.bucket);
-        self.allocator.free(self.backing_store);
-        self.allocator.destroy(self);
-    }
 };
 
 /// Configuration for creating KV buckets
@@ -423,24 +415,28 @@ pub const KV = struct {
     }
 
     /// Get status information about the bucket
-    pub fn status(self: *KV) !*KVStatus {
+    pub fn status(self: *KV) !Result(KVStatus) {
         const stream_info = try self.js.getStreamInfo(self.stream_name);
-        defer stream_info.deinit();
+        errdefer stream_info.deinit();
 
-        const status_obj = try self.allocator.create(KVStatus);
-        status_obj.* = KVStatus{
-            .allocator = self.allocator,
-            .bucket = try self.allocator.dupe(u8, self.bucket_name),
+        const arena_allocator = stream_info.arena.allocator();
+
+        const status_value = KVStatus{
+            .bucket = try arena_allocator.dupe(u8, self.bucket_name),
             .values = stream_info.value.state.messages,
             .history = @intCast(stream_info.value.config.max_msgs_per_subject),
             .ttl = stream_info.value.config.max_age,
             .limit_marker_ttl = 0, // TODO: Extract from stream config
             .is_compressed = stream_info.value.config.compression == .s2,
-            .backing_store = try self.allocator.dupe(u8, "JetStream"),
+            .backing_store = "JetStream",
             .bytes = stream_info.value.state.bytes,
         };
 
-        return status_obj;
+        const result: Result(KVStatus) = .{
+            .arena = stream_info.arena,
+            .value = status_value,
+        };
+        return result;
     }
 
     /// Destroy the entire bucket and all data
