@@ -100,18 +100,26 @@ test "Message header parsing" {
 test "Message no responders detection" {
     const allocator = testing.allocator;
 
-    const msg = try Message.init(allocator, "test", null, "");
+    var msg = Message.init(allocator);
     defer msg.deinit();
+    
+    try msg.setSubject("test");
+    try msg.setPayload("");
 
     // Set 503 status
-    try msg.headerSet("Status", "503");
+    msg.status_code = STATUS_NO_RESPONSE;
 
     // Should be detected as no responders
-    try testing.expect(try msg.isNoResponders());
+    try testing.expect(msg.isNoResponders());
 
     // Change status
-    try msg.headerSet("Status", "200");
-    try testing.expect(!try msg.isNoResponders());
+    msg.status_code = 200;
+    try testing.expect(!msg.isNoResponders());
+    
+    // Test with data - should not be no responders even with 503
+    try msg.setPayload("some data");
+    msg.status_code = STATUS_NO_RESPONSE;
+    try testing.expect(!msg.isNoResponders());
 }
 
 test "Message header encoding" {
@@ -137,6 +145,49 @@ test "Message header encoding" {
 
     // Should end with double CRLF
     try testing.expect(std.mem.endsWith(u8, buf.items, "\r\n\r\n"));
+}
+
+test "Message status field and header parsing" {
+    const allocator = testing.allocator;
+
+    var msg = Message.init(allocator);
+    defer msg.deinit();
+    
+    try msg.setSubject("test");
+    try msg.setPayload("test data");
+
+    // Test parsing inline status with description
+    const raw_headers = "NATS/1.0 503 No Responders\r\nX-Custom: test\r\n\r\n";
+    try msg.setRawHeaders(raw_headers);
+    try msg.parseHeaders();
+
+    // Status field should be set
+    try testing.expectEqual(@as(u16, 503), msg.status_code);
+
+    // Full status line should be in Status header
+    const status_header = msg.headerGet("Status");
+    try testing.expect(status_header != null);
+    try testing.expectEqualStrings("NATS/1.0 503 No Responders", status_header.?);
+
+    // Other headers should still be parsed
+    const custom_header = msg.headerGet("X-Custom");
+    try testing.expect(custom_header != null);
+    try testing.expectEqualStrings("test", custom_header.?);
+
+    // Test encoding - Status header should be first line
+    var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
+
+    try msg.encodeHeaders(buf.writer());
+
+    // Should start with the full status line
+    try testing.expect(std.mem.startsWith(u8, buf.items, "NATS/1.0 503 No Responders\r\n"));
+    
+    // Should contain other headers
+    try testing.expect(std.mem.indexOf(u8, buf.items, "X-Custom: test\r\n") != null);
+    
+    // Should NOT contain Status as a regular header
+    try testing.expect(std.mem.indexOf(u8, buf.items, "Status: NATS/1.0 503 No Responders\r\n") == null);
 }
 
 test "Message memory patterns" {

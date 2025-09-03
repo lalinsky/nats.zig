@@ -509,32 +509,31 @@ pub const PullSubscription = struct {
                 // The timestamp in the ACK subject ensures messages belong to this fetch request
                 // (timestamps are monotonically increasing and unique per message delivery)
 
-                if (raw_msg.headerGet("Status")) |status_code| {
-                    if (std.mem.eql(u8, status_code, "404")) {
-                        // No messages available
-                        raw_msg.deinit();
-                        batch_complete = true;
-                        break;
-                    } else if (std.mem.eql(u8, status_code, "408")) {
-                        // Request timeout
-                        raw_msg.deinit();
-                        if (messages.items.len == 0) {
-                            fetch_error = error.Timeout;
-                        }
-                        batch_complete = true;
-                        break;
-                    } else if (std.mem.eql(u8, status_code, "409")) {
-                        // Consumer sequence mismatch
-                        raw_msg.deinit();
-                        fetch_error = error.ConsumerSequenceMismatch;
-                        batch_complete = true;
-                        break;
-                    } else if (std.mem.eql(u8, status_code, "100")) {
-                        // Heartbeat - continue waiting
-                        raw_msg.deinit();
-                        continue;
+                if (raw_msg.status_code == 404) {
+                    // No messages available
+                    raw_msg.deinit();
+                    batch_complete = true;
+                    break;
+                } else if (raw_msg.status_code == 408) {
+                    // Request timeout
+                    raw_msg.deinit();
+                    if (messages.items.len == 0) {
+                        fetch_error = error.Timeout;
                     }
-                    // Unknown status code - clean up and continue
+                    batch_complete = true;
+                    break;
+                } else if (raw_msg.status_code == 409) {
+                    // Consumer sequence mismatch
+                    raw_msg.deinit();
+                    fetch_error = error.ConsumerSequenceMismatch;
+                    batch_complete = true;
+                    break;
+                } else if (raw_msg.status_code == 100) {
+                    // Heartbeat - continue waiting
+                    raw_msg.deinit();
+                    continue;
+                } else if (raw_msg.status_code > 0) {
+                    // Unknown status code - clean up and continue  
                     raw_msg.deinit();
                 } else {
                     // This is a regular message - convert to JetStream message
@@ -1028,20 +1027,15 @@ pub const JetStream = struct {
         try resp.parseHeaders();
         log.debug("getMsgDirect: parseHeaders completed successfully", .{});
 
-        // Check for error status codes in headers
-        log.debug("getMsgDirect: About to call headerGet for Status", .{});
-        if (resp.headerGet("Status")) |status| {
-            log.debug("getMsgDirect: Found Status header: {s}", .{status});
-            if (std.mem.eql(u8, status, "404")) {
-                log.debug("getMsgDirect: Returning MessageNotFound error", .{});
-                return error.MessageNotFound;
-            } else if (std.mem.eql(u8, status, "408")) {
-                return error.BadRequest;
-            } else if (std.mem.eql(u8, status, "413")) {
-                return error.TooManySubjects;
-            }
-        } else {
-            log.debug("getMsgDirect: No Status header found", .{});
+        // Check for error status codes
+        log.debug("getMsgDirect: Checking status code: {}", .{resp.status_code});
+        if (resp.status_code == 404) {
+            log.debug("getMsgDirect: Returning MessageNotFound error", .{});
+            return error.MessageNotFound;
+        } else if (resp.status_code == 408) {
+            return error.BadRequest;
+        } else if (resp.status_code == 413) {
+            return error.TooManySubjects;
         }
 
         // For direct get, extract metadata from JetStream headers
@@ -1151,18 +1145,13 @@ pub const JetStream = struct {
         const JSHandler = struct {
             fn wrappedHandler(msg: *Message, js: *JetStream, user_args: @TypeOf(args)) anyerror!void {
                 // Check for status messages (heartbeats and flow control)
-                if (msg.headers.get("Status")) |status_values| {
-                    if (status_values.items.len > 0) {
-                        const status_code = status_values.items[0];
-                        if (std.mem.eql(u8, status_code, "100")) {
-                            // Handle status message internally, don't pass to user callback
-                            handleStatusMessage(msg, js) catch |err| {
-                                log.err("Failed to handle status message: {}", .{err});
-                            };
-                            msg.deinit(); // Clean up status message
-                            return;
-                        }
-                    }
+                if (msg.status_code == 100) {
+                    // Handle status message internally, don't pass to user callback
+                    handleStatusMessage(msg, js) catch |err| {
+                        log.err("Failed to handle status message: {}", .{err});
+                    };
+                    msg.deinit(); // Clean up status message
+                    return;
                 }
 
                 // Create JetStream message wrapper for regular messages

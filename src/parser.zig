@@ -777,7 +777,7 @@ test "parser split hmsg" {
         if (capture.last_msg) |msg| {
             try std.testing.expectEqualStrings("foo", msg.subject);
             try std.testing.expectEqualStrings("hello", msg.data);
-            try std.testing.expectEqualStrings("Bar", try msg.headerGet("Foo") orelse "");
+            try std.testing.expectEqualStrings("Bar", msg.headerGet("Foo") orelse "");
         } else {
             try std.testing.expect(false);
         }
