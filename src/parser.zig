@@ -217,8 +217,8 @@ pub const Parser = struct {
                     }
 
                     if (needed == 0) {
-                        self.ma.msg = null; // transfer ownership
                         try msg.parseHeaders(); // Parse headers before processing message
+                        self.ma.msg = null; // transfer ownership
                         try conn.processMsg(msg);
                         self.state = .MSG_END;
                     }

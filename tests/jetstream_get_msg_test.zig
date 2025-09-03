@@ -198,7 +198,8 @@ test "get message with headers" {
     try msg.headerSet("X-Test-ID", "12345");
 
     // Publish the message
-    _ = try js.publishMsg(msg, .{});
+    const pub_ack = try js.publishMsg(msg, .{});
+    defer pub_ack.deinit();
 
     // Get the message back
     const retrieved = try js.getMsg(stream_name, .{ .seq = 1 });
