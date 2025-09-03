@@ -21,9 +21,8 @@ test "KV simple put and get" {
         .history = 1,
     };
 
-    const kv = try kv_manager.createBucket(config);
+    var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
-    defer kv.destroy() catch {};
 
     // Test put operation
     const key = "testkey";

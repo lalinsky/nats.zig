@@ -242,11 +242,8 @@ pub const KV = struct {
     const Self = @This();
 
     /// Initialize KV bucket handle
-    pub fn init(allocator: std.mem.Allocator, js: *JetStream, bucket_name: []const u8) !*KV {
+    pub fn init(allocator: std.mem.Allocator, js: *JetStream, bucket_name: []const u8) !KV {
         try validateBucketName(bucket_name);
-
-        const kv = try allocator.create(KV);
-        errdefer allocator.destroy(kv);
 
         // Create owned copies of names
         const owned_bucket_name = try allocator.dupe(u8, bucket_name);
@@ -258,22 +255,19 @@ pub const KV = struct {
         const subject_prefix = try std.fmt.allocPrint(allocator, "$KV.{s}.", .{bucket_name});
         errdefer allocator.free(subject_prefix);
 
-        kv.* = KV{
+        return KV{
             .js = js,
             .bucket_name = owned_bucket_name,
             .stream_name = stream_name,
             .subject_prefix = subject_prefix,
             .allocator = allocator,
         };
-
-        return kv;
     }
 
     pub fn deinit(self: *KV) void {
         self.allocator.free(self.bucket_name);
         self.allocator.free(self.stream_name);
         self.allocator.free(self.subject_prefix);
-        self.allocator.destroy(self);
     }
 
     /// Get the full subject for a key
@@ -470,7 +464,7 @@ pub const KVManager = struct {
     }
 
     /// Create a new KV bucket
-    pub fn createBucket(self: *KVManager, config: KVConfig) !*KV {
+    pub fn createBucket(self: *KVManager, config: KVConfig) !KV {
         try validateBucketName(config.bucket);
 
         if (config.history < 1 or config.history > 64) {
@@ -523,7 +517,7 @@ pub const KVManager = struct {
     }
 
     /// Open an existing KV bucket
-    pub fn openBucket(self: *KVManager, bucket_name: []const u8) !*KV {
+    pub fn openBucket(self: *KVManager, bucket_name: []const u8) !KV {
         // Verify bucket exists by getting stream info
         const stream_name = try std.fmt.allocPrint(self.allocator, "KV_{s}", .{bucket_name});
         defer self.allocator.free(stream_name);
