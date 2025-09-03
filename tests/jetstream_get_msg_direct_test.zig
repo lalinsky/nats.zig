@@ -54,13 +54,13 @@ test "get last message by subject with direct API" {
     // Generate unique stream name and subjects
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
     defer testing.allocator.free(stream_name);
-    
+
     const base_subject = try std.fmt.allocPrint(testing.allocator, "{s}.direct", .{stream_name});
     defer testing.allocator.free(base_subject);
-    
+
     const foo_subject = try std.fmt.allocPrint(testing.allocator, "{s}.foo", .{base_subject});
     defer testing.allocator.free(foo_subject);
-    
+
     const bar_subject = try std.fmt.allocPrint(testing.allocator, "{s}.bar", .{base_subject});
     defer testing.allocator.free(bar_subject);
 
@@ -106,16 +106,16 @@ test "get next message by subject with direct API" {
     var js = conn.jetstream(.{});
     defer js.deinit();
 
-    // Generate unique stream name and subjects  
+    // Generate unique stream name and subjects
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
     defer testing.allocator.free(stream_name);
-    
+
     const base_subject = try std.fmt.allocPrint(testing.allocator, "{s}.direct", .{stream_name});
     defer testing.allocator.free(base_subject);
-    
+
     const target_subject = try std.fmt.allocPrint(testing.allocator, "{s}.target", .{base_subject});
     defer testing.allocator.free(target_subject);
-    
+
     const other_subject = try std.fmt.allocPrint(testing.allocator, "{s}.other", .{base_subject});
     defer testing.allocator.free(other_subject);
 
@@ -132,10 +132,10 @@ test "get next message by subject with direct API" {
     defer stream_info.deinit();
 
     // Publish interleaved messages
-    try conn.publish(other_subject, "other 1");      // seq 1
-    try conn.publish(target_subject, "direct 1");    // seq 2
-    try conn.publish(other_subject, "other 2");      // seq 3
-    try conn.publish(target_subject, "direct 2");    // seq 4
+    try conn.publish(other_subject, "other 1"); // seq 1
+    try conn.publish(target_subject, "direct 1"); // seq 2
+    try conn.publish(other_subject, "other 2"); // seq 3
+    try conn.publish(target_subject, "direct 2"); // seq 4
     try conn.flush();
 
     // Get first target message at or after sequence 1 (direct API)
@@ -235,7 +235,7 @@ test "direct API without allow_direct should fail" {
     const stream_config = nats.StreamConfig{
         .name = stream_name,
         .subjects = &.{subject},
-        .allow_direct = false,  // Explicitly disable
+        .allow_direct = false, // Explicitly disable
     };
     var stream_info = try js.addStream(stream_config);
     defer stream_info.deinit();

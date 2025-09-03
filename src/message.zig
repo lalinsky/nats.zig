@@ -180,12 +180,10 @@ pub const Message = struct {
 
             try result.value_ptr.append(arena_allocator, owned_value);
         }
-
     }
 
     // Header API
     pub fn headerSet(self: *Self, key: []const u8, value: []const u8) !void {
-
         const arena_allocator = self.arena.allocator();
 
         // Remove existing values (arena will clean up memory automatically)
@@ -233,7 +231,6 @@ pub const Message = struct {
 
     // Encode headers for transmission
     pub fn encodeHeaders(self: *Self, writer: anytype) !void {
-
         if (self.headers.count() == 0) return;
 
         // Check if we have a Status header (which contains the full status line)

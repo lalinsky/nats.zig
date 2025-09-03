@@ -102,7 +102,7 @@ test "Message no responders detection" {
 
     var msg = Message.init(allocator);
     defer msg.deinit();
-    
+
     try msg.setSubject("test");
     try msg.setPayload("");
 
@@ -115,7 +115,7 @@ test "Message no responders detection" {
     // Change status
     msg.status_code = 200;
     try testing.expect(!msg.isNoResponders());
-    
+
     // Test with data - should not be no responders even with 503
     try msg.setPayload("some data");
     msg.status_code = STATUS_NO_RESPONSE;
@@ -152,7 +152,7 @@ test "Message status field and header parsing" {
 
     var msg = Message.init(allocator);
     defer msg.deinit();
-    
+
     try msg.setSubject("test");
     try msg.setPayload("test data");
 
@@ -182,10 +182,10 @@ test "Message status field and header parsing" {
 
     // Should start with the full status line
     try testing.expect(std.mem.startsWith(u8, buf.items, "NATS/1.0 503 No Responders\r\n"));
-    
+
     // Should contain other headers
     try testing.expect(std.mem.indexOf(u8, buf.items, "X-Custom: test\r\n") != null);
-    
+
     // Should NOT contain Status as a regular header
     try testing.expect(std.mem.indexOf(u8, buf.items, "Status: NATS/1.0 503 No Responders\r\n") == null);
 }

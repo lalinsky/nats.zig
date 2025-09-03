@@ -154,7 +154,7 @@ pub const StreamConfig = struct {
     discard: enum { old, new } = .old,
     /// The time window to track duplicate messages for, in nanoseconds. 0 for default
     duplicate_window: u64 = 0,
-    /// Allow direct get on any replica instead of just the leader  
+    /// Allow direct get on any replica instead of just the leader
     allow_direct: ?bool = null,
 };
 
@@ -314,7 +314,7 @@ pub const GetMsgRequest = struct {
     next_by_subj: ?[]const u8 = null,
     /// Number of messages to retrieve in batch mode (direct get only)
     batch: ?u32 = null,
-    /// Maximum bytes to retrieve in batch mode (direct get only) 
+    /// Maximum bytes to retrieve in batch mode (direct get only)
     max_bytes: ?u64 = null,
     /// Start time for time-based queries (RFC3339 format, direct get only)
     start_time: ?[]const u8 = null,
@@ -334,7 +334,7 @@ pub const GetMsgOptions = struct {
     seq: ?u64 = null,
     /// Retrieves the last message for a given subject
     last_by_subj: ?[]const u8 = null,
-    /// Retrieves the first message for a given subject at or after seq 
+    /// Retrieves the first message for a given subject at or after seq
     next_by_subj: ?[]const u8 = null,
     /// Use direct get API ($JS.API.DIRECT.GET) instead of legacy API
     direct: bool = false,
@@ -533,7 +533,7 @@ pub const PullSubscription = struct {
                     raw_msg.deinit();
                     continue;
                 } else if (raw_msg.status_code > 0) {
-                    // Unknown status code - clean up and continue  
+                    // Unknown status code - clean up and continue
                     raw_msg.deinit();
                 } else {
                     // This is a regular message - convert to JetStream message
@@ -960,12 +960,12 @@ pub const JetStream = struct {
     pub fn getMsg(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
         // Validate options combinations:
         // 1. seq only - get message by sequence
-        // 2. last_by_subj only - get last message for subject  
+        // 2. last_by_subj only - get last message for subject
         // 3. seq + next_by_subj - get next message for subject at or after sequence
         const has_seq = options.seq != null;
         const has_last_by_subj = options.last_by_subj != null;
         const has_next_by_subj = options.next_by_subj != null;
-        
+
         if (has_last_by_subj and (has_seq or has_next_by_subj)) {
             // last_by_subj cannot be combined with seq or next_by_subj
             return error.InvalidGetMessageOptions;
@@ -1042,7 +1042,7 @@ pub const JetStream = struct {
         if (resp.headerGet("Nats-Subject")) |nats_subject| {
             resp.subject = nats_subject;
         }
-        
+
         if (resp.headerGet("Nats-Sequence")) |nats_seq_str| {
             resp.seq = std.fmt.parseInt(u64, nats_seq_str, 10) catch 0;
         }
