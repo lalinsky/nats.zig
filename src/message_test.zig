@@ -45,7 +45,7 @@ test "Message with headers" {
     try testing.expectEqualStrings("hello world", msg.data);
 
     // Verify headers
-    const content_type = try msg.headerGet("Content-Type");
+    const content_type = msg.headerGet("Content-Type");
     try testing.expectEqualStrings("application/json", content_type.?);
 }
 
@@ -60,19 +60,19 @@ test "Message header management" {
     try msg.headerSet("Custom-Header", "value1");
 
     // Get headers
-    const content_type = try msg.headerGet("Content-Type");
+    const content_type = msg.headerGet("Content-Type");
     try testing.expectEqualStrings("application/json", content_type.?);
 
-    const custom = try msg.headerGet("Custom-Header");
+    const custom = msg.headerGet("Custom-Header");
     try testing.expectEqualStrings("value1", custom.?);
 
     // Non-existent header
-    const missing = try msg.headerGet("Missing");
+    const missing = msg.headerGet("Missing");
     try testing.expectEqual(@as(?[]const u8, null), missing);
 
     // Delete header
-    try msg.headerDelete("Content-Type");
-    const deleted = try msg.headerGet("Content-Type");
+    msg.headerDelete("Content-Type");
+    const deleted = msg.headerGet("Content-Type");
     try testing.expectEqual(@as(?[]const u8, null), deleted);
 }
 
@@ -89,14 +89,14 @@ test "Message lazy header parsing" {
     try testing.expect(msg.needs_header_parsing);
 
     // First access should parse headers
-    const content_type = try msg.headerGet("Content-Type");
+    const content_type = msg.headerGet("Content-Type");
     try testing.expectEqualStrings("application/json", content_type.?);
 
     // Should no longer need parsing
     try testing.expect(!msg.needs_header_parsing);
 
     // Verify other headers were parsed
-    const custom = try msg.headerGet("X-Custom");
+    const custom = msg.headerGet("X-Custom");
     try testing.expectEqualStrings("test-value", custom.?);
 }
 
@@ -164,8 +164,8 @@ test "Message error handling" {
 
     // Empty header operations should work
     try msg.headerSet("", "value");
-    try msg.headerDelete("nonexistent");
+    msg.headerDelete("nonexistent");
 
-    const result = try msg.headerGet("");
+    const result = msg.headerGet("");
     try testing.expectEqualStrings("value", result.?);
 }

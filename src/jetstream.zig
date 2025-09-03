@@ -478,7 +478,7 @@ pub const PullSubscription = struct {
                 // The timestamp in the ACK subject ensures messages belong to this fetch request
                 // (timestamps are monotonically increasing and unique per message delivery)
 
-                if (try raw_msg.headerGet("Status")) |status_code| {
+                if (raw_msg.headerGet("Status")) |status_code| {
                     if (std.mem.eql(u8, status_code, "404")) {
                         // No messages available
                         raw_msg.deinit();
@@ -911,8 +911,7 @@ pub const JetStream = struct {
             const hdrs_len = try decoder.calcSizeForSlice(hdrs_b64);
             const decoded_headers = try arena_allocator.alloc(u8, hdrs_len);
             try decoder.decode(decoded_headers, hdrs_b64);
-            msg.raw_headers = decoded_headers;
-            msg.needs_header_parsing = true;
+            try msg.parseHeaders(decoded_headers);
         }
 
         // Parse time from RFC3339 format

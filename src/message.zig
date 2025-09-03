@@ -71,10 +71,6 @@ pub const Message = struct {
     // Headers
     headers: std.hash_map.StringHashMapUnmanaged(ArrayListUnmanaged([]const u8)) = .{},
 
-    // Raw header data for lazy parsing
-    raw_headers: ?[]const u8 = null,
-    needs_header_parsing: bool = false,
-
     // Memory management - much simpler with arena
     arena: std.heap.ArenaAllocator,
 
@@ -91,6 +87,21 @@ pub const Message = struct {
             .data = &[_]u8{},
             .arena = std.heap.ArenaAllocator.init(allocator),
         };
+    }
+
+    // Create message with headers pre-parsed
+    pub fn initWithHeaders(allocator: std.mem.Allocator, subject: []const u8, reply: ?[]const u8, data: []const u8, raw_headers: []const u8) !Self {
+        var msg = Self.init(allocator);
+        errdefer msg.deinit();
+
+        try msg.setSubject(subject);
+        if (reply) |r| {
+            try msg.setReply(r);
+        }
+        try msg.setPayload(data);
+        try msg.parseHeaders(raw_headers);
+
+        return msg;
     }
 
     pub fn deinit(self: *Self) void {
@@ -113,22 +124,12 @@ pub const Message = struct {
         self.data = try self.arena.allocator().dupe(u8, payload);
     }
 
-    pub fn setRawHeaders(self: *Self, headers: []const u8) !void {
-        self.raw_headers = try self.arena.allocator().dupe(u8, headers);
-        self.needs_header_parsing = true;
-    }
-
-    // Lazy header parsing
-    pub fn ensureHeadersParsed(self: *Self) !void {
-        if (!self.needs_header_parsing) return;
-
-        const raw = self.raw_headers orelse return;
+    pub fn parseHeaders(self: *Self, raw_headers: []const u8) !void {
+        const arena_allocator = self.arena.allocator();
 
         // Parse headers like Go NATS library
-        var lines = std.mem.splitSequence(u8, raw, "\r\n");
+        var lines = std.mem.splitSequence(u8, raw_headers, "\r\n");
         const first_line = lines.next() orelse return;
-
-        const arena_allocator = self.arena.allocator();
 
         // Check if we have an inlined status (like "NATS/1.0 503" or "NATS/1.0 503 No Responders")
         if (std.mem.startsWith(u8, first_line, NATS_STATUS_PREFIX) and first_line.len > NATS_STATUS_PREFIX.len) {
@@ -151,15 +152,17 @@ pub const Message = struct {
                     status = status_part; // Less than 3 chars, use as-is
                 }
 
-                // Add Status header directly to avoid circular dependency
-                var status_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
-                status_list.appendAssumeCapacity(status);
+                // Add Status header
+                const owned_status = try arena_allocator.dupe(u8, status);
+                var status_list = ArrayListUnmanaged([]const u8){};
+                try status_list.append(arena_allocator, owned_status);
                 try self.headers.put(arena_allocator, HDR_STATUS, status_list);
 
                 // Add Description header if present
                 if (description) |desc| {
-                    var desc_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
-                    desc_list.appendAssumeCapacity(desc);
+                    const owned_desc = try arena_allocator.dupe(u8, desc);
+                    var desc_list = ArrayListUnmanaged([]const u8){};
+                    try desc_list.append(arena_allocator, owned_desc);
                     try self.headers.put(arena_allocator, HDR_DESCRIPTION, desc_list);
                 }
             }
@@ -174,7 +177,7 @@ pub const Message = struct {
 
             if (key.len == 0) continue;
 
-            // Copy key and value using arena - much simpler!
+            // Copy key and value using arena
             const owned_key = try arena_allocator.dupe(u8, key);
             const owned_value = try arena_allocator.dupe(u8, value);
 
@@ -185,14 +188,10 @@ pub const Message = struct {
 
             try result.value_ptr.append(arena_allocator, owned_value);
         }
-
-        self.needs_header_parsing = false;
     }
 
     // Header API
     pub fn headerSet(self: *Self, key: []const u8, value: []const u8) !void {
-        try self.ensureHeadersParsed();
-
         const arena_allocator = self.arena.allocator();
 
         // Remove existing values (arena will clean up memory automatically)
@@ -208,9 +207,7 @@ pub const Message = struct {
         try self.headers.put(arena_allocator, owned_key, values);
     }
 
-    pub fn headerGet(self: *Self, key: []const u8) !?[]const u8 {
-        try self.ensureHeadersParsed();
-
+    pub fn headerGet(self: *Self, key: []const u8) ?[]const u8 {
         if (self.headers.get(key)) |values| {
             if (values.items.len > 0) {
                 return values.items[0];
@@ -220,9 +217,7 @@ pub const Message = struct {
         return null;
     }
 
-    pub fn headerGetAll(self: *Self, key: []const u8) !?[]const []const u8 {
-        try self.ensureHeadersParsed();
-
+    pub fn headerGetAll(self: *Self, key: []const u8) ?[]const []const u8 {
         if (self.headers.get(key)) |values| {
             return values.items; // No copy needed - arena owns the data
         }
@@ -230,9 +225,7 @@ pub const Message = struct {
         return null;
     }
 
-    pub fn headerDelete(self: *Self, key: []const u8) !void {
-        try self.ensureHeadersParsed();
-
+    pub fn headerDelete(self: *Self, key: []const u8) void {
         // Arena will clean up memory automatically
         _ = self.headers.fetchRemove(key);
     }
@@ -241,14 +234,12 @@ pub const Message = struct {
     pub fn isNoResponders(self: *Self) bool {
         if (self.data.len != 0) return false;
 
-        const status = self.headerGet(HDR_STATUS) catch return false;
+        const status = self.headerGet(HDR_STATUS);
         return status != null and std.mem.eql(u8, status.?, HDR_STATUS_NO_RESPONSE);
     }
 
     // Encode headers for transmission
     pub fn encodeHeaders(self: *Self, writer: anytype) !void {
-        try self.ensureHeadersParsed();
-
         if (self.headers.count() == 0) return;
 
         try writer.writeAll(NATS_STATUS_PREFIX ++ "\r\n");
@@ -275,8 +266,6 @@ pub const Message = struct {
         self.sid = 0;
         self.seq = 0;
         self.headers.clearRetainingCapacity();
-        self.raw_headers = null;
-        self.needs_header_parsing = false;
         self.next = null;
         // Note: pool and arena are intentionally preserved
     }

@@ -206,11 +206,11 @@ test "get message with headers" {
     try testing.expectEqual(@as(u64, 1), retrieved.seq);
 
     // Verify headers are preserved
-    const test_header = try retrieved.headerGet("X-Test-Header");
+    const test_header = retrieved.headerGet("X-Test-Header");
     try testing.expect(test_header != null);
     try testing.expectEqualStrings("test-value", test_header.?);
 
-    const another_header = try retrieved.headerGet("X-Another-Header");
+    const another_header = retrieved.headerGet("X-Another-Header");
     try testing.expect(another_header != null);
     try testing.expectEqualStrings("another-value", another_header.?);
 }
