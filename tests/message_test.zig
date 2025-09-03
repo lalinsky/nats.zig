@@ -141,9 +141,9 @@ test "Message header encoding" {
     // Should start with NATS/1.0
     try testing.expect(std.mem.startsWith(u8, buf.items, "NATS/1.0\r\n"));
 
-    // Should contain headers
-    try testing.expect(std.mem.indexOf(u8, buf.items, "Content-Type: application/json\r\n") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "X-Custom: value\r\n") != null);
+    // Should contain headers (normalized to lowercase)
+    try testing.expect(std.mem.indexOf(u8, buf.items, "content-type: application/json\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "x-custom: value\r\n") != null);
 
     // Should end with double CRLF
     try testing.expect(std.mem.endsWith(u8, buf.items, "\r\n\r\n"));
@@ -176,10 +176,40 @@ test "Message error handling" {
     try msg.setSubject("");
     try msg.setPayload("");
 
-    // Empty header operations should work
-    try msg.headerSet("", "value");
     msg.headerDelete("nonexistent");
 
-    const result = msg.headerGet("");
-    try testing.expectEqualStrings("value", result.?);
+    // Test header injection prevention
+    try testing.expectError(error.InvalidHeaderName, msg.headerSet("", "value"));
+    try testing.expectError(error.InvalidHeaderValue, msg.headerSet("Valid", "hello\nworld"));
+    try testing.expectError(error.InvalidHeaderValue, msg.headerSet("Valid", "hello\rworld"));
+    try testing.expectError(error.InvalidHeaderName, msg.headerSet("Bad\rName", "value"));
+    try testing.expectError(error.InvalidHeaderName, msg.headerSet("Bad\nName", "value"));
+    try testing.expectError(error.InvalidHeaderName, msg.headerSet("Bad:Name", "value"));
+}
+
+test "Message case-insensitive headers" {
+    const allocator = testing.allocator;
+
+    var msg = Message.init(allocator);
+    defer msg.deinit();
+
+    try msg.setSubject("test");
+    try msg.setPayload("data");
+
+    // Set header with mixed case
+    try msg.headerSet("Content-Type", "application/json");
+
+    // Should be retrievable with different case variations
+    try testing.expectEqualStrings("application/json", msg.headerGet("content-type").?);
+    try testing.expectEqualStrings("application/json", msg.headerGet("CONTENT-TYPE").?);
+    try testing.expectEqualStrings("application/json", msg.headerGet("Content-Type").?);
+
+    // Test case-insensitive deletion
+    msg.headerDelete("CONTENT-TYPE");
+    try testing.expectEqual(@as(?[]const u8, null), msg.headerGet("content-type"));
+
+    // Test case-insensitive overwrite
+    try msg.headerSet("X-Custom", "value1");
+    try msg.headerSet("x-custom", "value2"); // Should overwrite
+    try testing.expectEqualStrings("value2", msg.headerGet("X-CUSTOM").?);
 }
