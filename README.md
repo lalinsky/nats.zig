@@ -28,21 +28,22 @@ exe.root_module.addImport("nats", nats.module("nats"));
 
 ## Examples
 
-### Connect and Publish
+### Connect
 
 ```zig
-// Create connection
 var nc = nats.Connection.init(allocator, .{});
 defer nc.deinit();
 
-// Connect to NATS server
 try nc.connect("nats://localhost:4222");
+```
 
-// Publish a message
+### Publish message
+
+```zig
 try nc.publish("hello", "Hello, NATS!");
 ```
 
-### Synchronous Subscribe
+### Subscribe synchronously
 
 ```zig
 // Create synchronous subscription
@@ -62,7 +63,7 @@ while (true) {
 }
 ```
 
-### Asynchronous Subscribe with Callback
+### Subscribe asynchronously (with callback)
 
 ```zig
 // Define message handler
@@ -78,7 +79,7 @@ var counter: u32 = 0;
 const sub = try nc.subscribe("hello", messageHandler, .{&counter});
 ```
 
-### Send Request
+### Send request and wait for reply
 
 ```zig
 // Send request and wait for reply with 5 second timeout
@@ -88,27 +89,35 @@ defer reply.deinit();
 std.debug.print("Received reply: {s}\n", .{reply.data});
 ```
 
-### Request Handling
+### Send request and wait for multiple replies
+
+```zig
+// Request multiple responses from different responders
+var messages = try nc.requestMany("services.status", "ping all", 5000, .{
+    .max_messages = 10,    // Stop after 10 responses
+    .stall_ms = 100,       // Stop if no new responses for 100ms
+});
+
+while (messages.pop()) |msg| {
+    defer msg.deinit();
+    std.debug.print("Response: {s}\n", .{msg.data});
+}
+```
+
+### Handle requests
 
 ```zig
 // Define request handler
-fn helpHandler(msg: *nats.Message, context: *MyContext) void {
+fn echoHandler(msg: *nats.Message, context: *MyContext) !void {
     defer msg.deinit();
     
-    // Process the request
-    const request_data = msg.data;
-    std.debug.print("Received request: {s}\n", .{request_data});
-    
     // Send reply
-    const response = "Here's your help response";
-    msg.reply(response) catch |err| {
-        std.debug.print("Failed to send reply: {}\n", .{err});
-    };
+    try msg.reply(msg.data);
 }
 
 // Subscribe to handle requests
 var context = MyContext{};
-const sub = try nc.subscribe("help", helpHandler, .{&context});
+const sub = try nc.subscribe("echo", echoHandler, .{&context});
 ```
 
 ### JetStream Stream Management
