@@ -310,13 +310,8 @@ pub const Parser = struct {
                                 const arena_allocator = msg.arena.allocator();
 
                                 if (trimmed_value.len > 0) {
-                                    // Normalize header name to lowercase for case-insensitive matching
-                                    const normalized_key = try arena_allocator.alloc(u8, header_name.len);
-                                    for (header_name, 0..) |c, j| {
-                                        normalized_key[j] = std.ascii.toLower(c);
-                                    }
-
-                                    const result = try msg.headers.getOrPut(arena_allocator, normalized_key);
+                                    // Use original header name (case-sensitive)
+                                    const result = try msg.headers.getOrPut(arena_allocator, header_name);
                                     if (!result.found_existing) {
                                         result.value_ptr.* = .{};
                                     }
@@ -677,13 +672,13 @@ pub const Parser = struct {
                 // Add Status header
                 var status_list = std.ArrayListUnmanaged([]const u8){};
                 try status_list.append(arena_allocator, status);
-                try msg.headers.put(arena_allocator, "status", status_list);
+                try msg.headers.put(arena_allocator, "Status", status_list);
 
                 // Add Description header if present
                 if (description) |desc| {
                     var desc_list = std.ArrayListUnmanaged([]const u8){};
                     try desc_list.append(arena_allocator, desc);
-                    try msg.headers.put(arena_allocator, "description", desc_list);
+                    try msg.headers.put(arena_allocator, "Description", desc_list);
                 }
             }
         }
@@ -972,7 +967,7 @@ test "parser split hmsg" {
         if (capture.last_msg) |msg| {
             try std.testing.expectEqualStrings("foo", msg.subject);
             try std.testing.expectEqualStrings("hello", msg.data);
-            try std.testing.expectEqualStrings("Bar", msg.headerGet("foo") orelse "");
+            try std.testing.expectEqualStrings("Bar", msg.headerGet("Foo") orelse "");
         } else {
             try std.testing.expect(false);
         }

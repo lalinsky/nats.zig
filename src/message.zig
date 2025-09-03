@@ -152,18 +152,18 @@ pub const Message = struct {
                     status = status_part; // Less than 3 chars, use as-is
                 }
 
-                // Add Status header (normalized to lowercase)
+                // Add Status header
                 const owned_status = try arena_allocator.dupe(u8, status);
                 var status_list = ArrayListUnmanaged([]const u8){};
                 try status_list.append(arena_allocator, owned_status);
-                try self.headers.put(arena_allocator, "status", status_list);
+                try self.headers.put(arena_allocator, HDR_STATUS, status_list);
 
-                // Add Description header if present (normalized to lowercase)
+                // Add Description header if present
                 if (description) |desc| {
                     const owned_desc = try arena_allocator.dupe(u8, desc);
                     var desc_list = ArrayListUnmanaged([]const u8){};
                     try desc_list.append(arena_allocator, owned_desc);
-                    try self.headers.put(arena_allocator, "description", desc_list);
+                    try self.headers.put(arena_allocator, HDR_DESCRIPTION, desc_list);
                 }
             }
         }
@@ -177,11 +177,8 @@ pub const Message = struct {
 
             if (key.len == 0) continue;
 
-            // Normalize key to lowercase for case-insensitive matching
-            const owned_key = try arena_allocator.alloc(u8, key.len);
-            for (key, 0..) |c, i| {
-                owned_key[i] = std.ascii.toLower(c);
-            }
+            // Copy key and value using arena
+            const owned_key = try arena_allocator.dupe(u8, key);
             const owned_value = try arena_allocator.dupe(u8, value);
 
             const result = try self.headers.getOrPut(arena_allocator, owned_key);
@@ -215,23 +212,11 @@ pub const Message = struct {
             }
         }
 
-        // Normalize key for removal (case-insensitive)
-        var lower_key_buf: [256]u8 = undefined;
-        const lower_key = if (key.len <= lower_key_buf.len) blk: {
-            for (key, 0..) |c, i| {
-                lower_key_buf[i] = std.ascii.toLower(c);
-            }
-            break :blk lower_key_buf[0..key.len];
-        } else key; // Fallback for very long keys
-
         // Remove existing values (arena will clean up memory automatically)
-        _ = self.headers.fetchRemove(lower_key);
+        _ = self.headers.fetchRemove(key);
 
-        // Normalize key to lowercase for case-insensitive matching
-        const owned_key = try arena_allocator.alloc(u8, key.len);
-        for (key, 0..) |c, i| {
-            owned_key[i] = std.ascii.toLower(c);
-        }
+        // Copy key and value using arena
+        const owned_key = try arena_allocator.dupe(u8, key);
         const owned_value = try arena_allocator.dupe(u8, value);
 
         var values: ArrayListUnmanaged([]const u8) = .{};
@@ -241,16 +226,7 @@ pub const Message = struct {
     }
 
     pub fn headerGet(self: *Self, key: []const u8) ?[]const u8 {
-        // Create lowercase key for lookup (case-insensitive)
-        var lower_key_buf: [256]u8 = undefined;
-        const lower_key = if (key.len <= lower_key_buf.len) blk: {
-            for (key, 0..) |c, i| {
-                lower_key_buf[i] = std.ascii.toLower(c);
-            }
-            break :blk lower_key_buf[0..key.len];
-        } else key; // Fallback for very long keys
-
-        if (self.headers.get(lower_key)) |values| {
+        if (self.headers.get(key)) |values| {
             if (values.items.len > 0) {
                 return values.items[0];
             }
@@ -260,16 +236,7 @@ pub const Message = struct {
     }
 
     pub fn headerGetAll(self: *Self, key: []const u8) ?[]const []const u8 {
-        // Create lowercase key for lookup (case-insensitive)
-        var lower_key_buf: [256]u8 = undefined;
-        const lower_key = if (key.len <= lower_key_buf.len) blk: {
-            for (key, 0..) |c, i| {
-                lower_key_buf[i] = std.ascii.toLower(c);
-            }
-            break :blk lower_key_buf[0..key.len];
-        } else key; // Fallback for very long keys
-
-        if (self.headers.get(lower_key)) |values| {
+        if (self.headers.get(key)) |values| {
             return values.items; // No copy needed - arena owns the data
         }
 
@@ -277,24 +244,15 @@ pub const Message = struct {
     }
 
     pub fn headerDelete(self: *Self, key: []const u8) void {
-        // Create lowercase key for deletion (case-insensitive)
-        var lower_key_buf: [256]u8 = undefined;
-        const lower_key = if (key.len <= lower_key_buf.len) blk: {
-            for (key, 0..) |c, i| {
-                lower_key_buf[i] = std.ascii.toLower(c);
-            }
-            break :blk lower_key_buf[0..key.len];
-        } else key; // Fallback for very long keys
-
         // Arena will clean up memory automatically
-        _ = self.headers.fetchRemove(lower_key);
+        _ = self.headers.fetchRemove(key);
     }
 
     // Check if message indicates "no responders" - matches Go NATS library logic
     pub fn isNoResponders(self: *Self) bool {
         if (self.data.len != 0) return false;
 
-        const status = self.headerGet("status");
+        const status = self.headerGet(HDR_STATUS);
         return status != null and std.mem.eql(u8, status.?, HDR_STATUS_NO_RESPONSE);
     }
 

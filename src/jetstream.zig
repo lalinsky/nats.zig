@@ -478,7 +478,7 @@ pub const PullSubscription = struct {
                 // The timestamp in the ACK subject ensures messages belong to this fetch request
                 // (timestamps are monotonically increasing and unique per message delivery)
 
-                if (raw_msg.headerGet("status")) |status_code| {
+                if (raw_msg.headerGet("Status")) |status_code| {
                     if (std.mem.eql(u8, status_code, "404")) {
                         // No messages available
                         raw_msg.deinit();
