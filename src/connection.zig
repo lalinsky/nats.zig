@@ -983,6 +983,9 @@ pub const Connection = struct {
 
     // Parser callback methods
     pub fn processMsg(self: *Self, message: *Message) !void {
+        var owns_message = true;
+        defer if (owns_message) message.deinit();
+
         if (self.should_stop.load(.acquire)) {
             return error.ShouldStop;
         }
@@ -994,9 +997,6 @@ pub const Connection = struct {
             s.retain(); // Keep subscription alive
         }
         self.subs_mutex.unlock();
-
-        var owns_message = true;
-        defer if (owns_message) message.deinit();
 
         if (sub) |s| {
             defer s.release(); // Release when done
