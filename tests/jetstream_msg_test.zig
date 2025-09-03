@@ -25,7 +25,7 @@ test "get message by sequence" {
     try conn.flush();
 
     // Get message by sequence
-    const msg = try js.getMsg("TEST_MSG_GET", 1);
+    const msg = try js.getMsg("TEST_MSG_GET", .{ .seq = 1 });
     defer msg.deinit();
 
     try testing.expectEqualStrings("test.msg.get", msg.subject);
@@ -33,7 +33,7 @@ test "get message by sequence" {
     try testing.expectEqual(@as(u64, 1), msg.seq);
 
     // Get second message
-    const msg2 = try js.getMsg("TEST_MSG_GET", 2);
+    const msg2 = try js.getMsg("TEST_MSG_GET", .{ .seq = 2 });
     defer msg2.deinit();
 
     try testing.expectEqualStrings("Second message", msg2.data);
@@ -64,14 +64,14 @@ test "get last message by subject" {
     try conn.flush();
 
     // Get last message by subject
-    const last_foo = try js.getLastMsg("TEST_MSG_LAST", "test.last.foo");
+    const last_foo = try js.getMsg("TEST_MSG_LAST", .{ .last_by_subj = "test.last.foo" });
     defer last_foo.deinit();
 
     try testing.expectEqualStrings("test.last.foo", last_foo.subject);
     try testing.expectEqualStrings("Third foo", last_foo.data);
     try testing.expectEqual(@as(u64, 5), last_foo.seq);
 
-    const last_bar = try js.getLastMsg("TEST_MSG_LAST", "test.last.bar");
+    const last_bar = try js.getMsg("TEST_MSG_LAST", .{ .last_by_subj = "test.last.bar" });
     defer last_bar.deinit();
 
     try testing.expectEqualStrings("test.last.bar", last_bar.subject);
@@ -101,7 +101,7 @@ test "delete message" {
     try conn.flush();
 
     // Verify message exists before deletion
-    const msg2_before = try js.getMsg("TEST_MSG_DELETE", 2);
+    const msg2_before = try js.getMsg("TEST_MSG_DELETE", .{ .seq = 2 });
     defer msg2_before.deinit();
     try testing.expectEqualStrings("Message 2", msg2_before.data);
 
@@ -110,16 +110,16 @@ test "delete message" {
     try testing.expect(deleted);
 
     // Verify other messages still exist
-    const msg1_after = try js.getMsg("TEST_MSG_DELETE", 1);
+    const msg1_after = try js.getMsg("TEST_MSG_DELETE", .{ .seq = 1 });
     defer msg1_after.deinit();
     try testing.expectEqualStrings("Message 1", msg1_after.data);
 
-    const msg3_after = try js.getMsg("TEST_MSG_DELETE", 3);
+    const msg3_after = try js.getMsg("TEST_MSG_DELETE", .{ .seq = 3 });
     defer msg3_after.deinit();
     try testing.expectEqualStrings("Message 3", msg3_after.data);
 
     // Attempting to get deleted message should fail
-    const get_deleted_result = js.getMsg("TEST_MSG_DELETE", 2);
+    const get_deleted_result = js.getMsg("TEST_MSG_DELETE", .{ .seq = 2 });
     try testing.expectError(nats.JetStreamError.NoMessageFound, get_deleted_result);
 }
 
@@ -145,7 +145,7 @@ test "erase message" {
     try conn.flush();
 
     // Verify message exists before erasure
-    const msg2_before = try js.getMsg("TEST_MSG_ERASE", 2);
+    const msg2_before = try js.getMsg("TEST_MSG_ERASE", .{ .seq = 2 });
     defer msg2_before.deinit();
     try testing.expectEqualStrings("Message 2", msg2_before.data);
 
@@ -154,16 +154,16 @@ test "erase message" {
     try testing.expect(erased);
 
     // Verify other messages still exist
-    const msg1_after = try js.getMsg("TEST_MSG_ERASE", 1);
+    const msg1_after = try js.getMsg("TEST_MSG_ERASE", .{ .seq = 1 });
     defer msg1_after.deinit();
     try testing.expectEqualStrings("Message 1", msg1_after.data);
 
-    const msg3_after = try js.getMsg("TEST_MSG_ERASE", 3);
+    const msg3_after = try js.getMsg("TEST_MSG_ERASE", .{ .seq = 3 });
     defer msg3_after.deinit();
     try testing.expectEqualStrings("Message 3", msg3_after.data);
 
     // Attempting to get erased message should fail
-    const get_erased_result = js.getMsg("TEST_MSG_ERASE", 2);
+    const get_erased_result = js.getMsg("TEST_MSG_ERASE", .{ .seq = 2 });
     try testing.expectError(nats.JetStreamError.NoMessageFound, get_erased_result);
 }
 
@@ -197,7 +197,7 @@ test "get message with headers" {
     try conn.flush();
 
     // Get the message back
-    const retrieved = try js.getMsg("TEST_MSG_HEADERS", 1);
+    const retrieved = try js.getMsg("TEST_MSG_HEADERS", .{ .seq = 1 });
     defer retrieved.deinit();
 
     // Verify message properties
@@ -223,7 +223,7 @@ test "message operations error cases" {
     defer js.deinit();
 
     // Test with non-existent stream
-    const get_nonexistent_stream = js.getMsg("NON_EXISTENT_STREAM", 1);
+    const get_nonexistent_stream = js.getMsg("NON_EXISTENT_STREAM", .{ .seq = 1 });
     try testing.expectError(nats.JetStreamError.StreamNotFound, get_nonexistent_stream);
 
     // Create stream for other error tests
@@ -235,11 +235,11 @@ test "message operations error cases" {
     defer stream_info.deinit();
 
     // Test getting non-existent message by sequence
-    const get_nonexistent_msg = js.getMsg("TEST_MSG_ERRORS", 999);
+    const get_nonexistent_msg = js.getMsg("TEST_MSG_ERRORS", .{ .seq = 999 });
     try testing.expectError(nats.JetStreamError.NoMessageFound, get_nonexistent_msg);
 
     // Test getting non-existent message by subject
-    const get_nonexistent_subject = js.getLastMsg("TEST_MSG_ERRORS", "non.existent.subject");
+    const get_nonexistent_subject = js.getMsg("TEST_MSG_ERRORS", .{ .last_by_subj = "non.existent.subject" });
     try testing.expectError(nats.JetStreamError.NoMessageFound, get_nonexistent_subject);
 
     // Test deleting non-existent message

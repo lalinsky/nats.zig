@@ -17,6 +17,9 @@ test {
     _ = @import("jetstream_stream_purge_test.zig");
     _ = @import("jetstream_pull_test.zig");
     _ = @import("jetstream_msg_test.zig");
+    _ = @import("jetstream_get_msg_test.zig");
+    _ = @import("jetstream_get_msg_direct_test.zig");
+    _ = @import("jetstream_delete_msg_test.zig");
     _ = @import("jetstream_duplicate_ack_test.zig");
     _ = @import("jetstream_large_list_test.zig");
 }

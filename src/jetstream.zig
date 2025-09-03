@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const Message = @import("message.zig").Message;
+const MessageList = @import("message.zig").MessageList;
 const Connection = @import("connection.zig").Connection;
 const Subscription = @import("subscription.zig").Subscription;
 const subscription_mod = @import("subscription.zig");
@@ -153,6 +154,8 @@ pub const StreamConfig = struct {
     discard: enum { old, new } = .old,
     /// The time window to track duplicate messages for, in nanoseconds. 0 for default
     duplicate_window: u64 = 0,
+    /// Allow direct get on any replica instead of just the leader  
+    allow_direct: ?bool = null,
 };
 
 /// Response from $JS.API.STREAM.NAMES
@@ -301,12 +304,40 @@ const StreamPurgeResponse = struct {
     purged: u64,
 };
 
-/// Request for $JS.API.STREAM.MSG.GET
+/// Request for both $JS.API.STREAM.MSG.GET and $JS.API.DIRECT.GET
 pub const GetMsgRequest = struct {
-    /// Stream sequence number of the message to retrieve, cannot be combined with last_by_subj
+    /// Stream sequence number of the message to retrieve
     seq: ?u64 = null,
-    /// Retrieves the last message for a given subject, cannot be combined with seq
+    /// Retrieves the last message for a given subject
     last_by_subj: ?[]const u8 = null,
+    /// Retrieves the first message for a given subject at or after seq
+    next_by_subj: ?[]const u8 = null,
+    /// Number of messages to retrieve in batch mode (direct get only)
+    batch: ?u32 = null,
+    /// Maximum bytes to retrieve in batch mode (direct get only) 
+    max_bytes: ?u64 = null,
+    /// Start time for time-based queries (RFC3339 format, direct get only)
+    start_time: ?[]const u8 = null,
+    /// Multiple subjects for multi-subject queries (direct get only)
+    multi_last: ?[]const []const u8 = null,
+    /// Upper bound sequence for consistent multi-subject reads (direct get only)
+    up_to_seq: ?u64 = null,
+    /// Upper bound time for consistent multi-subject reads (RFC3339 format, direct get only)
+    up_to_time: ?[]const u8 = null,
+    /// Suppress headers in response (direct get only)
+    no_hdr: ?bool = null,
+};
+
+/// Options for getMsg() method
+pub const GetMsgOptions = struct {
+    /// Stream sequence number of the message to retrieve
+    seq: ?u64 = null,
+    /// Retrieves the last message for a given subject
+    last_by_subj: ?[]const u8 = null,
+    /// Retrieves the first message for a given subject at or after seq 
+    next_by_subj: ?[]const u8 = null,
+    /// Use direct get API ($JS.API.DIRECT.GET) instead of legacy API
+    direct: bool = false,
 };
 
 /// Request for $JS.API.STREAM.MSG.DELETE
@@ -349,6 +380,11 @@ pub const FetchRequest = struct {
     no_wait: ?bool = null,
     /// Heartbeat interval in nanoseconds for long requests
     idle_heartbeat: ?u64 = null,
+};
+
+/// Options for getMsgs() batch method (future implementation)
+pub const GetMsgsOptions = struct {
+    // TODO: Define batch options based on ADR-31 when implemented
 };
 
 /// Publishing acknowledgment from JetStream
@@ -852,24 +888,27 @@ pub const JetStream = struct {
         return try self.parseResponse(StreamPurgeResponse, msg);
     }
 
-    /// Internal function for getting messages from the stream
-    fn getMsgInternal(self: *JetStream, stream_name: []const u8, request: GetMsgRequest) !*Message {
+    /// Internal function for getting messages from the stream using legacy API
+    fn getMsgLegacy(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
         try validateStreamName(stream_name);
 
-        // Validate request - must specify either seq or last_by_subj, but not both
-        if (request.seq == null and request.last_by_subj == null) {
-            return error.InvalidGetMessageRequest;
-        }
-        if (request.seq != null and request.last_by_subj != null) {
-            return error.InvalidGetMessageRequest;
-        }
+        // Validation already done in getMsg(), no need to repeat
 
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.MSG.GET.{s}", .{stream_name});
         defer self.allocator.free(subject);
 
-        // Serialize the request to JSON
-        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{});
+        // Create GetMsgRequest from options
+        const request = GetMsgRequest{
+            .seq = options.seq,
+            .last_by_subj = options.last_by_subj,
+            .next_by_subj = options.next_by_subj,
+        };
+
+        // Serialize the request to JSON, omitting null fields
+        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{
+            .emit_null_optional_fields = false,
+        });
         defer self.allocator.free(request_json);
 
         const resp = try self.sendRequest(subject, request_json);
@@ -919,14 +958,91 @@ pub const JetStream = struct {
         return msg;
     }
 
-    /// Gets a message from the stream by sequence number
-    pub fn getMsg(self: *JetStream, stream_name: []const u8, seq: u64) !*Message {
-        return self.getMsgInternal(stream_name, .{ .seq = seq });
+    /// Gets a message from the stream using the specified options
+    pub fn getMsg(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
+        // Validate options combinations:
+        // 1. seq only - get message by sequence
+        // 2. last_by_subj only - get last message for subject  
+        // 3. seq + next_by_subj - get next message for subject at or after sequence
+        const has_seq = options.seq != null;
+        const has_last_by_subj = options.last_by_subj != null;
+        const has_next_by_subj = options.next_by_subj != null;
+        
+        if (has_last_by_subj and (has_seq or has_next_by_subj)) {
+            // last_by_subj cannot be combined with seq or next_by_subj
+            return error.InvalidGetMessageOptions;
+        } else if (has_next_by_subj and !has_seq) {
+            // next_by_subj requires seq to be set
+            return error.InvalidGetMessageOptions;
+        } else if (!has_seq and !has_last_by_subj and !has_next_by_subj) {
+            // At least one option must be set
+            return error.InvalidGetMessageOptions;
+        }
+
+        if (options.direct) {
+            return self.getMsgDirect(stream_name, options);
+        } else {
+            return self.getMsgLegacy(stream_name, options);
+        }
     }
 
-    /// Gets the last message from the stream for a given subject
-    pub fn getLastMsg(self: *JetStream, stream_name: []const u8, subject: []const u8) !*Message {
-        return self.getMsgInternal(stream_name, .{ .last_by_subj = subject });
+    /// Gets multiple messages from the stream (batch operation) - NOT IMPLEMENTED
+    pub fn getMsgs(self: *JetStream, stream_name: []const u8, options: GetMsgsOptions) !MessageList {
+        _ = self;
+        _ = stream_name;
+        _ = options;
+        return error.NotImplemented;
+    }
+
+    /// Internal function for direct get messages from any stream replica
+    fn getMsgDirect(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
+        try validateStreamName(stream_name);
+
+        // Build the subject for the direct get API call
+        const subject = try std.fmt.allocPrint(self.allocator, "DIRECT.GET.{s}", .{stream_name});
+        defer self.allocator.free(subject);
+
+        // Convert GetMsgOptions to GetMsgRequest
+        const request = GetMsgRequest{
+            .seq = options.seq,
+            .last_by_subj = options.last_by_subj,
+            .next_by_subj = options.next_by_subj,
+        };
+
+        // Serialize the request to JSON, omitting null fields
+        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{
+            .emit_null_optional_fields = false,
+        });
+        defer self.allocator.free(request_json);
+
+        const resp = try self.sendRequest(subject, request_json);
+        errdefer resp.deinit();
+
+        // For direct get, we get a raw NATS message back, not a JSON response
+        // The message should have JetStream headers like Nats-Stream, Nats-Sequence, etc.
+        try resp.ensureHeadersParsed();
+
+        // Check for error status codes in headers
+        if (try resp.headerGet("Status")) |status| {
+            if (std.mem.eql(u8, status, "404")) {
+                return error.MessageNotFound;
+            } else if (std.mem.eql(u8, status, "408")) {
+                return error.BadRequest;
+            } else if (std.mem.eql(u8, status, "413")) {
+                return error.TooManySubjects;
+            }
+        }
+
+        // For direct get, extract metadata from JetStream headers
+        if (try resp.headerGet("Nats-Subject")) |nats_subject| {
+            resp.subject = nats_subject;
+        }
+        
+        if (try resp.headerGet("Nats-Sequence")) |nats_seq_str| {
+            resp.seq = std.fmt.parseInt(u64, nats_seq_str, 10) catch 0;
+        }
+
+        return resp;
     }
 
     /// Internal function for deleting messages from the stream
