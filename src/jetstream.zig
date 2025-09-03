@@ -945,6 +945,7 @@ pub const JetStream = struct {
             const decoded_headers = try arena_allocator.alloc(u8, hdrs_len);
             try decoder.decode(decoded_headers, hdrs_b64);
             msg.raw_headers = decoded_headers;
+            try msg.parseHeaders();
         }
 
         // Parse time from RFC3339 format
@@ -1018,19 +1019,8 @@ pub const JetStream = struct {
         const resp = try self.sendRequest(subject, request_json);
         errdefer resp.deinit();
 
-        log.debug("getMsgDirect: Got response, raw_headers: {s}", .{resp.raw_headers orelse "null"});
-        log.debug("getMsgDirect: Response data: {s}", .{resp.data});
-
-        // For direct get, we get a raw NATS message back, not a JSON response
-        // The message should have JetStream headers like Nats-Stream, Nats-Sequence, etc.
-        log.debug("getMsgDirect: About to call parseHeaders", .{});
-        try resp.parseHeaders();
-        log.debug("getMsgDirect: parseHeaders completed successfully", .{});
-
         // Check for error status codes
-        log.debug("getMsgDirect: Checking status code: {}", .{resp.status_code});
         if (resp.status_code == 404) {
-            log.debug("getMsgDirect: Returning MessageNotFound error", .{});
             return error.MessageNotFound;
         } else if (resp.status_code == 408) {
             return error.BadRequest;
