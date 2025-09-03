@@ -28,16 +28,16 @@ test "get message by sequence" {
     const msg = try js.getMsg("TEST_MSG_GET", 1);
     defer msg.deinit();
 
-    try testing.expectEqualStrings("test.msg.get", msg.subject);
-    try testing.expectEqualStrings("First message", msg.data);
-    try testing.expectEqual(@as(u64, 1), msg.seq);
+    try testing.expectEqualStrings("test.msg.get", msg.value.subject);
+    try testing.expectEqualStrings("First message", msg.value.data);
+    try testing.expectEqual(@as(u64, 1), msg.value.seq);
 
     // Get second message
     const msg2 = try js.getMsg("TEST_MSG_GET", 2);
     defer msg2.deinit();
 
-    try testing.expectEqualStrings("Second message", msg2.data);
-    try testing.expectEqual(@as(u64, 2), msg2.seq);
+    try testing.expectEqualStrings("Second message", msg2.value.data);
+    try testing.expectEqual(@as(u64, 2), msg2.value.seq);
 }
 
 test "get last message by subject" {
@@ -67,16 +67,16 @@ test "get last message by subject" {
     const last_foo = try js.getLastMsg("TEST_MSG_LAST", "test.last.foo");
     defer last_foo.deinit();
 
-    try testing.expectEqualStrings("test.last.foo", last_foo.subject);
-    try testing.expectEqualStrings("Third foo", last_foo.data);
-    try testing.expectEqual(@as(u64, 5), last_foo.seq);
+    try testing.expectEqualStrings("test.last.foo", last_foo.value.subject);
+    try testing.expectEqualStrings("Third foo", last_foo.value.data);
+    try testing.expectEqual(@as(u64, 5), last_foo.value.seq);
 
     const last_bar = try js.getLastMsg("TEST_MSG_LAST", "test.last.bar");
     defer last_bar.deinit();
 
-    try testing.expectEqualStrings("test.last.bar", last_bar.subject);
-    try testing.expectEqualStrings("Second bar", last_bar.data);
-    try testing.expectEqual(@as(u64, 4), last_bar.seq);
+    try testing.expectEqualStrings("test.last.bar", last_bar.value.subject);
+    try testing.expectEqualStrings("Second bar", last_bar.value.data);
+    try testing.expectEqual(@as(u64, 4), last_bar.value.seq);
 }
 
 test "delete message" {
@@ -103,7 +103,7 @@ test "delete message" {
     // Verify message exists before deletion
     const msg2_before = try js.getMsg("TEST_MSG_DELETE", 2);
     defer msg2_before.deinit();
-    try testing.expectEqualStrings("Message 2", msg2_before.data);
+    try testing.expectEqualStrings("Message 2", msg2_before.value.data);
 
     // Delete message 2
     const deleted = try js.deleteMsg("TEST_MSG_DELETE", 2);
@@ -112,11 +112,11 @@ test "delete message" {
     // Verify other messages still exist
     const msg1_after = try js.getMsg("TEST_MSG_DELETE", 1);
     defer msg1_after.deinit();
-    try testing.expectEqualStrings("Message 1", msg1_after.data);
+    try testing.expectEqualStrings("Message 1", msg1_after.value.data);
 
     const msg3_after = try js.getMsg("TEST_MSG_DELETE", 3);
     defer msg3_after.deinit();
-    try testing.expectEqualStrings("Message 3", msg3_after.data);
+    try testing.expectEqualStrings("Message 3", msg3_after.value.data);
 
     // Attempting to get deleted message should fail
     const get_deleted_result = js.getMsg("TEST_MSG_DELETE", 2);
@@ -147,7 +147,7 @@ test "erase message" {
     // Verify message exists before erasure
     const msg2_before = try js.getMsg("TEST_MSG_ERASE", 2);
     defer msg2_before.deinit();
-    try testing.expectEqualStrings("Message 2", msg2_before.data);
+    try testing.expectEqualStrings("Message 2", msg2_before.value.data);
 
     // Erase message 2 (securely remove from storage)
     const erased = try js.eraseMsg("TEST_MSG_ERASE", 2);
@@ -156,11 +156,11 @@ test "erase message" {
     // Verify other messages still exist
     const msg1_after = try js.getMsg("TEST_MSG_ERASE", 1);
     defer msg1_after.deinit();
-    try testing.expectEqualStrings("Message 1", msg1_after.data);
+    try testing.expectEqualStrings("Message 1", msg1_after.value.data);
 
     const msg3_after = try js.getMsg("TEST_MSG_ERASE", 3);
     defer msg3_after.deinit();
-    try testing.expectEqualStrings("Message 3", msg3_after.data);
+    try testing.expectEqualStrings("Message 3", msg3_after.value.data);
 
     // Attempting to get erased message should fail
     const get_erased_result = js.getMsg("TEST_MSG_ERASE", 2);
@@ -201,18 +201,15 @@ test "get message with headers" {
     defer retrieved.deinit();
 
     // Verify message properties
-    try testing.expectEqualStrings("test.msg.headers", retrieved.subject);
-    try testing.expectEqualStrings("Message with headers", retrieved.data);
-    try testing.expectEqual(@as(u64, 1), retrieved.seq);
+    try testing.expectEqualStrings("test.msg.headers", retrieved.value.subject);
+    try testing.expectEqualStrings("Message with headers", retrieved.value.data);
+    try testing.expectEqual(@as(u64, 1), retrieved.value.seq);
 
-    // Verify headers are preserved
-    const test_header = try retrieved.headerGet("X-Test-Header");
-    try testing.expect(test_header != null);
-    try testing.expectEqualStrings("test-value", test_header.?);
-
-    const another_header = try retrieved.headerGet("X-Another-Header");
-    try testing.expect(another_header != null);
-    try testing.expectEqualStrings("another-value", another_header.?);
+    // Verify headers are preserved (raw header data available in retrieved.value.hdrs)
+    try testing.expect(retrieved.value.hdrs != null);
+    const headers = retrieved.value.hdrs.?;
+    try testing.expect(std.mem.indexOf(u8, headers, "X-Test-Header: test-value") != null);
+    try testing.expect(std.mem.indexOf(u8, headers, "X-Another-Header: another-value") != null);
 }
 
 test "message operations error cases" {

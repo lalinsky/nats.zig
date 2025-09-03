@@ -19,6 +19,7 @@ const ConsumerConfig = @import("jetstream.zig").ConsumerConfig;
 const ConsumerInfo = @import("jetstream.zig").ConsumerInfo;
 const PublishOptions = @import("jetstream.zig").PublishOptions;
 const Result = @import("jetstream.zig").Result;
+const StoredMessage = @import("jetstream.zig").StoredMessage;
 const Message = @import("message.zig").Message;
 
 const log = @import("log.zig").log;
@@ -85,8 +86,6 @@ pub const KVError = error{
 
 /// KV Entry represents a key-value pair with metadata
 pub const KVEntry = struct {
-    /// Allocator for cleanup
-    allocator: std.mem.Allocator,
     /// Bucket name
     bucket: []const u8,
     /// Key name
@@ -101,14 +100,6 @@ pub const KVEntry = struct {
     delta: u64,
     /// Operation type
     operation: KVOperation,
-
-    pub fn deinit(self: *KVEntry) void {
-        self.allocator.free(self.bucket);
-        self.allocator.free(self.key);
-        self.allocator.free(self.value);
-        self.allocator.free(self.created);
-        self.allocator.destroy(self);
-    }
 };
 
 /// KV Status provides information about a KV bucket
@@ -268,44 +259,40 @@ pub const KV = struct {
         return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.subject_prefix, key });
     }
 
-    /// Parse a KV entry from a raw message
-    fn parseEntry(self: *KV, msg: *Message, key: []const u8, delta: u64) !*KVEntry {
-        const entry = try self.allocator.create(KVEntry);
-        errdefer self.allocator.destroy(entry);
+    /// Parse a KV entry from a stored message
+    fn parseEntry(self: *KV, stored_msg_result: *const Result(StoredMessage), key: []const u8, delta: u64) !Result(KVEntry) {
+        const stored_msg = stored_msg_result.value;
 
-        // Determine operation from headers
+        // Determine operation from headers  
         var operation = KVOperation.PUT;
-        if (msg.raw_headers != null) {
-            if (msg.headerGet(KvOperationHdr) catch null) |operation_str| {
-                operation = KVOperation.fromString(operation_str) orelse .PUT;
-            }
-        }
-
-        // Handle marker reasons (TTL-based deletions) - only if message has headers
-        if (msg.raw_headers != null) {
-            if (msg.headerGet(NatsMarkerReasonHdr) catch null) |marker_reason_str| {
-                const marker_reason = MarkerReason.fromString(marker_reason_str);
-                if (marker_reason) |reason| {
-                    operation = switch (reason) {
-                        .MaxAge, .Purge => .PURGE,
-                        .Remove => .DEL,
-                    };
+        if (stored_msg.hdrs) |headers| {
+            // Simple header parsing - look for KV-Operation header
+            var lines = std.mem.splitSequence(u8, headers, "\r\n");
+            while (lines.next()) |line| {
+                if (std.mem.startsWith(u8, line, KvOperationHdr ++ ": ")) {
+                    const op_value = line[KvOperationHdr.len + 2..];
+                    operation = KVOperation.fromString(op_value) orelse .PUT;
+                    break;
                 }
+                // TODO: Handle NatsMarkerReasonHdr for TTL deletions
             }
         }
 
-        entry.* = KVEntry{
-            .allocator = self.allocator,
-            .bucket = try self.allocator.dupe(u8, self.bucket_name),
-            .key = try self.allocator.dupe(u8, key),
-            .value = try self.allocator.dupe(u8, msg.data),
-            .created = try self.allocator.dupe(u8, ""), // TODO: Parse from timestamp
-            .revision = msg.seq,
+        const entry_value = KVEntry{
+            .bucket = self.bucket_name,
+            .key = key,
+            .value = stored_msg.data,
+            .created = stored_msg.time,
+            .revision = stored_msg.seq,
             .delta = delta,
             .operation = operation,
         };
 
-        return entry;
+        const result: Result(KVEntry) = .{
+            .arena = stored_msg_result.arena,
+            .value = entry_value,
+        };
+        return result;
     }
 
     /// Put a value into a key
@@ -362,16 +349,16 @@ pub const KV = struct {
     }
 
     /// Get the latest value for a key
-    pub fn get(self: *KV, key: []const u8) !*KVEntry {
+    pub fn get(self: *KV, key: []const u8) !Result(KVEntry) {
         const subject = try self.getKeySubject(key);
         defer self.allocator.free(subject);
 
-        const msg = self.js.getLastMsg(self.stream_name, subject) catch |err| {
+        const stored_msg = self.js.getLastMsg(self.stream_name, subject) catch |err| {
             return if (err == error.JetStreamError) KVError.KeyNotFound else err;
         };
-        defer msg.deinit();
+        errdefer stored_msg.deinit();
 
-        return try self.parseEntry(msg, key, 0);
+        return try self.parseEntry(&stored_msg, key, 0);
     }
 
     /// Delete a key (preserves history)

@@ -334,12 +334,12 @@ const GetMsgResponse = struct {
 };
 
 /// Stored message data from JetStream
-const StoredMessage = struct {
+pub const StoredMessage = struct {
     subject: []const u8,
     seq: u64,
     time: []const u8,
     hdrs: ?[]const u8 = null,
-    data: ?[]const u8 = null,
+    data: []const u8,
 };
 
 /// Request for fetching messages from a pull consumer
@@ -858,7 +858,7 @@ pub const JetStream = struct {
     }
 
     /// Internal function for getting messages from the stream
-    fn getMsgInternal(self: *JetStream, stream_name: []const u8, request: GetMsgRequest) !*Message {
+    fn getMsgInternal(self: *JetStream, stream_name: []const u8, request: GetMsgRequest) !Result(StoredMessage) {
         try validateStreamName(stream_name);
 
         // Validate request - must specify either seq or last_by_subj, but not both
@@ -882,55 +882,53 @@ pub const JetStream = struct {
 
         // Parse the response to extract the message
         const parsed_resp = try self.parseResponse(GetMsgResponse, resp);
-        defer parsed_resp.deinit();
+        errdefer parsed_resp.deinit();
 
+        const arena_allocator = parsed_resp.arena.allocator();
         const stored_msg = parsed_resp.value.message;
 
-        // Create empty message and populate it
-        const msg = try self.nc.newMsg();
-        errdefer msg.deinit();
-
-        const arena_allocator = msg.arena.allocator();
-
-        // Set basic fields
-        msg.subject = try arena_allocator.dupe(u8, stored_msg.subject);
-        msg.seq = stored_msg.seq;
-
-        // Decode and set data
-        if (stored_msg.data) |data_b64| {
+        // Decode base64 data
+        var decoded_data = stored_msg.data;
+        if (decoded_data.len > 0) {
             const decoder = std.base64.standard.Decoder;
-            const data_len = try decoder.calcSizeForSlice(data_b64);
-            const decoded_data = try arena_allocator.alloc(u8, data_len);
-            try decoder.decode(decoded_data, data_b64);
-            msg.data = decoded_data;
+            const data_len = try decoder.calcSizeForSlice(stored_msg.data);
+            const data_buf = try arena_allocator.alloc(u8, data_len);
+            try decoder.decode(data_buf, stored_msg.data);
+            decoded_data = data_buf;
         }
 
-        // Decode and set headers
+        // Decode base64 headers if present
+        var decoded_hdrs: ?[]const u8 = null;
         if (stored_msg.hdrs) |hdrs_b64| {
             const decoder = std.base64.standard.Decoder;
             const hdrs_len = try decoder.calcSizeForSlice(hdrs_b64);
-            const decoded_headers = try arena_allocator.alloc(u8, hdrs_len);
-            try decoder.decode(decoded_headers, hdrs_b64);
-            msg.raw_headers = decoded_headers;
-            msg.needs_header_parsing = true;
+            const hdrs_buf = try arena_allocator.alloc(u8, hdrs_len);
+            try decoder.decode(hdrs_buf, hdrs_b64);
+            decoded_hdrs = hdrs_buf;
         }
 
-        // Parse time from RFC3339 format
-        if (stored_msg.time.len > 0) {
-            // TODO: Parse RFC3339 timestamp like "2023-01-15T14:30:45.123456789Z"
-            // msg.time = ...
-        }
+        const decoded_stored_msg = StoredMessage{
+            .subject = stored_msg.subject,
+            .seq = stored_msg.seq,
+            .time = stored_msg.time,
+            .hdrs = decoded_hdrs,
+            .data = decoded_data,
+        };
 
-        return msg;
+        const result: Result(StoredMessage) = .{
+            .arena = parsed_resp.arena,
+            .value = decoded_stored_msg,
+        };
+        return result;
     }
 
     /// Gets a message from the stream by sequence number
-    pub fn getMsg(self: *JetStream, stream_name: []const u8, seq: u64) !*Message {
+    pub fn getMsg(self: *JetStream, stream_name: []const u8, seq: u64) !Result(StoredMessage) {
         return self.getMsgInternal(stream_name, .{ .seq = seq });
     }
 
     /// Gets the last message from the stream for a given subject
-    pub fn getLastMsg(self: *JetStream, stream_name: []const u8, subject: []const u8) !*Message {
+    pub fn getLastMsg(self: *JetStream, stream_name: []const u8, subject: []const u8) !Result(StoredMessage) {
         return self.getMsgInternal(stream_name, .{ .last_by_subj = subject });
     }
 

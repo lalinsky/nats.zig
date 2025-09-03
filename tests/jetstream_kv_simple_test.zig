@@ -35,9 +35,9 @@ test "KV simple put and get" {
     std.log.warn("About to get key: {s}", .{key});
     const entry = try kv.get(key);
     defer entry.deinit();
-    std.log.warn("Get succeeded: key={s}, value={s}, revision={d}", .{ entry.key, entry.value, entry.revision });
+    std.log.warn("Get succeeded: key={s}, value={s}, revision={d}", .{ entry.value.key, entry.value.value, entry.value.revision });
 
-    try testing.expectEqualStrings(key, entry.key);
-    try testing.expectEqualStrings(value, entry.value);
-    try testing.expect(entry.revision == revision);
+    try testing.expectEqualStrings(key, entry.value.key);
+    try testing.expectEqualStrings(value, entry.value.value);
+    try testing.expect(entry.value.revision == revision);
 }
