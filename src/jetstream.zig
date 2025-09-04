@@ -12,7 +12,13 @@
 // limitations under the License.
 
 const std = @import("std");
-const Message = @import("message.zig").Message;
+const message_mod = @import("message.zig");
+const Message = message_mod.Message;
+const MessageList = message_mod.MessageList;
+const STATUS_CONTROL = message_mod.STATUS_CONTROL;
+const STATUS_NOT_FOUND = message_mod.STATUS_NOT_FOUND;
+const STATUS_TIMEOUT = message_mod.STATUS_TIMEOUT;
+const STATUS_MAX_BYTES = message_mod.STATUS_MAX_BYTES;
 const Connection = @import("connection.zig").Connection;
 const Subscription = @import("subscription.zig").Subscription;
 const subscription_mod = @import("subscription.zig");
@@ -153,6 +159,8 @@ pub const StreamConfig = struct {
     discard: enum { old, new } = .old,
     /// The time window to track duplicate messages for, in nanoseconds. 0 for default
     duplicate_window: u64 = 0,
+    /// Allow direct get on any replica instead of just the leader
+    allow_direct: ?bool = null,
 };
 
 /// Response from $JS.API.STREAM.NAMES
@@ -301,12 +309,40 @@ const StreamPurgeResponse = struct {
     purged: u64,
 };
 
-/// Request for $JS.API.STREAM.MSG.GET
+/// Request for both $JS.API.STREAM.MSG.GET and $JS.API.DIRECT.GET
 pub const GetMsgRequest = struct {
-    /// Stream sequence number of the message to retrieve, cannot be combined with last_by_subj
+    /// Stream sequence number of the message to retrieve
     seq: ?u64 = null,
-    /// Retrieves the last message for a given subject, cannot be combined with seq
+    /// Retrieves the last message for a given subject
     last_by_subj: ?[]const u8 = null,
+    /// Retrieves the first message for a given subject at or after seq
+    next_by_subj: ?[]const u8 = null,
+    /// Number of messages to retrieve in batch mode (direct get only)
+    batch: ?u32 = null,
+    /// Maximum bytes to retrieve in batch mode (direct get only)
+    max_bytes: ?u64 = null,
+    /// Start time for time-based queries (RFC3339 format, direct get only)
+    start_time: ?[]const u8 = null,
+    /// Multiple subjects for multi-subject queries (direct get only)
+    multi_last: ?[]const []const u8 = null,
+    /// Upper bound sequence for consistent multi-subject reads (direct get only)
+    up_to_seq: ?u64 = null,
+    /// Upper bound time for consistent multi-subject reads (RFC3339 format, direct get only)
+    up_to_time: ?[]const u8 = null,
+    /// Suppress headers in response (direct get only)
+    no_hdr: ?bool = null,
+};
+
+/// Options for getMsg() method
+pub const GetMsgOptions = struct {
+    /// Stream sequence number of the message to retrieve
+    seq: ?u64 = null,
+    /// Retrieves the last message for a given subject
+    last_by_subj: ?[]const u8 = null,
+    /// Retrieves the first message for a given subject at or after seq
+    next_by_subj: ?[]const u8 = null,
+    /// Use direct get API ($JS.API.DIRECT.GET) instead of legacy API
+    direct: bool = false,
 };
 
 /// Request for $JS.API.STREAM.MSG.DELETE
@@ -349,6 +385,11 @@ pub const FetchRequest = struct {
     no_wait: ?bool = null,
     /// Heartbeat interval in nanoseconds for long requests
     idle_heartbeat: ?u64 = null,
+};
+
+/// Options for getMsgs() batch method (future implementation)
+pub const GetMsgsOptions = struct {
+    // TODO: Define batch options based on ADR-31 when implemented
 };
 
 /// Publishing acknowledgment from JetStream
@@ -473,31 +514,30 @@ pub const PullSubscription = struct {
                 // The timestamp in the ACK subject ensures messages belong to this fetch request
                 // (timestamps are monotonically increasing and unique per message delivery)
 
-                if (try raw_msg.headerGet("Status")) |status_code| {
-                    if (std.mem.eql(u8, status_code, "404")) {
-                        // No messages available
-                        raw_msg.deinit();
-                        batch_complete = true;
-                        break;
-                    } else if (std.mem.eql(u8, status_code, "408")) {
-                        // Request timeout
-                        raw_msg.deinit();
-                        if (messages.items.len == 0) {
-                            fetch_error = error.Timeout;
-                        }
-                        batch_complete = true;
-                        break;
-                    } else if (std.mem.eql(u8, status_code, "409")) {
-                        // Consumer sequence mismatch
-                        raw_msg.deinit();
-                        fetch_error = error.ConsumerSequenceMismatch;
-                        batch_complete = true;
-                        break;
-                    } else if (std.mem.eql(u8, status_code, "100")) {
-                        // Heartbeat - continue waiting
-                        raw_msg.deinit();
-                        continue;
+                if (raw_msg.status_code == STATUS_NOT_FOUND) {
+                    // No messages available
+                    raw_msg.deinit();
+                    batch_complete = true;
+                    break;
+                } else if (raw_msg.status_code == STATUS_TIMEOUT) {
+                    // Request timeout
+                    raw_msg.deinit();
+                    if (messages.items.len == 0) {
+                        fetch_error = error.Timeout;
                     }
+                    batch_complete = true;
+                    break;
+                } else if (raw_msg.status_code == STATUS_MAX_BYTES) {
+                    // Consumer sequence mismatch
+                    raw_msg.deinit();
+                    fetch_error = error.ConsumerSequenceMismatch;
+                    batch_complete = true;
+                    break;
+                } else if (raw_msg.status_code == STATUS_CONTROL) {
+                    // Heartbeat - continue waiting
+                    raw_msg.deinit();
+                    continue;
+                } else if (raw_msg.status_code > 0) {
                     // Unknown status code - clean up and continue
                     raw_msg.deinit();
                 } else {
@@ -852,24 +892,27 @@ pub const JetStream = struct {
         return try self.parseResponse(StreamPurgeResponse, msg);
     }
 
-    /// Internal function for getting messages from the stream
-    fn getMsgInternal(self: *JetStream, stream_name: []const u8, request: GetMsgRequest) !Result(StoredMessage) {
+    /// Internal function for getting messages from the stream using legacy API
+    fn getMsgLegacy(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
         try validateStreamName(stream_name);
 
-        // Validate request - must specify either seq or last_by_subj, but not both
-        if (request.seq == null and request.last_by_subj == null) {
-            return error.InvalidGetMessageRequest;
-        }
-        if (request.seq != null and request.last_by_subj != null) {
-            return error.InvalidGetMessageRequest;
-        }
+        // Validation already done in getMsg(), no need to repeat
 
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.MSG.GET.{s}", .{stream_name});
         defer self.allocator.free(subject);
 
-        // Serialize the request to JSON
-        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{});
+        // Create GetMsgRequest from options
+        const request = GetMsgRequest{
+            .seq = options.seq,
+            .last_by_subj = options.last_by_subj,
+            .next_by_subj = options.next_by_subj,
+        };
+
+        // Serialize the request to JSON, omitting null fields
+        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{
+            .emit_null_optional_fields = false,
+        });
         defer self.allocator.free(request_json);
 
         const resp = try self.sendRequest(subject, request_json);
@@ -879,52 +922,125 @@ pub const JetStream = struct {
         const parsed_resp = try self.parseResponse(GetMsgResponse, resp);
         errdefer parsed_resp.deinit();
 
-        const arena_allocator = parsed_resp.arena.allocator();
         const stored_msg = parsed_resp.value.message;
 
+        // Create a new Message using the proper API
+        const msg = try self.nc.newMsg();
+        errdefer msg.deinit();
+
+        // Set the subject
+        try msg.setSubject(stored_msg.subject);
+
+        // Set the sequence number
+        msg.seq = stored_msg.seq;
+
         // Decode base64 data
-        var decoded_data = stored_msg.data;
-        if (decoded_data.len > 0) {
+        if (stored_msg.data.len > 0) {
             const decoder = std.base64.standard.Decoder;
             const data_len = try decoder.calcSizeForSlice(stored_msg.data);
-            const data_buf = try arena_allocator.alloc(u8, data_len);
-            try decoder.decode(data_buf, stored_msg.data);
-            decoded_data = data_buf;
+            const decoded_data = try msg.arena.allocator().alloc(u8, data_len);
+            try decoder.decode(decoded_data, stored_msg.data);
+            try msg.setPayload(decoded_data);
+        } else {
+            try msg.setPayload("");
         }
 
         // Decode base64 headers if present
-        var decoded_hdrs: ?[]const u8 = null;
         if (stored_msg.hdrs) |hdrs_b64| {
             const decoder = std.base64.standard.Decoder;
             const hdrs_len = try decoder.calcSizeForSlice(hdrs_b64);
-            const hdrs_buf = try arena_allocator.alloc(u8, hdrs_len);
-            try decoder.decode(hdrs_buf, hdrs_b64);
-            decoded_hdrs = hdrs_buf;
+            const decoded_headers = try msg.arena.allocator().alloc(u8, hdrs_len);
+            try decoder.decode(decoded_headers, hdrs_b64);
+            try msg.setRawHeaders(decoded_headers);
         }
 
-        const decoded_stored_msg = StoredMessage{
-            .subject = stored_msg.subject,
-            .seq = stored_msg.seq,
-            .time = stored_msg.time,
-            .hdrs = decoded_hdrs,
-            .data = decoded_data,
-        };
+        // Clean up parsed response
+        parsed_resp.deinit();
 
-        const result: Result(StoredMessage) = .{
-            .arena = parsed_resp.arena,
-            .value = decoded_stored_msg,
-        };
-        return result;
+        return msg;
     }
 
-    /// Gets a message from the stream by sequence number
-    pub fn getMsg(self: *JetStream, stream_name: []const u8, seq: u64) !Result(StoredMessage) {
-        return self.getMsgInternal(stream_name, .{ .seq = seq });
+    /// Gets a message from the stream using the specified options
+    pub fn getMsg(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
+        // Validate options combinations:
+        // 1. seq only - get message by sequence
+        // 2. last_by_subj only - get last message for subject
+        // 3. seq + next_by_subj - get next message for subject at or after sequence
+        const has_seq = options.seq != null;
+        const has_last_by_subj = options.last_by_subj != null;
+        const has_next_by_subj = options.next_by_subj != null;
+
+        if (has_last_by_subj and (has_seq or has_next_by_subj)) {
+            // last_by_subj cannot be combined with seq or next_by_subj
+            return error.InvalidGetMessageOptions;
+        } else if (has_next_by_subj and !has_seq) {
+            // next_by_subj requires seq to be set
+            return error.InvalidGetMessageOptions;
+        } else if (!has_seq and !has_last_by_subj and !has_next_by_subj) {
+            // At least one option must be set
+            return error.InvalidGetMessageOptions;
+        }
+
+        if (options.direct) {
+            return self.getMsgDirect(stream_name, options);
+        } else {
+            return self.getMsgLegacy(stream_name, options);
+        }
     }
 
-    /// Gets the last message from the stream for a given subject
-    pub fn getLastMsg(self: *JetStream, stream_name: []const u8, subject: []const u8) !Result(StoredMessage) {
-        return self.getMsgInternal(stream_name, .{ .last_by_subj = subject });
+    /// Gets multiple messages from the stream (batch operation) - NOT IMPLEMENTED
+    pub fn getMsgs(self: *JetStream, stream_name: []const u8, options: GetMsgsOptions) !MessageList {
+        _ = self;
+        _ = stream_name;
+        _ = options;
+        return error.NotImplemented;
+    }
+
+    /// Internal function for direct get messages from any stream replica
+    fn getMsgDirect(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
+        log.debug("getMsgDirect: Starting with stream_name={s}", .{stream_name});
+        try validateStreamName(stream_name);
+        log.debug("getMsgDirect: Stream name validation passed", .{});
+
+        // Build the subject for the direct get API call
+        const subject = try std.fmt.allocPrint(self.allocator, "DIRECT.GET.{s}", .{stream_name});
+        defer self.allocator.free(subject);
+
+        // Convert GetMsgOptions to GetMsgRequest
+        const request = GetMsgRequest{
+            .seq = options.seq,
+            .last_by_subj = options.last_by_subj,
+            .next_by_subj = options.next_by_subj,
+        };
+
+        // Serialize the request to JSON, omitting null fields
+        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{
+            .emit_null_optional_fields = false,
+        });
+        defer self.allocator.free(request_json);
+
+        const resp = try self.sendRequest(subject, request_json);
+        errdefer resp.deinit();
+
+        // Check for error status codes
+        if (resp.status_code == STATUS_NOT_FOUND) {
+            return error.MessageNotFound;
+        } else if (resp.status_code == STATUS_TIMEOUT) {
+            return error.BadRequest;
+        } else if (resp.status_code == 413) {
+            return error.TooManySubjects;
+        }
+
+        // For direct get, extract metadata from JetStream headers
+        if (resp.headerGet("Nats-Subject")) |nats_subject| {
+            try resp.setSubject(nats_subject);
+        }
+
+        if (resp.headerGet("Nats-Sequence")) |nats_seq_str| {
+            resp.seq = std.fmt.parseInt(u64, nats_seq_str, 10) catch 0;
+        }
+
+        return resp;
     }
 
     /// Internal function for deleting messages from the stream
@@ -1022,18 +1138,13 @@ pub const JetStream = struct {
         const JSHandler = struct {
             fn wrappedHandler(msg: *Message, js: *JetStream, user_args: @TypeOf(args)) anyerror!void {
                 // Check for status messages (heartbeats and flow control)
-                if (msg.headers.get("Status")) |status_values| {
-                    if (status_values.items.len > 0) {
-                        const status_code = status_values.items[0];
-                        if (std.mem.eql(u8, status_code, "100")) {
-                            // Handle status message internally, don't pass to user callback
-                            handleStatusMessage(msg, js) catch |err| {
-                                log.err("Failed to handle status message: {}", .{err});
-                            };
-                            msg.deinit(); // Clean up status message
-                            return;
-                        }
-                    }
+                if (msg.status_code == STATUS_CONTROL) {
+                    // Handle status message internally, don't pass to user callback
+                    handleStatusMessage(msg, js) catch |err| {
+                        log.err("Failed to handle status message: {}", .{err});
+                    };
+                    msg.deinit(); // Clean up status message
+                    return;
                 }
 
                 // Create JetStream message wrapper for regular messages
