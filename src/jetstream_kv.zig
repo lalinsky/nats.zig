@@ -267,7 +267,7 @@ pub const KV = struct {
 
     /// Parse a KV entry from a stored message
     fn parseEntry(self: *KV, stored_msg: *Message, key: []const u8, delta: u64) !KVEntry {
-        // Determine operation from parsed headers  
+        // Determine operation from parsed headers
         var operation = KVOperation.PUT;
         if (stored_msg.headerGet(KvOperationHdr)) |op_value| {
             operation = KVOperation.fromString(op_value) orelse .PUT;

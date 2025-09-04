@@ -250,7 +250,7 @@ test "KV validation" {
     try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(testing.allocator, undefined, "invalid.name"));
     try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(testing.allocator, undefined, "invalid name"));
 
-    // Test key validation  
+    // Test key validation
     try testing.expectError(nats.KVError.InvalidKey, nats.validateKey(""));
     try testing.expectError(nats.KVError.InvalidKey, nats.validateKey(".starts-with-dot"));
     try testing.expectError(nats.KVError.InvalidKey, nats.validateKey("ends-with-dot."));

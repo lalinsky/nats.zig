@@ -30,7 +30,7 @@ test "KV simple put and get" {
     std.log.warn("About to put key: {s}, value: {s}", .{ key, value });
     const revision = try kv.put(key, value, .{});
     std.log.warn("Put succeeded with revision: {d}", .{revision});
-    
+
     // Test get operation
     std.log.warn("About to get key: {s}", .{key});
     var entry = try kv.get(key);
