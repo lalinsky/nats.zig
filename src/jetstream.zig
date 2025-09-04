@@ -12,8 +12,13 @@
 // limitations under the License.
 
 const std = @import("std");
-const Message = @import("message.zig").Message;
-const MessageList = @import("message.zig").MessageList;
+const message_mod = @import("message.zig");
+const Message = message_mod.Message;
+const MessageList = message_mod.MessageList;
+const STATUS_CONTROL = message_mod.STATUS_CONTROL;
+const STATUS_NOT_FOUND = message_mod.STATUS_NOT_FOUND;
+const STATUS_TIMEOUT = message_mod.STATUS_TIMEOUT;
+const STATUS_MAX_BYTES = message_mod.STATUS_MAX_BYTES;
 const Connection = @import("connection.zig").Connection;
 const Subscription = @import("subscription.zig").Subscription;
 const subscription_mod = @import("subscription.zig");
@@ -509,12 +514,12 @@ pub const PullSubscription = struct {
                 // The timestamp in the ACK subject ensures messages belong to this fetch request
                 // (timestamps are monotonically increasing and unique per message delivery)
 
-                if (raw_msg.status_code == 404) {
+                if (raw_msg.status_code == STATUS_NOT_FOUND) {
                     // No messages available
                     raw_msg.deinit();
                     batch_complete = true;
                     break;
-                } else if (raw_msg.status_code == 408) {
+                } else if (raw_msg.status_code == STATUS_TIMEOUT) {
                     // Request timeout
                     raw_msg.deinit();
                     if (messages.items.len == 0) {
@@ -522,13 +527,13 @@ pub const PullSubscription = struct {
                     }
                     batch_complete = true;
                     break;
-                } else if (raw_msg.status_code == 409) {
+                } else if (raw_msg.status_code == STATUS_MAX_BYTES) {
                     // Consumer sequence mismatch
                     raw_msg.deinit();
                     fetch_error = error.ConsumerSequenceMismatch;
                     batch_complete = true;
                     break;
-                } else if (raw_msg.status_code == 100) {
+                } else if (raw_msg.status_code == STATUS_CONTROL) {
                     // Heartbeat - continue waiting
                     raw_msg.deinit();
                     continue;
@@ -1020,9 +1025,9 @@ pub const JetStream = struct {
         errdefer resp.deinit();
 
         // Check for error status codes
-        if (resp.status_code == 404) {
+        if (resp.status_code == STATUS_NOT_FOUND) {
             return error.MessageNotFound;
-        } else if (resp.status_code == 408) {
+        } else if (resp.status_code == STATUS_TIMEOUT) {
             return error.BadRequest;
         } else if (resp.status_code == 413) {
             return error.TooManySubjects;
@@ -1135,7 +1140,7 @@ pub const JetStream = struct {
         const JSHandler = struct {
             fn wrappedHandler(msg: *Message, js: *JetStream, user_args: @TypeOf(args)) anyerror!void {
                 // Check for status messages (heartbeats and flow control)
-                if (msg.status_code == 100) {
+                if (msg.status_code == STATUS_CONTROL) {
                     // Handle status message internally, don't pass to user callback
                     handleStatusMessage(msg, js) catch |err| {
                         log.err("Failed to handle status message: {}", .{err});

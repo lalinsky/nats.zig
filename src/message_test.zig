@@ -15,7 +15,7 @@ const std = @import("std");
 const testing = std.testing;
 const message = @import("message.zig");
 const Message = message.Message;
-const STATUS_NO_RESPONSE = 503;
+const STATUS_NO_RESPONSE = message.STATUS_NO_RESPONSE;
 
 test "Message owned data lifecycle" {
     const allocator = testing.allocator;

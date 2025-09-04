@@ -22,12 +22,12 @@ const NATS_STATUS_PREFIX = "NATS/1.0";
 const HDR_STATUS = "Status";
 const HDR_DESCRIPTION = "Description";
 
-const STATUS_CONTROL: u16 = 100;
-const STATUS_BAD_REQUEST: u16 = 400;
-const STATUS_NOT_FOUND: u16 = 404;
-const STATUS_TIMEOUT: u16 = 408;
-const STATUS_MAX_BYTES: u16 = 409;
-const STATUS_NO_RESPONSE: u16 = 503;
+pub const STATUS_CONTROL: u16 = 100;
+pub const STATUS_BAD_REQUEST: u16 = 400;
+pub const STATUS_NOT_FOUND: u16 = 404;
+pub const STATUS_TIMEOUT: u16 = 408;
+pub const STATUS_MAX_BYTES: u16 = 409;
+pub const STATUS_NO_RESPONSE: u16 = 503;
 
 pub const MessageList = struct {
     head: ?*Message = null,
