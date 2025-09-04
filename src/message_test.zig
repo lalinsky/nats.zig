@@ -23,9 +23,9 @@ test "Message owned data lifecycle" {
     // Create message that owns its data
     var msg = Message.init(allocator);
     defer msg.deinit();
-    try msg.setSubject("test.subject");
-    try msg.setReply("reply.to");
-    try msg.setPayload("hello world");
+    try msg.setSubject("test.subject", true);
+    try msg.setReply("reply.to", true);
+    try msg.setPayload("hello world", true);
 
     // Verify data
     try testing.expectEqualStrings("test.subject", msg.subject);
@@ -43,10 +43,10 @@ test "Message with headers" {
     // Create message with headers
     var msg = Message.init(allocator);
     defer msg.deinit();
-    try msg.setSubject("test.subject");
-    try msg.setReply("reply.to");
-    try msg.setPayload("hello world");
-    try msg.setRawHeaders(raw_headers);
+    try msg.setSubject("test.subject", true);
+    try msg.setReply("reply.to", true);
+    try msg.setPayload("hello world", true);
+    try msg.setRawHeaders(raw_headers, true);
 
     // Verify data was copied (not same pointers)
     try testing.expectEqualStrings("test.subject", msg.subject);
@@ -63,8 +63,8 @@ test "Message header management" {
 
     var msg = Message.init(allocator);
     defer msg.deinit();
-    try msg.setSubject("test");
-    try msg.setPayload("data");
+    try msg.setSubject("test", true);
+    try msg.setPayload("data", true);
 
     // Set headers
     try msg.headerSet("Content-Type", "application/json");
@@ -95,9 +95,9 @@ test "Message header parsing" {
 
     var msg = Message.init(allocator);
     defer msg.deinit();
-    try msg.setSubject("test.subject");
-    try msg.setPayload("hello world");
-    try msg.setRawHeaders(raw_headers);
+    try msg.setSubject("test.subject", true);
+    try msg.setPayload("hello world", true);
+    try msg.setRawHeaders(raw_headers, true);
 
     // Parse headers explicitly
     try msg.parseHeaders();
@@ -117,8 +117,8 @@ test "Message no responders detection" {
     var msg = Message.init(allocator);
     defer msg.deinit();
 
-    try msg.setSubject("test");
-    try msg.setPayload("");
+    try msg.setSubject("test", true);
+    try msg.setPayload("", false);
 
     // Set 503 status
     msg.status_code = STATUS_NO_RESPONSE;
@@ -131,7 +131,7 @@ test "Message no responders detection" {
     try testing.expect(!msg.isNoResponders());
 
     // Test with data - should not be no responders even with 503
-    try msg.setPayload("some data");
+    try msg.setPayload("some data", true);
     msg.status_code = STATUS_NO_RESPONSE;
     try testing.expect(!msg.isNoResponders());
 }
@@ -141,8 +141,8 @@ test "Message header encoding" {
 
     var msg = Message.init(allocator);
     defer msg.deinit();
-    try msg.setSubject("test");
-    try msg.setPayload("data");
+    try msg.setSubject("test", true);
+    try msg.setPayload("data", true);
 
     try msg.headerSet("Content-Type", "application/json");
     try msg.headerSet("X-Custom", "value");
@@ -169,12 +169,12 @@ test "Message status field and header parsing" {
     var msg = Message.init(allocator);
     defer msg.deinit();
 
-    try msg.setSubject("test");
-    try msg.setPayload("test data");
+    try msg.setSubject("test", true);
+    try msg.setPayload("test data", true);
 
     // Test parsing inline status with description
     const raw_headers = "NATS/1.0 503 No Responders\r\nX-Custom: test\r\n\r\n";
-    try msg.setRawHeaders(raw_headers);
+    try msg.setRawHeaders(raw_headers, true);
     try msg.parseHeaders();
 
     // Status field should be set
@@ -218,9 +218,9 @@ test "Message memory patterns" {
     // Test that all messages copy their data (using arena)
     var msg1 = Message.init(allocator);
     defer msg1.deinit();
-    try msg1.setSubject("test");
-    try msg1.setReply("reply");
-    try msg1.setPayload("data");
+    try msg1.setSubject("test", true);
+    try msg1.setReply("reply", true);
+    try msg1.setPayload("data", true);
 
     // Verify data was copied into arena
     try testing.expectEqualStrings("test", msg1.subject);
@@ -234,8 +234,8 @@ test "Message error handling" {
     // These should work fine
     var msg = Message.init(allocator);
     defer msg.deinit();
-    try msg.setSubject("");
-    try msg.setPayload("");
+    try msg.setSubject("", false);
+    try msg.setPayload("", false);
 
     // Empty header operations should work
     try msg.headerSet("", "value");

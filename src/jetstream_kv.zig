@@ -360,8 +360,8 @@ pub const KV = struct {
         const msg = try self.js.nc.newMsg();
         defer msg.deinit();
 
-        try msg.setSubject(subject);
-        try msg.setPayload("");
+        try msg.setSubject(subject, true);
+        try msg.setPayload("", false);
         try msg.headerSet(KvOperationHdr, "DEL");
 
         const result = try self.js.publishMsg(msg, .{});
@@ -377,8 +377,8 @@ pub const KV = struct {
         const msg = try self.js.nc.newMsg();
         defer msg.deinit();
 
-        try msg.setSubject(subject);
-        try msg.setPayload("");
+        try msg.setSubject(subject, true);
+        try msg.setPayload("", false);
         try msg.headerSet(KvOperationHdr, "PURGE");
         try msg.headerSet(NatsRollupHdr, "sub");
 

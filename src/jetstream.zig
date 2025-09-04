@@ -929,7 +929,7 @@ pub const JetStream = struct {
         errdefer msg.deinit();
 
         // Set the subject
-        try msg.setSubject(stored_msg.subject);
+        try msg.setSubject(stored_msg.subject, true);
 
         // Set the sequence number
         msg.seq = stored_msg.seq;
@@ -940,9 +940,9 @@ pub const JetStream = struct {
             const data_len = try decoder.calcSizeForSlice(stored_msg.data);
             const decoded_data = try msg.arena.allocator().alloc(u8, data_len);
             try decoder.decode(decoded_data, stored_msg.data);
-            try msg.setPayload(decoded_data);
+            try msg.setPayload(decoded_data, false);
         } else {
-            try msg.setPayload("");
+            try msg.setPayload("", false);
         }
 
         // Decode base64 headers if present
@@ -951,7 +951,7 @@ pub const JetStream = struct {
             const hdrs_len = try decoder.calcSizeForSlice(hdrs_b64);
             const decoded_headers = try msg.arena.allocator().alloc(u8, hdrs_len);
             try decoder.decode(decoded_headers, hdrs_b64);
-            try msg.setRawHeaders(decoded_headers);
+            try msg.setRawHeaders(decoded_headers, false);
         }
 
         // Clean up parsed response
@@ -1033,7 +1033,7 @@ pub const JetStream = struct {
 
         // For direct get, extract metadata from JetStream headers
         if (resp.headerGet("Nats-Subject")) |nats_subject| {
-            try resp.setSubject(nats_subject);
+            try resp.setSubject(nats_subject, false);
         }
 
         if (resp.headerGet("Nats-Sequence")) |nats_seq_str| {
@@ -1259,8 +1259,8 @@ pub const JetStream = struct {
         defer msg.deinit();
 
         // Set message fields
-        try msg.setSubject(subject);
-        try msg.setPayload(data);
+        try msg.setSubject(subject, false);
+        try msg.setPayload(data, false);
 
         // Use publishMsg to handle the actual publishing
         return self.publishMsgInternal(msg, options);
