@@ -22,6 +22,7 @@ test {
     _ = @import("jetstream_duplicate_ack_test.zig");
     _ = @import("jetstream_large_list_test.zig");
     _ = @import("jetstream_kv_simple_test.zig");
+    _ = @import("jetstream_kv_test.zig");
 }
 
 test "tests:beforeEach" {
