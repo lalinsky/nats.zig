@@ -131,6 +131,9 @@ pub const Message = struct {
         } else {
             self.raw_headers = headers;
         }
+        // Reset parsed header state before parsing new raw headers
+        self.headers = .{};
+        self.status_code = 0;
         try self.parseHeaders();
     }
 
