@@ -22,12 +22,12 @@ const NATS_STATUS_PREFIX = "NATS/1.0";
 const HDR_STATUS = "Status";
 const HDR_DESCRIPTION = "Description";
 
-const HDR_STATUS_CONTROL = "100";
-const HDR_STATUS_BAD_REQUEST = "400";
-const HDR_STATUS_NOT_FOUND = "404";
-const HDR_STATUS_TIMEOUT = "408";
-const HDR_STATUS_MAX_BYTES = "409";
-const HDR_STATUS_NO_RESPONSE = "503";
+pub const STATUS_CONTROL: u16 = 100;
+pub const STATUS_BAD_REQUEST: u16 = 400;
+pub const STATUS_NOT_FOUND: u16 = 404;
+pub const STATUS_TIMEOUT: u16 = 408;
+pub const STATUS_MAX_BYTES: u16 = 409;
+pub const STATUS_NO_RESPONSE: u16 = 503;
 
 pub const MessageList = struct {
     head: ?*Message = null,
@@ -67,13 +67,13 @@ pub const Message = struct {
     // Metadata
     sid: u64 = 0,
     seq: u64 = 0, // TODO this doesn't really belong here
+    status_code: u16 = 0,
 
     // Headers
     headers: std.hash_map.StringHashMapUnmanaged(ArrayListUnmanaged([]const u8)) = .{},
 
-    // Raw header data for lazy parsing
+    // Raw header data for parsing
     raw_headers: ?[]const u8 = null,
-    needs_header_parsing: bool = false,
 
     // Memory management - much simpler with arena
     arena: std.heap.ArenaAllocator,
@@ -115,13 +115,11 @@ pub const Message = struct {
 
     pub fn setRawHeaders(self: *Self, headers: []const u8) !void {
         self.raw_headers = try self.arena.allocator().dupe(u8, headers);
-        self.needs_header_parsing = true;
+        try self.parseHeaders();
     }
 
-    // Lazy header parsing
-    pub fn ensureHeadersParsed(self: *Self) !void {
-        if (!self.needs_header_parsing) return;
-
+    // Parse headers from raw header data
+    pub fn parseHeaders(self: *Self) !void {
         const raw = self.raw_headers orelse return;
 
         // Parse headers like Go NATS library
@@ -136,31 +134,37 @@ pub const Message = struct {
             if (status_part.len > 0) {
                 // Extract status code (first 3 characters if available)
                 const status_len = 3; // Like Go's statusLen
-                var status: []const u8 = undefined;
-                var description: ?[]const u8 = null;
+                var status_code: []const u8 = undefined;
 
                 if (status_part.len == status_len) {
-                    status = status_part;
+                    status_code = status_part;
                 } else if (status_part.len > status_len) {
-                    status = status_part[0..status_len];
-                    const desc_part = std.mem.trim(u8, status_part[status_len..], " \t");
-                    if (desc_part.len > 0) {
-                        description = desc_part;
-                    }
+                    status_code = status_part[0..status_len];
                 } else {
-                    status = status_part; // Less than 3 chars, use as-is
+                    status_code = status_part; // Less than 3 chars, use as-is
                 }
 
-                // Add Status header directly to avoid circular dependency
-                var status_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
-                status_list.appendAssumeCapacity(status);
-                try self.headers.put(arena_allocator, HDR_STATUS, status_list);
+                // Parse status code to u16
+                if (std.fmt.parseInt(u16, status_code, 10)) |code| {
+                    self.status_code = code;
+                } else |_| {
+                    // If parsing fails, just set to 0
+                    self.status_code = 0;
+                }
 
-                // Add Description header if present
-                if (description) |desc| {
-                    var desc_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
-                    desc_list.appendAssumeCapacity(desc);
-                    try self.headers.put(arena_allocator, HDR_DESCRIPTION, desc_list);
+                // Add Status header with just the status code for compatibility
+                var status_code_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
+                status_code_list.appendAssumeCapacity(status_code);
+                try self.headers.put(arena_allocator, HDR_STATUS, status_code_list);
+
+                // Add Description header if there's a description part
+                if (status_part.len > status_len) {
+                    const description_part = std.mem.trim(u8, status_part[status_len..], " \t");
+                    if (description_part.len > 0) {
+                        var description_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
+                        description_list.appendAssumeCapacity(description_part);
+                        try self.headers.put(arena_allocator, HDR_DESCRIPTION, description_list);
+                    }
                 }
             }
         }
@@ -185,14 +189,10 @@ pub const Message = struct {
 
             try result.value_ptr.append(arena_allocator, owned_value);
         }
-
-        self.needs_header_parsing = false;
     }
 
     // Header API
     pub fn headerSet(self: *Self, key: []const u8, value: []const u8) !void {
-        try self.ensureHeadersParsed();
-
         const arena_allocator = self.arena.allocator();
 
         // Remove existing values (arena will clean up memory automatically)
@@ -208,9 +208,7 @@ pub const Message = struct {
         try self.headers.put(arena_allocator, owned_key, values);
     }
 
-    pub fn headerGet(self: *Self, key: []const u8) !?[]const u8 {
-        try self.ensureHeadersParsed();
-
+    pub fn headerGet(self: *Self, key: []const u8) ?[]const u8 {
         if (self.headers.get(key)) |values| {
             if (values.items.len > 0) {
                 return values.items[0];
@@ -220,9 +218,7 @@ pub const Message = struct {
         return null;
     }
 
-    pub fn headerGetAll(self: *Self, key: []const u8) !?[]const []const u8 {
-        try self.ensureHeadersParsed();
-
+    pub fn headerGetAll(self: *Self, key: []const u8) ?[]const []const u8 {
         if (self.headers.get(key)) |values| {
             return values.items; // No copy needed - arena owns the data
         }
@@ -230,9 +226,7 @@ pub const Message = struct {
         return null;
     }
 
-    pub fn headerDelete(self: *Self, key: []const u8) !void {
-        try self.ensureHeadersParsed();
-
+    pub fn headerDelete(self: *Self, key: []const u8) void {
         // Arena will clean up memory automatically
         _ = self.headers.fetchRemove(key);
     }
@@ -241,22 +235,38 @@ pub const Message = struct {
     pub fn isNoResponders(self: *Self) bool {
         if (self.data.len != 0) return false;
 
-        const status = self.headerGet(HDR_STATUS) catch return false;
-        return status != null and std.mem.eql(u8, status.?, HDR_STATUS_NO_RESPONSE);
+        return self.status_code == STATUS_NO_RESPONSE;
     }
 
     // Encode headers for transmission
     pub fn encodeHeaders(self: *Self, writer: anytype) !void {
-        try self.ensureHeadersParsed();
-
         if (self.headers.count() == 0) return;
 
-        try writer.writeAll(NATS_STATUS_PREFIX ++ "\r\n");
+        // Construct status line from Status and Description headers or status_code
+        if (self.headerGet(HDR_STATUS)) |status_code| {
+            try writer.writeAll(NATS_STATUS_PREFIX);
+            try writer.writeAll(" ");
+            try writer.writeAll(status_code);
+            if (self.headerGet(HDR_DESCRIPTION)) |description| {
+                try writer.writeAll(" ");
+                try writer.writeAll(description);
+            }
+            try writer.writeAll("\r\n");
+        } else if (self.status_code > 0) {
+            // Fallback: construct status line from status code
+            try writer.print("{s} {d}\r\n", .{ NATS_STATUS_PREFIX, self.status_code });
+        } else {
+            // Default NATS status line
+            try writer.writeAll(NATS_STATUS_PREFIX ++ "\r\n");
+        }
 
         var iter = self.headers.iterator();
         while (iter.next()) |entry| {
             const key = entry.key_ptr.*;
             const values = entry.value_ptr.*;
+
+            // Skip the Status and Description headers since we already wrote them in the status line
+            if (std.mem.eql(u8, key, HDR_STATUS) or std.mem.eql(u8, key, HDR_DESCRIPTION)) continue;
 
             for (values.items) |value| {
                 try writer.print("{s}: {s}\r\n", .{ key, value });
@@ -274,9 +284,9 @@ pub const Message = struct {
         self.data = &[_]u8{};
         self.sid = 0;
         self.seq = 0;
-        self.headers.clearRetainingCapacity();
+        self.status_code = 0;
+        self.headers = .{}; // Completely reset HashMap instead of clearRetainingCapacity()
         self.raw_headers = null;
-        self.needs_header_parsing = false;
         self.next = null;
         // Note: pool and arena are intentionally preserved
     }
@@ -339,3 +349,7 @@ pub const MessagePool = struct {
         }
     }
 };
+
+test {
+    _ = @import("message_test.zig");
+}
