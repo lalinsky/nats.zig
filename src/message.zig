@@ -152,11 +152,20 @@ pub const Message = struct {
                     self.status_code = 0;
                 }
 
-                // Store the full status line in the Status header
-                var status_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
-                const full_status = try arena_allocator.dupe(u8, first_line);
-                status_list.appendAssumeCapacity(full_status);
-                try self.headers.put(arena_allocator, HDR_STATUS, status_list);
+                // Add Status header with just the status code for compatibility
+                var status_code_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
+                status_code_list.appendAssumeCapacity(status_code);
+                try self.headers.put(arena_allocator, HDR_STATUS, status_code_list);
+
+                // Add Description header if there's a description part
+                if (status_part.len > status_len) {
+                    const description_part = std.mem.trim(u8, status_part[status_len..], " \t");
+                    if (description_part.len > 0) {
+                        var description_list = try ArrayListUnmanaged([]const u8).initCapacity(arena_allocator, 1);
+                        description_list.appendAssumeCapacity(description_part);
+                        try self.headers.put(arena_allocator, HDR_DESCRIPTION, description_list);
+                    }
+                }
             }
         }
 
@@ -233,9 +242,15 @@ pub const Message = struct {
     pub fn encodeHeaders(self: *Self, writer: anytype) !void {
         if (self.headers.count() == 0) return;
 
-        // Check if we have a Status header (which contains the full status line)
-        if (self.headerGet(HDR_STATUS)) |status_line| {
-            try writer.writeAll(status_line);
+        // Construct status line from Status and Description headers or status_code
+        if (self.headerGet(HDR_STATUS)) |status_code| {
+            try writer.writeAll(NATS_STATUS_PREFIX);
+            try writer.writeAll(" ");
+            try writer.writeAll(status_code);
+            if (self.headerGet(HDR_DESCRIPTION)) |description| {
+                try writer.writeAll(" ");
+                try writer.writeAll(description);
+            }
             try writer.writeAll("\r\n");
         } else if (self.status_code > 0) {
             // Fallback: construct status line from status code
@@ -250,8 +265,8 @@ pub const Message = struct {
             const key = entry.key_ptr.*;
             const values = entry.value_ptr.*;
 
-            // Skip the Status header since we already wrote it as the first line
-            if (std.mem.eql(u8, key, HDR_STATUS)) continue;
+            // Skip the Status and Description headers since we already wrote them in the status line
+            if (std.mem.eql(u8, key, HDR_STATUS) or std.mem.eql(u8, key, HDR_DESCRIPTION)) continue;
 
             for (values.items) |value| {
                 try writer.print("{s}: {s}\r\n", .{ key, value });

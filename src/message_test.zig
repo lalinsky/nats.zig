@@ -180,10 +180,15 @@ test "Message status field and header parsing" {
     // Status field should be set
     try testing.expectEqual(@as(u16, 503), msg.status_code);
 
-    // Full status line should be in Status header
+    // Status header should contain just the status code
     const status_header = msg.headerGet("Status");
     try testing.expect(status_header != null);
-    try testing.expectEqualStrings("NATS/1.0 503 No Responders", status_header.?);
+    try testing.expectEqualStrings("503", status_header.?);
+
+    // Description header should contain the description text
+    const description_header = msg.headerGet("Description");
+    try testing.expect(description_header != null);
+    try testing.expectEqualStrings("No Responders", description_header.?);
 
     // Other headers should still be parsed
     const custom_header = msg.headerGet("X-Custom");
@@ -202,8 +207,9 @@ test "Message status field and header parsing" {
     // Should contain other headers
     try testing.expect(std.mem.indexOf(u8, buf.items, "X-Custom: test\r\n") != null);
 
-    // Should NOT contain Status as a regular header
-    try testing.expect(std.mem.indexOf(u8, buf.items, "Status: NATS/1.0 503 No Responders\r\n") == null);
+    // Should NOT contain Status or Description as regular headers
+    try testing.expect(std.mem.indexOf(u8, buf.items, "Status: 503\r\n") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "Description: No Responders\r\n") == null);
 }
 
 test "Message memory patterns" {
