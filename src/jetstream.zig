@@ -920,7 +920,7 @@ pub const JetStream = struct {
 
         // Parse the response to extract the message
         const parsed_resp = try self.parseResponse(GetMsgResponse, resp);
-        errdefer parsed_resp.deinit();
+        defer parsed_resp.deinit();
 
         const stored_msg = parsed_resp.value.message;
 
@@ -953,9 +953,6 @@ pub const JetStream = struct {
             try decoder.decode(decoded_headers, hdrs_b64);
             try msg.setRawHeaders(decoded_headers, false);
         }
-
-        // Clean up parsed response
-        parsed_resp.deinit();
 
         return msg;
     }
@@ -1281,13 +1278,13 @@ pub const JetStream = struct {
             try msg.headerSet(ExpectedStreamHdr, stream);
         }
         if (options.expected_last_seq) |seq| {
-            const seq_str = try std.fmt.allocPrint(self.allocator, "{d}", .{seq});
-            defer self.allocator.free(seq_str);
+            var buf: [256]u8 = undefined;
+            const seq_str = try std.fmt.bufPrint(&buf, "{d}", .{seq});
             try msg.headerSet(ExpectedLastSeqHdr, seq_str);
         }
         if (options.expected_last_subject_seq) |seq| {
-            const seq_str = try std.fmt.allocPrint(self.allocator, "{d}", .{seq});
-            defer self.allocator.free(seq_str);
+            var buf: [256]u8 = undefined;
+            const seq_str = try std.fmt.bufPrint(&buf, "{d}", .{seq});
             try msg.headerSet(ExpectedLastSubjSeqHdr, seq_str);
         }
         if (options.expected_last_subject_seq_subject) |subject| {
@@ -1297,8 +1294,8 @@ pub const JetStream = struct {
             try msg.headerSet(ExpectedLastMsgIdHdr, id);
         }
         if (options.msg_ttl) |ttl| {
-            const ttl_str = try std.fmt.allocPrint(self.allocator, "{d}ns", .{ttl});
-            defer self.allocator.free(ttl_str);
+            var buf: [256]u8 = undefined;
+            const ttl_str = try std.fmt.bufPrint(&buf, "{d}ns", .{ttl});
             try msg.headerSet(MsgTTLHdr, ttl_str);
         }
 
