@@ -470,7 +470,10 @@ pub const KVManager = struct {
             .max_age = config.ttl,
             .max_msg_size = config.max_value_size,
             .max_bytes = config.max_bytes,
-            .storage = @enumFromInt(@intFromEnum(config.storage)),
+            .storage = switch (config.storage) {
+                .file => .file,
+                .memory => .memory,
+            },
             .compression = if (config.compression) .s2 else .none,
             .num_replicas = config.replicas,
             .discard = .new,
