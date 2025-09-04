@@ -217,6 +217,7 @@ pub const Parser = struct {
                     }
 
                     if (needed == 0) {
+                        try msg.parseHeaders(); // Parse headers before processing message
                         self.ma.msg = null; // transfer ownership
                         try conn.processMsg(msg);
                         self.state = .MSG_END;
@@ -562,9 +563,6 @@ pub const Parser = struct {
         // pre-allocate full payload buffer
         var payload_buffer = try allocator.alloc(u8, total_len);
 
-        if (hdr_len > 0) {
-            msg.needs_header_parsing = true;
-        }
         msg.raw_headers = payload_buffer[0..hdr_len];
         msg.data = payload_buffer[hdr_len..];
 
@@ -779,7 +777,7 @@ test "parser split hmsg" {
         if (capture.last_msg) |msg| {
             try std.testing.expectEqualStrings("foo", msg.subject);
             try std.testing.expectEqualStrings("hello", msg.data);
-            try std.testing.expectEqualStrings("Bar", try msg.headerGet("Foo") orelse "");
+            try std.testing.expectEqualStrings("Bar", msg.headerGet("Foo") orelse "");
         } else {
             try std.testing.expect(false);
         }

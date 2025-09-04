@@ -33,11 +33,11 @@ test "publish and receive message with headers" {
     try std.testing.expectEqualStrings("Hello with headers!", received_msg.data);
 
     // Verify headers
-    const test_key_value = try received_msg.headerGet("X-Test-Key");
+    const test_key_value = received_msg.headerGet("X-Test-Key");
     try std.testing.expect(test_key_value != null);
     try std.testing.expectEqualStrings("test-value", test_key_value.?);
 
-    const another_key_value = try received_msg.headerGet("X-Another-Key");
+    const another_key_value = received_msg.headerGet("X-Another-Key");
     try std.testing.expect(another_key_value != null);
     try std.testing.expectEqualStrings("another-value", another_key_value.?);
 
@@ -83,25 +83,25 @@ test "header manipulation API" {
     try msg.headerSet("X-Custom-Header", "custom-value");
 
     // Get headers
-    const content_type = try msg.headerGet("Content-Type");
+    const content_type = msg.headerGet("Content-Type");
     try std.testing.expect(content_type != null);
     try std.testing.expectEqualStrings("application/json", content_type.?);
 
-    const custom_header = try msg.headerGet("X-Custom-Header");
+    const custom_header = msg.headerGet("X-Custom-Header");
     try std.testing.expect(custom_header != null);
     try std.testing.expectEqualStrings("custom-value", custom_header.?);
 
     // Test non-existent header
-    const non_existent = try msg.headerGet("Non-Existent-Header");
+    const non_existent = msg.headerGet("Non-Existent-Header");
     try std.testing.expect(non_existent == null);
 
     // Delete a header
-    try msg.headerDelete("X-Custom-Header");
-    const deleted_header = try msg.headerGet("X-Custom-Header");
+    msg.headerDelete("X-Custom-Header");
+    const deleted_header = msg.headerGet("X-Custom-Header");
     try std.testing.expect(deleted_header == null);
 
     // Content-Type should still exist
-    const still_exists = try msg.headerGet("Content-Type");
+    const still_exists = msg.headerGet("Content-Type");
     try std.testing.expect(still_exists != null);
     try std.testing.expectEqualStrings("application/json", still_exists.?);
 
@@ -139,11 +139,11 @@ test "message with reply and headers" {
     try std.testing.expectEqualStrings("Request with headers", received_msg.data);
 
     // Verify headers
-    const request_id = try received_msg.headerGet("Request-ID");
+    const request_id = received_msg.headerGet("Request-ID");
     try std.testing.expect(request_id != null);
     try std.testing.expectEqualStrings("12345", request_id.?);
 
-    const content_type = try received_msg.headerGet("Content-Type");
+    const content_type = received_msg.headerGet("Content-Type");
     try std.testing.expect(content_type != null);
     try std.testing.expectEqualStrings("text/plain", content_type.?);
 
