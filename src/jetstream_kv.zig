@@ -92,14 +92,20 @@ pub const KVEntry = struct {
     key: []const u8,
     /// Value data
     value: []const u8,
-    /// Creation timestamp (RFC3339 format)
-    created: []const u8,
+    /// Creation timestamp as integer
+    created: u64,
     /// Unique revision number
     revision: u64,
     /// Distance from latest (0=latest, 1=previous, etc.)
     delta: u64,
     /// Operation type
     operation: KVOperation,
+    /// Underlying message (owns the data)
+    msg: *Message,
+
+    pub fn deinit(self: *KVEntry) void {
+        self.msg.deinit();
+    }
 };
 
 /// KV Status provides information about a KV bucket
@@ -260,39 +266,23 @@ pub const KV = struct {
     }
 
     /// Parse a KV entry from a stored message
-    fn parseEntry(self: *KV, stored_msg_result: *const Result(StoredMessage), key: []const u8, delta: u64) !Result(KVEntry) {
-        const stored_msg = stored_msg_result.value;
-
-        // Determine operation from headers  
+    fn parseEntry(self: *KV, stored_msg: *Message, key: []const u8, delta: u64) !KVEntry {
+        // Determine operation from parsed headers  
         var operation = KVOperation.PUT;
-        if (stored_msg.hdrs) |headers| {
-            // Simple header parsing - look for KV-Operation header
-            var lines = std.mem.splitSequence(u8, headers, "\r\n");
-            while (lines.next()) |line| {
-                if (std.mem.startsWith(u8, line, KvOperationHdr ++ ": ")) {
-                    const op_value = line[KvOperationHdr.len + 2..];
-                    operation = KVOperation.fromString(op_value) orelse .PUT;
-                    break;
-                }
-                // TODO: Handle NatsMarkerReasonHdr for TTL deletions
-            }
+        if (stored_msg.headerGet(KvOperationHdr)) |op_value| {
+            operation = KVOperation.fromString(op_value) orelse .PUT;
         }
 
-        const entry_value = KVEntry{
+        return KVEntry{
             .bucket = self.bucket_name,
             .key = key,
             .value = stored_msg.data,
-            .created = stored_msg.time,
+            .created = stored_msg.seq, // Use sequence as timestamp for now
             .revision = stored_msg.seq,
             .delta = delta,
             .operation = operation,
+            .msg = stored_msg,
         };
-
-        const result: Result(KVEntry) = .{
-            .arena = stored_msg_result.arena,
-            .value = entry_value,
-        };
-        return result;
     }
 
     /// Put a value into a key
@@ -349,16 +339,16 @@ pub const KV = struct {
     }
 
     /// Get the latest value for a key
-    pub fn get(self: *KV, key: []const u8) !Result(KVEntry) {
+    pub fn get(self: *KV, key: []const u8) !KVEntry {
         const subject = try self.getKeySubject(key);
         defer self.allocator.free(subject);
 
-        const stored_msg = self.js.getLastMsg(self.stream_name, subject) catch |err| {
-            return if (err == error.JetStreamError) KVError.KeyNotFound else err;
+        const stored_msg = self.js.getMsg(self.stream_name, .{ .last_by_subj = subject, .direct = true }) catch |err| {
+            return if (err == error.MessageNotFound) KVError.KeyNotFound else err;
         };
         errdefer stored_msg.deinit();
 
-        return try self.parseEntry(&stored_msg, key, 0);
+        return try self.parseEntry(stored_msg, key, 0);
     }
 
     /// Delete a key (preserves history)
