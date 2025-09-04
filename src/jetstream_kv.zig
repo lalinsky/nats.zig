@@ -475,10 +475,10 @@ pub const KVManager = struct {
             .num_replicas = config.replicas,
             .discard = .new,
             .duplicate_window = duplicate_window,
+            .allow_direct = true,
             // KV-specific stream settings (these would need to be added to StreamConfig)
             // .rollup_hdrs = true,
             // .deny_delete = true,
-            // .allow_direct = true,
             // .allow_msg_ttl = config.limit_marker_ttl > 0,
             // .subject_delete_marker_ttl = config.limit_marker_ttl,
         };
