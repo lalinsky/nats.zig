@@ -28,6 +28,7 @@ const Message = @import("message.zig").Message;
 const timestamp = @import("timestamp.zig");
 const inbox = @import("inbox.zig");
 const queue = @import("queue.zig");
+const nuid = @import("nuid.zig");
 
 const log = @import("log.zig").log;
 
@@ -218,6 +219,10 @@ pub const KVWatcher = struct {
             sub.deinit();
         }
 
+        // Note: Consumer deletion is disabled as it can cause timing issues
+        // The unique consumer names should prevent conflicts
+        // TODO: Consider proper consumer lifecycle management
+
         // Clean up deliver subject if exists
         if (self.deliver_subject) |subject| {
             self.allocator.free(subject);
@@ -374,6 +379,16 @@ pub const KV = struct {
         var operation = KVOperation.PUT;
         if (stored_msg.headerGet(KvOperationHdr)) |op_value| {
             operation = KVOperation.fromString(op_value) orelse .PUT;
+        }
+
+        // Map TTL marker reasons to KV operations
+        if (stored_msg.headerGet(NatsMarkerReasonHdr)) |marker_reason| {
+            if (MarkerReason.fromString(marker_reason)) |reason| {
+                operation = switch (reason) {
+                    .MaxAge, .Purge => .PURGE,
+                    .Remove => .DEL,
+                };
+            }
         }
 
         // Parse timestamp from Nats-Time-Stamp header, fallback to 0 if not present
@@ -575,9 +590,9 @@ pub const KV = struct {
         // Generate deliver subject for push consumer
         const deliver_subject = try inbox.newInbox(self.allocator);
 
-        // Configure consumer based on watch options
+        // Configure consumer based on watch options (use true ephemeral consumers)
         var consumer_config = ConsumerConfig{
-            .name = null, // Ephemeral consumer
+            .name = null, // Truly ephemeral consumer - server generates unique name
             .description = "KV watcher",
             .deliver_subject = deliver_subject,
             .deliver_policy = if (options.include_history) .all else .last_per_subject,
@@ -597,7 +612,7 @@ pub const KV = struct {
             consumer_config.deliver_policy = .new;
         }
 
-        // Store deliver_subject in watcher first for cleanup
+        // Store cleanup info in watcher
         watcher.deliver_subject = deliver_subject;
 
         // Use async push subscription with handler
@@ -623,8 +638,8 @@ pub const KV = struct {
         const key = js_msg.msg.subject[kv.subject_prefix.len..];
 
         // Parse the JetStream message into a KVEntry
-        // Extract the Message pointer without calling deinit on js_msg
-        var entry = kv.parseJetStreamEntryAsync(js_msg.msg, key, 0) catch {
+        // Extract Message pointer without calling js_msg.deinit() - let it go out of scope
+        var entry = kv.parseJetStreamEntryFromHandler(js_msg, key, 0) catch {
             // Failed to parse, skip
             return;
         };
@@ -684,6 +699,48 @@ pub const KV = struct {
     }
 
     /// Parse a Message (from async handler) into a KVEntry
+    /// Parse a JetStream message from async handler (extracts Message pointer without calling js_msg.deinit)
+    fn parseJetStreamEntryFromHandler(self: *KV, js_msg: *JetStreamMessage, key: []const u8, delta: u64) !KVEntry {
+        const msg = js_msg.msg;
+
+        // Determine operation from parsed headers
+        var operation = KVOperation.PUT;
+        if (msg.headerGet(KvOperationHdr)) |op_value| {
+            operation = KVOperation.fromString(op_value) orelse .PUT;
+        }
+
+        // Check for marker reason header
+        if (msg.headerGet(NatsMarkerReasonHdr)) |marker_reason| {
+            if (MarkerReason.fromString(marker_reason)) |reason| {
+                // Convert marker reasons to operations per ADR-8
+                operation = switch (reason) {
+                    .MaxAge, .Purge => .PURGE,
+                    .Remove => .DEL,
+                };
+            }
+        }
+
+        // Parse timestamp from Nats-Time-Stamp header, fallback to 0 if not present
+        var created: u64 = 0;
+        if (msg.headerGet("Nats-Time-Stamp")) |timestamp_str| {
+            created = timestamp.parseTimestamp(timestamp_str) catch 0;
+        }
+
+        // Extract sequence from JetStreamMessage metadata
+        const revision = js_msg.metadata.sequence.stream orelse 0;
+
+        return KVEntry{
+            .bucket = self.bucket_name,
+            .key = key,
+            .value = msg.data,
+            .created = created,
+            .revision = revision,
+            .delta = delta,
+            .operation = operation,
+            .msg = msg,
+        };
+    }
+
     fn parseJetStreamEntryAsync(self: *KV, msg: *Message, key: []const u8, delta: u64) !KVEntry {
         // Determine operation from parsed headers
         var operation = KVOperation.PUT;
@@ -950,6 +1007,7 @@ pub const KVManager = struct {
             // KV-specific stream settings required by ADR-8
             .allow_rollup_hdrs = true,
             .deny_delete = true,
+            .subject_delete_marker_ttl = if (config.limit_marker_ttl == 0) null else config.limit_marker_ttl,
         };
 
         const result = try self.js.addStream(stream_config);
