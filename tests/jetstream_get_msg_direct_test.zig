@@ -179,8 +179,8 @@ test "get message with headers using direct API" {
     var msg = try conn.newMsg();
     defer msg.deinit();
 
-    try msg.setSubject(subject);
-    try msg.setPayload("Direct message with headers");
+    try msg.setSubject(subject, true);
+    try msg.setPayload("Direct message with headers", true);
     try msg.headerSet("X-Direct-Header", "direct-value");
     try msg.headerSet("X-Test-Mode", "direct");
 
