@@ -265,6 +265,19 @@ pub const KV = struct {
         return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.subject_prefix, key });
     }
 
+    /// Get the raw entry (including delete/purge markers) for internal use
+    fn getRawEntry(self: *KV, key: []const u8) !KVEntry {
+        const subject = try self.getKeySubject(key);
+        defer self.allocator.free(subject);
+
+        const stored_msg = self.js.getMsg(self.stream_name, .{ .last_by_subj = subject, .direct = true }) catch |err| {
+            return if (err == error.MessageNotFound) KVError.KeyNotFound else err;
+        };
+        errdefer stored_msg.deinit();
+
+        return try self.parseEntry(stored_msg, key, 0);
+    }
+
     /// Parse a KV entry from a stored message
     fn parseEntry(self: *KV, stored_msg: *Message, key: []const u8, delta: u64) !KVEntry {
         // Determine operation from parsed headers
@@ -321,7 +334,7 @@ pub const KV = struct {
             if (err != error.StreamWrongLastSequence) return err;
 
             // Per ADR-8: if failed with StreamWrongLastSequence, check if latest value is delete/purge
-            var entry = self.get(key) catch |get_err| {
+            var entry = self.getRawEntry(key) catch |get_err| {
                 // This shouldn't happen since we got StreamWrongLastSequence but couldn't get the key
                 // Return the original error
                 return if (get_err == KVError.KeyNotFound) err else get_err;
@@ -359,15 +372,15 @@ pub const KV = struct {
 
     /// Get the latest value for a key
     pub fn get(self: *KV, key: []const u8) !KVEntry {
-        const subject = try self.getKeySubject(key);
-        defer self.allocator.free(subject);
+        var entry = try self.getRawEntry(key);
+        
+        // Per ADR-8: deleted data should return "key not found" error in basic gets
+        if (entry.operation == .DEL or entry.operation == .PURGE) {
+            entry.deinit();
+            return KVError.KeyNotFound;
+        }
 
-        const stored_msg = self.js.getMsg(self.stream_name, .{ .last_by_subj = subject, .direct = true }) catch |err| {
-            return if (err == error.MessageNotFound) KVError.KeyNotFound else err;
-        };
-        errdefer stored_msg.deinit();
-
-        return try self.parseEntry(stored_msg, key, 0);
+        return entry;
     }
 
     /// Delete a key (preserves history)

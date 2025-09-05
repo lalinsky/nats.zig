@@ -153,11 +153,8 @@ test "KV delete operation" {
     // Delete the key
     try kv.delete(key);
 
-    // Try to get deleted key - should return delete marker
-    entry = try kv.get(key);
-    defer entry.deinit();
-    try testing.expect(entry.operation == .DEL);
-    try testing.expectEqualStrings("", entry.value); // Delete markers have empty value
+    // Try to get deleted key - should return KeyNotFound per ADR-8
+    try testing.expectError(nats.KVError.KeyNotFound, kv.get(key));
 
     // Create should work on deleted key
     _ = try kv.create(key, "new-value", .{});
@@ -198,11 +195,8 @@ test "KV purge operation" {
     // Purge the key
     try kv.purge(key, .{});
 
-    // Try to get purged key - should return purge marker
-    entry = try kv.get(key);
-    defer entry.deinit();
-    try testing.expect(entry.operation == .PURGE);
-    try testing.expectEqualStrings("", entry.value); // Purge markers have empty value
+    // Try to get purged key - should return KeyNotFound per ADR-8
+    try testing.expectError(nats.KVError.KeyNotFound, kv.get(key));
 }
 
 test "KV status operation" {
