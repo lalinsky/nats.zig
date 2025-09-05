@@ -195,7 +195,7 @@ test "reconnect() errors when disabled" {
 test "reconnect() errors when connection closed" {
     const nc = try utils.createConnection(.node1, .{});
     defer utils.closeConnection(nc);
-    
+
     nc.close();
 
     try testing.expectError(error.ConnectionClosed, nc.reconnect());

@@ -471,6 +471,8 @@ pub const Connection = struct {
     /// - Testing reconnection behavior
     /// Returns error if reconnection cannot be initiated
     pub fn reconnect(self: *Self) !void {
+        var needs_close = false;
+        defer if (needs_close) self.close();
         var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
         defer if (callback) |cb| cb(self);
 
@@ -515,7 +517,8 @@ pub const Connection = struct {
         if (self.reconnect_thread == null) {
             self.reconnect_thread = std.Thread.spawn(.{}, doReconnectThread, .{self}) catch |spawn_err| {
                 log.err("Failed to spawn reconnect thread: {}", .{spawn_err});
-                self.status = .closed;
+                // Fall back to closing connection
+                needs_close = true;
                 return spawn_err;
             };
         }
