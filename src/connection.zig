@@ -109,6 +109,10 @@ pub const ConnectionError = error{
     InvalidProtocol,
     OutOfMemory,
     NoResponders,
+    ReconnectDisabled,
+    AlreadyReconnecting,
+    NotConnected,
+    ManualReconnect,
 } || PublishError || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
 
 pub const ConnectionStatus = enum {
@@ -458,6 +462,71 @@ pub const Connection = struct {
     pub fn isConnecting(self: *Self) bool {
         const status = self.getStatus();
         return status == .connecting or status == .reconnecting;
+    }
+
+    /// Force a reconnection to the NATS server
+    /// This allows users to manually trigger reconnection for scenarios like:
+    /// - Refreshing authentication credentials
+    /// - Rebalancing client connections
+    /// - Testing reconnection behavior
+    /// Returns error if reconnection cannot be initiated
+    pub fn reconnect(self: *Self) !void {
+        var needs_close = false;
+        defer if (needs_close) self.close();
+        var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
+        defer if (callback) |cb| cb(self);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Check if reconnection is allowed
+        if (!self.options.reconnect.allow_reconnect) {
+            log.warn("Manual reconnect requested but reconnection is disabled", .{});
+            return ConnectionError.ReconnectDisabled;
+        }
+
+        // Check current status
+        switch (self.status) {
+            .reconnecting => {
+                log.info("Already reconnecting, ignoring manual reconnect request", .{});
+                return ConnectionError.AlreadyReconnecting;
+            },
+            .closed => {
+                log.warn("Cannot reconnect: connection is closed", .{});
+                return ConnectionError.ConnectionClosed;
+            },
+            .connecting => {
+                log.warn("Cannot reconnect: initial connection not yet established", .{});
+                return ConnectionError.NotConnected;
+            },
+            .connected => {
+                // OK to proceed
+            },
+        }
+
+        log.info("Manual reconnection requested", .{});
+
+        // Use a synthetic error to trigger the reconnection
+        const synthetic_error = ConnectionError.ManualReconnect;
+
+        // Perform connection cleanup (don't close socket - let reconnect handle it)
+        self.status = .reconnecting;
+        self.cleanupFailedConnection(synthetic_error, false);
+
+        // Spawn reconnect thread if not already running
+        if (self.reconnect_thread == null) {
+            self.reconnect_thread = std.Thread.spawn(.{}, doReconnectThread, .{self}) catch |spawn_err| {
+                log.err("Failed to spawn reconnect thread: {}", .{spawn_err});
+                // Fall back to closing connection
+                needs_close = true;
+                return spawn_err;
+            };
+        }
+
+        // Invoke disconnected callback
+        if (self.options.callbacks.disconnected_cb) |cb| {
+            callback = cb;
+        }
     }
 
     /// Publishes data on a subject.
