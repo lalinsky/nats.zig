@@ -176,7 +176,7 @@ test "KV watch basic functionality" {
     _ = try kv.put(key, "initial", .{});
     
     // Start watching
-    var watcher = try kv.watch(key, .{});
+    const watcher = try kv.watch(key, .{});
     defer watcher.deinit();
     
     // Should get initial value (with timeout)

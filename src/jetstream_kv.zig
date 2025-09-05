@@ -192,6 +192,8 @@ pub const KVWatcher = struct {
     watch_error: ?anyerror,
     /// Allocator for cleanup
     allocator: std.mem.Allocator,
+    /// Whether this watcher should destroy itself in deinit
+    destroy_on_deinit: bool,
 
     const Self = @This();
 
@@ -203,6 +205,7 @@ pub const KVWatcher = struct {
             .deliver_subject = null,
             .watch_error = null,
             .allocator = allocator,
+            .destroy_on_deinit = false,
         };
     }
 
@@ -227,6 +230,18 @@ pub const KVWatcher = struct {
         if (self.deliver_subject) |subject| {
             self.allocator.free(subject);
         }
+
+        // Self-destroy if heap-allocated
+        if (self.destroy_on_deinit) {
+            const allocator = self.allocator;
+            allocator.destroy(self);
+        }
+    }
+
+    /// Destroy heap-allocated watcher (convenience method)
+    pub fn destroy(self: *KVWatcher, allocator: std.mem.Allocator) void {
+        self.deinit();
+        allocator.destroy(self);
     }
 
     /// Get the next entry from the watcher (returns error.Timeout if no entry available)
@@ -565,7 +580,7 @@ pub const KV = struct {
     }
 
     /// Watch a key or key pattern for updates
-    pub fn watch(self: *KV, key: []const u8, options: WatchOptions) !KVWatcher {
+    pub fn watch(self: *KV, key: []const u8, options: WatchOptions) !*KVWatcher {
         try validateKey(key);
 
         const subject = try self.getKeySubject(key);
@@ -575,28 +590,31 @@ pub const KV = struct {
     }
 
     /// Watch all keys in the bucket
-    pub fn watchAll(self: *KV, options: WatchOptions) !KVWatcher {
-        const all_subject = try std.fmt.allocPrint(self.allocator, "{s}*", .{self.subject_prefix});
+    pub fn watchAll(self: *KV, options: WatchOptions) !*KVWatcher {
+        const all_subject = try std.fmt.allocPrint(self.allocator, "{s}>", .{self.subject_prefix});
         defer self.allocator.free(all_subject);
 
         return try self.watchFiltered(&.{all_subject}, options);
     }
 
     /// Internal method to watch filtered subjects
-    fn watchFiltered(self: *KV, subjects: []const []const u8, options: WatchOptions) !KVWatcher {
-        var watcher = KVWatcher.init(self.allocator);
-        errdefer watcher.deinit();
+    fn watchFiltered(self: *KV, subjects: []const []const u8, options: WatchOptions) !*KVWatcher {
+        const watcher = try self.allocator.create(KVWatcher);
+        watcher.* = KVWatcher.init(self.allocator);
+        watcher.destroy_on_deinit = true;
+        errdefer watcher.deinit(); // This will now self-destroy
 
-        // Generate deliver subject for push consumer
-        const deliver_subject = try inbox.newInbox(self.allocator);
+        // Generate deliver subject for push consumer and assign directly to watcher
+        watcher.deliver_subject = try inbox.newInbox(self.allocator);
 
         // Configure consumer based on watch options (use true ephemeral consumers)
         var consumer_config = ConsumerConfig{
             .name = null, // Truly ephemeral consumer - server generates unique name
             .description = "KV watcher",
-            .deliver_subject = deliver_subject,
+            .deliver_subject = watcher.deliver_subject.?, // Reference only, watcher owns the memory
             .deliver_policy = if (options.include_history) .all else .last_per_subject,
             .ack_policy = .none,
+            .max_ack_pending = 0, // Disable ack pending to allow ack_policy = .none
             .headers_only = if (options.meta_only) true else null,
         };
 
@@ -612,14 +630,8 @@ pub const KV = struct {
             consumer_config.deliver_policy = .new;
         }
 
-        // Store cleanup info in watcher
-        watcher.deliver_subject = deliver_subject;
-
         // Use async push subscription with handler
-        const subscription = self.js.subscribe(self.stream_name, consumer_config, kvWatchHandler, .{ self, &watcher, options }) catch |err| {
-            watcher.deinit();
-            return err;
-        };
+        const subscription = try self.js.subscribe(self.stream_name, consumer_config, kvWatchHandler, .{ self, watcher, options });
 
         watcher.subscription = subscription;
 
@@ -745,7 +757,7 @@ pub const KV = struct {
 
     /// Get historical values for a key
     pub fn history(self: *KV, key: []const u8) ![]KVEntry {
-        var watcher = try self.watch(key, .{ .include_history = true });
+        const watcher = try self.watch(key, .{ .include_history = true });
         defer watcher.deinit();
 
         var entries = std.ArrayList(KVEntry).init(self.allocator);
@@ -782,7 +794,7 @@ pub const KV = struct {
 
     /// Get all keys in the bucket
     pub fn keys(self: *KV) !Result([][]const u8) {
-        var watcher = try self.watchAll(.{ .ignore_deletes = true, .meta_only = true });
+        const watcher = try self.watchAll(.{ .ignore_deletes = true, .meta_only = true });
         defer watcher.deinit();
 
         const arena = try self.allocator.create(std.heap.ArenaAllocator);
@@ -853,7 +865,7 @@ pub const KV = struct {
         }
 
         // Use watchFiltered with constructed subjects
-        var watcher = try self.watchFiltered(filter_subjects.items, .{ .ignore_deletes = true, .meta_only = true });
+        const watcher = try self.watchFiltered(filter_subjects.items, .{ .ignore_deletes = true, .meta_only = true });
         defer watcher.deinit();
 
         const arena = try self.allocator.create(std.heap.ArenaAllocator);
