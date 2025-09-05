@@ -36,6 +36,14 @@ pub fn parseTimestamp(timestamp_str: []const u8) !u64 {
     if (timestamp_str[16] != ':') return error.InvalidTimestamp;
     const second = try std.fmt.parseInt(u8, timestamp_str[17..19], 10);
 
+    // Validate ranges
+    if (year < 1970) return error.InvalidTimestamp;
+    if (month < 1 or month > 12) return error.InvalidTimestamp;
+    if (day < 1 or day > daysInMonth(year, month)) return error.InvalidTimestamp;
+    if (hour > 23) return error.InvalidTimestamp;
+    if (minute > 59) return error.InvalidTimestamp;
+    if (second > 59) return error.InvalidTimestamp;
+
     // Parse nanoseconds if present
     var nanoseconds: u32 = 0;
     if (timestamp_str.len > 20 and timestamp_str[19] == '.') {
@@ -62,8 +70,9 @@ pub fn parseTimestamp(timestamp_str: []const u8) !u64 {
 
 /// Helper function to calculate days since Unix epoch (1970-01-01)
 fn daysSinceEpoch(year: u16, month: u8, day: u8) u64 {
-    // Days in each month (non-leap year)
-    const days_in_month = [_]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    // Defensive assertions to catch logic errors
+    std.debug.assert(month >= 1 and month <= 12);
+    std.debug.assert(day >= 1 and day <= daysInMonth(year, month));
 
     var days: u64 = 0;
 
@@ -78,13 +87,8 @@ fn daysSinceEpoch(year: u16, month: u8, day: u8) u64 {
     }
 
     // Add days for complete months in the current year
-    var m: u8 = 1;
-    while (m < month) : (m += 1) {
-        days += days_in_month[m - 1];
-        // Add extra day for February in leap years
-        if (m == 2 and isLeapYear(year)) {
-            days += 1;
-        }
+    for (1..month) |m| {
+        days += daysInMonth(year, @intCast(m));
     }
 
     // Add remaining days
@@ -96,6 +100,15 @@ fn daysSinceEpoch(year: u16, month: u8, day: u8) u64 {
 /// Helper function to determine if a year is a leap year
 fn isLeapYear(year: u16) bool {
     return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0);
+}
+
+/// Helper function to get the number of days in a given month for a given year
+fn daysInMonth(year: u16, month: u8) u8 {
+    const days_in_month = [_]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (month == 2 and isLeapYear(year)) {
+        return 29;
+    }
+    return days_in_month[month - 1];
 }
 
 // Unit tests
