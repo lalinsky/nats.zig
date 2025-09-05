@@ -21,6 +21,7 @@ const PublishOptions = @import("jetstream.zig").PublishOptions;
 const Result = @import("jetstream.zig").Result;
 const StoredMessage = @import("jetstream.zig").StoredMessage;
 const Message = @import("message.zig").Message;
+const timestamp = @import("timestamp.zig");
 
 const log = @import("log.zig").log;
 
@@ -286,11 +287,17 @@ pub const KV = struct {
             operation = KVOperation.fromString(op_value) orelse .PUT;
         }
 
+        // Parse timestamp from Nats-Time-Stamp header, fallback to 0 if not present
+        var created: u64 = 0;
+        if (stored_msg.headerGet("Nats-Time-Stamp")) |timestamp_str| {
+            created = timestamp.parseTimestamp(timestamp_str) catch 0;
+        }
+
         return KVEntry{
             .bucket = self.bucket_name,
             .key = key,
             .value = stored_msg.data,
-            .created = stored_msg.seq, // Use sequence as timestamp for now
+            .created = created,
             .revision = stored_msg.seq,
             .delta = delta,
             .operation = operation,
