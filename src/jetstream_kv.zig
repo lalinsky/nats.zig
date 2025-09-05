@@ -639,7 +639,7 @@ pub const KV = struct {
 
         // Parse the JetStream message into a KVEntry
         // Extract Message pointer without calling js_msg.deinit() - let it go out of scope
-        var entry = kv.parseJetStreamEntryFromHandler(js_msg, key, 0) catch {
+        var entry = kv.parseJetStreamEntry(js_msg, key, 0) catch {
             // Failed to parse, skip
             return;
         };
@@ -659,48 +659,8 @@ pub const KV = struct {
     }
 
     /// Parse a JetStream message into a KVEntry
+    /// Extracts Message pointer without calling js_msg.deinit() since we reference memory inside the message
     fn parseJetStreamEntry(self: *KV, js_msg: *JetStreamMessage, key: []const u8, delta: u64) !KVEntry {
-        // Convert JetStreamMessage to regular Message for parseEntry
-        const msg = js_msg.msg;
-
-        // Determine operation from parsed headers
-        var operation = KVOperation.PUT;
-        if (msg.headerGet(KvOperationHdr)) |op_value| {
-            operation = KVOperation.fromString(op_value) orelse .PUT;
-        }
-
-        // Check for marker reason header
-        if (msg.headerGet(NatsMarkerReasonHdr)) |marker_reason| {
-            if (MarkerReason.fromString(marker_reason)) |reason| {
-                // Convert marker reasons to operations per ADR-8
-                operation = switch (reason) {
-                    .MaxAge, .Purge => .PURGE,
-                    .Remove => .DEL,
-                };
-            }
-        }
-
-        // Parse timestamp from Nats-Time-Stamp header, fallback to 0 if not present
-        var created: u64 = 0;
-        if (msg.headerGet("Nats-Time-Stamp")) |timestamp_str| {
-            created = timestamp.parseTimestamp(timestamp_str) catch 0;
-        }
-
-        return KVEntry{
-            .bucket = self.bucket_name,
-            .key = key,
-            .value = msg.data,
-            .created = created,
-            .revision = js_msg.metadata.sequence.stream orelse 0,
-            .delta = delta,
-            .operation = operation,
-            .msg = msg,
-        };
-    }
-
-    /// Parse a Message (from async handler) into a KVEntry
-    /// Parse a JetStream message from async handler (extracts Message pointer without calling js_msg.deinit)
-    fn parseJetStreamEntryFromHandler(self: *KV, js_msg: *JetStreamMessage, key: []const u8, delta: u64) !KVEntry {
         const msg = js_msg.msg;
 
         // Determine operation from parsed headers
