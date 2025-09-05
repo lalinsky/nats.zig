@@ -161,6 +161,10 @@ pub const StreamConfig = struct {
     duplicate_window: u64 = 0,
     /// Allow direct get on any replica instead of just the leader
     allow_direct: ?bool = null,
+    /// Allows the use of the Nats-Rollup header to replace all contents of a stream, or subject in a stream, with a single new message
+    allow_rollup_hdrs: ?bool = null,
+    /// Whether to allow delete operations on individual messages
+    deny_delete: ?bool = null,
 };
 
 /// Response from $JS.API.STREAM.NAMES

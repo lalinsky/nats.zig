@@ -306,19 +306,38 @@ pub const KV = struct {
         const subject = try self.getKeySubject(key);
         defer self.allocator.free(subject);
 
+        // First try: attempt with expected_last_subject_seq = 0
         var publish_opts = PublishOptions{
-            .expected_last_subject_seq = 0, // Only succeed if first message
+            .expected_last_subject_seq = 0,
         };
         if (options.ttl) |ttl| {
             publish_opts.msg_ttl = ttl;
         }
 
-        const result = self.js.publish(subject, value, publish_opts) catch |err| {
-            return if (err == error.JetStreamError) KVError.KeyExists else err;
-        };
-        defer result.deinit();
+        if (self.js.publish(subject, value, publish_opts)) |result| {
+            defer result.deinit();
+            return result.value.seq;
+        } else |err| {
+            if (err != error.StreamWrongLastSequence) return err;
 
-        return result.value.seq;
+            // Per ADR-8: if failed with StreamWrongLastSequence, check if latest value is delete/purge
+            var entry = self.get(key) catch |get_err| {
+                // This shouldn't happen since we got StreamWrongLastSequence but couldn't get the key
+                // Return the original error
+                return if (get_err == KVError.KeyNotFound) err else get_err;
+            };
+            defer entry.deinit();
+            if (entry.operation == .DEL or entry.operation == .PURGE) {
+                // Latest operation is delete/purge, retry with that revision as expected
+                publish_opts.expected_last_subject_seq = entry.revision;
+                const retry_result = try self.js.publish(subject, value, publish_opts);
+                defer retry_result.deinit();
+                return retry_result.value.seq;
+            } else {
+                // Key exists with a PUT operation
+                return KVError.KeyExists;
+            }
+        }
     }
 
     /// Update a key only if it has the expected revision
@@ -331,7 +350,7 @@ pub const KV = struct {
         };
 
         const result = self.js.publish(subject, value, publish_opts) catch |err| {
-            return if (err == error.JetStreamError) KVError.WrongLastRevision else err;
+            return if (err == error.StreamWrongLastSequence) KVError.WrongLastRevision else err;
         };
         defer result.deinit();
 
@@ -479,11 +498,9 @@ pub const KVManager = struct {
             .discard = .new,
             .duplicate_window = duplicate_window,
             .allow_direct = true,
-            // KV-specific stream settings (these would need to be added to StreamConfig)
-            // .rollup_hdrs = true,
-            // .deny_delete = true,
-            // .allow_msg_ttl = config.limit_marker_ttl > 0,
-            // .subject_delete_marker_ttl = config.limit_marker_ttl,
+            // KV-specific stream settings required by ADR-8
+            .allow_rollup_hdrs = true,
+            .deny_delete = true,
         };
 
         const result = try self.js.addStream(stream_config);

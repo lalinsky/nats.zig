@@ -26,7 +26,7 @@ test "KV basic create bucket" {
         .history = 5,
     };
 
-    const kv = try kv_manager.createBucket(config);
+    var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
 
     // Clean up
@@ -51,7 +51,7 @@ test "KV put and get operations" {
         .history = 1,
     };
 
-    const kv = try kv_manager.createBucket(config);
+    var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
     defer kv.destroy() catch {};
 
@@ -62,7 +62,7 @@ test "KV put and get operations" {
     try testing.expect(revision > 0);
 
     // Test get operation
-    const entry = try kv.get(key);
+    var entry = try kv.get(key);
     defer entry.deinit();
 
     try testing.expectEqualStrings(bucket_name, entry.bucket);
@@ -91,7 +91,7 @@ test "KV create and update operations" {
         .history = 3,
     };
 
-    const kv = try kv_manager.createBucket(config);
+    var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
     defer kv.destroy() catch {};
 
@@ -112,7 +112,7 @@ test "KV create and update operations" {
     try testing.expectError(nats.KVError.WrongLastRevision, kv.update(key, "value3", revision1));
 
     // Verify final value
-    const entry = try kv.get(key);
+    var entry = try kv.get(key);
     defer entry.deinit();
     try testing.expectEqualStrings("value2", entry.value);
     try testing.expect(entry.revision == revision2);
@@ -136,7 +136,7 @@ test "KV delete operation" {
         .history = 5,
     };
 
-    const kv = try kv_manager.createBucket(config);
+    var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
     defer kv.destroy() catch {};
 
@@ -181,7 +181,7 @@ test "KV purge operation" {
         .history = 5,
     };
 
-    const kv = try kv_manager.createBucket(config);
+    var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
     defer kv.destroy() catch {};
 
@@ -225,7 +225,7 @@ test "KV status operation" {
         .compression = true,
     };
 
-    const kv = try kv_manager.createBucket(config);
+    var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
     defer kv.destroy() catch {};
 
