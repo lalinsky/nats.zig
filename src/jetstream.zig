@@ -165,6 +165,8 @@ pub const StreamConfig = struct {
     allow_rollup_hdrs: ?bool = null,
     /// Whether to allow delete operations on individual messages
     deny_delete: ?bool = null,
+    /// TTL for delete markers when subject is deleted by TTL (nanoseconds)
+    subject_delete_marker_ttl: ?u64 = null,
 };
 
 /// Response from $JS.API.STREAM.NAMES

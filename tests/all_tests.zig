@@ -23,6 +23,7 @@ test {
     _ = @import("jetstream_large_list_test.zig");
     _ = @import("jetstream_kv_simple_test.zig");
     _ = @import("jetstream_kv_test.zig");
+    _ = @import("jetstream_kv_history_test.zig");
 }
 
 test "tests:beforeEach" {
