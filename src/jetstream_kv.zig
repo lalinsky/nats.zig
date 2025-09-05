@@ -27,6 +27,7 @@ const Subscription = @import("subscription.zig").Subscription;
 const Message = @import("message.zig").Message;
 const timestamp = @import("timestamp.zig");
 const inbox = @import("inbox.zig");
+const queue = @import("queue.zig");
 
 const log = @import("log.zig").log;
 
@@ -178,80 +179,59 @@ pub const WatchOptions = struct {
 
 /// Key-Value watcher for receiving live updates
 pub const KVWatcher = struct {
-    /// Channel for receiving KVEntry updates (null indicates end of initial data)
-    entries: std.ArrayList(?KVEntry),
-    /// Current read position
-    read_pos: usize,
+    /// Concurrent queue for receiving KVEntry updates
+    entry_queue: queue.ConcurrentQueue(KVEntry, 16),
     /// Whether initialization is complete
     init_done: std.atomic.Value(bool),
-    /// JetStream subscription handle (using sync push subscription for watching)
+    /// JetStream subscription handle (using async push subscription for watching)
     subscription: ?*JetStreamSubscription,
     /// Deliver subject for cleanup (owned by watcher)
     deliver_subject: ?[]u8,
-    /// Error that occurred during watching (if any)  
+    /// Error that occurred during watching (if any)
     watch_error: ?anyerror,
     /// Allocator for cleanup
     allocator: std.mem.Allocator,
-    /// Mutex for thread safety
-    mutex: std.Thread.Mutex,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator) KVWatcher {
         return KVWatcher{
-            .entries = std.ArrayList(?KVEntry).init(allocator),
-            .read_pos = 0,
+            .entry_queue = queue.ConcurrentQueue(KVEntry, 16).init(allocator, .{}),
             .init_done = std.atomic.Value(bool).init(false),
             .subscription = null,
             .deliver_subject = null,
             .watch_error = null,
             .allocator = allocator,
-            .mutex = std.Thread.Mutex{},
         };
     }
 
     pub fn deinit(self: *KVWatcher) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        
-        // Clean up all entries
-        for (self.entries.items) |*entry_opt| {
-            if (entry_opt.*) |*entry| {
-                entry.deinit();
-            }
+        // Clean up all entries remaining in queue
+        while (true) {
+            var entry = self.entry_queue.pop(0) catch break;
+            entry.deinit();
         }
-        self.entries.deinit();
-        
+        self.entry_queue.deinit();
+
         // Clean up subscription if exists
         if (self.subscription) |sub| {
             sub.deinit();
         }
-        
+
         // Clean up deliver subject if exists
         if (self.deliver_subject) |subject| {
             self.allocator.free(subject);
         }
     }
 
-    /// Get the next entry from the watcher (null indicates end of initial data)
-    pub fn next(self: *KVWatcher) ?KVEntry {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        
-        if (self.read_pos >= self.entries.items.len) {
-            return null;
-        }
-        
-        const entry_opt = self.entries.items[self.read_pos];
-        self.read_pos += 1;
-        return entry_opt;
+    /// Get the next entry from the watcher (returns error.Timeout if no entry available)
+    pub fn next(self: *KVWatcher) !KVEntry {
+        return self.entry_queue.pop(100); // 100ms timeout
     }
 
-    /// Check if there are more entries available
-    pub fn hasNext(self: *KVWatcher) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return self.read_pos < self.entries.items.len;
+    /// Try to get the next entry without waiting
+    pub fn tryNext(self: *KVWatcher) ?KVEntry {
+        return self.entry_queue.pop(0) catch null;
     }
 
     /// Stop the watcher and clean up resources
@@ -489,7 +469,7 @@ pub const KV = struct {
     /// Get the latest value for a key
     pub fn get(self: *KV, key: []const u8) !KVEntry {
         var entry = try self.getRawEntry(key);
-        
+
         // Per ADR-8: deleted data should return "key not found" error in basic gets
         if (entry.operation == .DEL or entry.operation == .PURGE) {
             entry.deinit();
@@ -572,10 +552,10 @@ pub const KV = struct {
     /// Watch a key or key pattern for updates
     pub fn watch(self: *KV, key: []const u8, options: WatchOptions) !KVWatcher {
         try validateKey(key);
-        
+
         const subject = try self.getKeySubject(key);
         defer self.allocator.free(subject);
-        
+
         return try self.watchFiltered(&.{subject}, options);
     }
 
@@ -583,7 +563,7 @@ pub const KV = struct {
     pub fn watchAll(self: *KV, options: WatchOptions) !KVWatcher {
         const all_subject = try std.fmt.allocPrint(self.allocator, "{s}*", .{self.subject_prefix});
         defer self.allocator.free(all_subject);
-        
+
         return try self.watchFiltered(&.{all_subject}, options);
     }
 
@@ -591,10 +571,10 @@ pub const KV = struct {
     fn watchFiltered(self: *KV, subjects: []const []const u8, options: WatchOptions) !KVWatcher {
         var watcher = KVWatcher.init(self.allocator);
         errdefer watcher.deinit();
-        
+
         // Generate deliver subject for push consumer
         const deliver_subject = try inbox.newInbox(self.allocator);
-        
+
         // Configure consumer based on watch options
         var consumer_config = ConsumerConfig{
             .name = null, // Ephemeral consumer
@@ -619,98 +599,55 @@ pub const KV = struct {
 
         // Store deliver_subject in watcher first for cleanup
         watcher.deliver_subject = deliver_subject;
-        
-        // Use push subscription with sync processing
-        const subscription = self.js.subscribeSync(
-            self.stream_name,
-            consumer_config
-        ) catch |err| {
+
+        // Use async push subscription with handler
+        const subscription = self.js.subscribe(self.stream_name, consumer_config, kvWatchHandler, .{ self, &watcher, options }) catch |err| {
             watcher.deinit();
             return err;
         };
 
         watcher.subscription = subscription;
 
-        // Process available messages synchronously
-        try self.processWatcherMessages(&watcher, options);
-        
         return watcher;
     }
 
-    /// Process messages for a watcher (simplified synchronous version for now)
-    fn processWatcherMessages(self: *KV, watcher: *KVWatcher, options: WatchOptions) !void {
-        if (watcher.subscription == null) return;
-        
-        const subscription = watcher.subscription.?;
-        
-        var entries_added: usize = 0;
-        var timeout_reached = false;
-        
-        // Process available messages with short timeout to collect initial batch
-        while (!timeout_reached and entries_added < 100) { // Limit to 100 messages per batch
-            const js_msg = subscription.nextMsg(100) catch |err| {
-                if (err == error.Timeout) {
-                    timeout_reached = true;
-                    break;
-                }
-                watcher.watch_error = err;
-                return;
-            };
-            
-            // Extract key from subject
-            if (js_msg.msg.subject.len <= self.subject_prefix.len) {
-                js_msg.deinit();
-                continue;
-            }
-            const key = js_msg.msg.subject[self.subject_prefix.len..];
-            
-            // Parse the JetStream message into a KVEntry
-            var entry = self.parseJetStreamEntry(js_msg, key, 0) catch {
-                js_msg.deinit();
-                continue;
-            };
-            
-            // Clean up the JetStream message since we've extracted what we need
-            js_msg.deinit();
-            
-            // Apply watch filters
-            if (options.ignore_deletes and (entry.operation == .DEL or entry.operation == .PURGE)) {
-                entry.deinit();
-                continue;
-            }
-            
-            // Add entry to watcher
-            watcher.mutex.lock();
-            defer watcher.mutex.unlock();
-            
-            watcher.entries.append(entry) catch |err| {
-                entry.deinit();
-                watcher.watch_error = err;
-                return;
-            };
-            
-            entries_added += 1;
+    /// Async handler for KV watch messages
+    fn kvWatchHandler(js_msg: *JetStreamMessage, kv: *KV, watcher: *KVWatcher, options: WatchOptions) void {
+
+        // Extract key from subject
+        if (js_msg.msg.subject.len <= kv.subject_prefix.len) {
+            // Invalid subject, skip
+            return;
         }
 
-        // Add null entry to signal end of initial data if not updates_only
-        if (!options.updates_only) {
-            watcher.mutex.lock();
-            defer watcher.mutex.unlock();
-            
-            watcher.entries.append(null) catch |err| {
-                watcher.watch_error = err;
-                return;
-            };
+        const key = js_msg.msg.subject[kv.subject_prefix.len..];
+
+        // Parse the JetStream message into a KVEntry
+        // Extract the Message pointer without calling deinit on js_msg
+        var entry = kv.parseJetStreamEntryAsync(js_msg.msg, key, 0) catch {
+            // Failed to parse, skip
+            return;
+        };
+
+        // Apply watch filters
+        if (options.ignore_deletes and (entry.operation == .DEL or entry.operation == .PURGE)) {
+            entry.deinit();
+            return;
         }
 
-        watcher.init_done.store(true, .release);
+        // Push entry to queue (non-blocking)
+        watcher.entry_queue.push(entry) catch |err| {
+            // Queue error - store in watcher and cleanup entry
+            watcher.watch_error = err;
+            entry.deinit();
+        };
     }
 
     /// Parse a JetStream message into a KVEntry
     fn parseJetStreamEntry(self: *KV, js_msg: *JetStreamMessage, key: []const u8, delta: u64) !KVEntry {
         // Convert JetStreamMessage to regular Message for parseEntry
         const msg = js_msg.msg;
-        
+
         // Determine operation from parsed headers
         var operation = KVOperation.PUT;
         if (msg.headerGet(KvOperationHdr)) |op_value| {
@@ -746,11 +683,54 @@ pub const KV = struct {
         };
     }
 
+    /// Parse a Message (from async handler) into a KVEntry
+    fn parseJetStreamEntryAsync(self: *KV, msg: *Message, key: []const u8, delta: u64) !KVEntry {
+        // Determine operation from parsed headers
+        var operation = KVOperation.PUT;
+        if (msg.headerGet(KvOperationHdr)) |op_value| {
+            operation = KVOperation.fromString(op_value) orelse .PUT;
+        }
+
+        // Check for marker reason header
+        if (msg.headerGet(NatsMarkerReasonHdr)) |marker_reason| {
+            if (MarkerReason.fromString(marker_reason)) |reason| {
+                // Convert marker reasons to operations per ADR-8
+                operation = switch (reason) {
+                    .MaxAge, .Purge => .PURGE,
+                    .Remove => .DEL,
+                };
+            }
+        }
+
+        // Parse timestamp from Nats-Time-Stamp header, fallback to 0 if not present
+        var created: u64 = 0;
+        if (msg.headerGet("Nats-Time-Stamp")) |timestamp_str| {
+            created = timestamp.parseTimestamp(timestamp_str) catch 0;
+        }
+
+        // For async handler, we need to extract sequence from headers since we don't have JetStreamMessage metadata
+        var revision: u64 = 0;
+        if (msg.headerGet("Nats-Sequence")) |seq_str| {
+            revision = std.fmt.parseInt(u64, seq_str, 10) catch 0;
+        }
+
+        return KVEntry{
+            .bucket = self.bucket_name,
+            .key = key,
+            .value = msg.data,
+            .created = created,
+            .revision = revision,
+            .delta = delta,
+            .operation = operation,
+            .msg = msg,
+        };
+    }
+
     /// Get historical values for a key
     pub fn history(self: *KV, key: []const u8) ![]KVEntry {
         var watcher = try self.watch(key, .{ .include_history = true });
         defer watcher.deinit();
-        
+
         var entries = std.ArrayList(KVEntry).init(self.allocator);
         errdefer {
             // Clean up entries on error
@@ -760,12 +740,19 @@ pub const KV = struct {
             entries.deinit();
         }
 
-        // Collect all entries until we hit the null marker
-        while (true) {
-            const entry_opt = watcher.next();
-            if (entry_opt == null) break; // End of initial data
-            
-            try entries.append(entry_opt.?);
+        // Collect all entries - use short timeout to get initial data
+        var timeout_count: u32 = 0;
+        while (timeout_count < 5) { // Allow a few timeouts to collect initial data
+            const entry = watcher.next() catch |err| {
+                if (err == error.Timeout or err == error.QueueEmpty) {
+                    timeout_count += 1;
+                    continue;
+                }
+                entries.deinit();
+                return err;
+            };
+            timeout_count = 0; // Reset timeout count on successful read
+            try entries.append(entry);
         }
 
         if (entries.items.len == 0) {
@@ -780,25 +767,32 @@ pub const KV = struct {
     pub fn keys(self: *KV) !Result([][]const u8) {
         var watcher = try self.watchAll(.{ .ignore_deletes = true, .meta_only = true });
         defer watcher.deinit();
-        
+
         const arena = try self.allocator.create(std.heap.ArenaAllocator);
         arena.* = std.heap.ArenaAllocator.init(self.allocator);
         errdefer {
             arena.deinit();
             self.allocator.destroy(arena);
         }
-        
+
         const arena_allocator = arena.allocator();
         var keys_set = std.StringHashMap(void).init(arena_allocator);
-        
-        // Collect unique keys
-        while (true) {
-            const entry_opt = watcher.next();
-            if (entry_opt == null) break; // End of initial data
-            
-            var entry = entry_opt.?;
+
+        // Collect unique keys - use short timeout to get initial data
+        var timeout_count: u32 = 0;
+        while (timeout_count < 5) { // Allow a few timeouts to collect initial data
+            var entry = watcher.next() catch |err| {
+                if (err == error.Timeout or err == error.QueueEmpty) {
+                    timeout_count += 1;
+                    continue;
+                }
+                arena.deinit();
+                self.allocator.destroy(arena);
+                return err;
+            };
+            timeout_count = 0; // Reset timeout count on successful read
             defer entry.deinit();
-            
+
             // Add key to set (duplicates are automatically handled)
             const owned_key = try arena_allocator.dupe(u8, entry.key);
             try keys_set.put(owned_key, {});
@@ -844,25 +838,32 @@ pub const KV = struct {
         // Use watchFiltered with constructed subjects
         var watcher = try self.watchFiltered(filter_subjects.items, .{ .ignore_deletes = true, .meta_only = true });
         defer watcher.deinit();
-        
+
         const arena = try self.allocator.create(std.heap.ArenaAllocator);
         arena.* = std.heap.ArenaAllocator.init(self.allocator);
         errdefer {
             arena.deinit();
             self.allocator.destroy(arena);
         }
-        
+
         const arena_allocator = arena.allocator();
         var keys_set = std.StringHashMap(void).init(arena_allocator);
-        
-        // Collect unique keys
-        while (true) {
-            const entry_opt = watcher.next();
-            if (entry_opt == null) break; // End of initial data
-            
-            var entry = entry_opt.?;
+
+        // Collect unique keys - use short timeout to get initial data
+        var timeout_count: u32 = 0;
+        while (timeout_count < 5) { // Allow a few timeouts to collect initial data
+            var entry = watcher.next() catch |err| {
+                if (err == error.Timeout or err == error.QueueEmpty) {
+                    timeout_count += 1;
+                    continue;
+                }
+                arena.deinit();
+                self.allocator.destroy(arena);
+                return err;
+            };
+            timeout_count = 0; // Reset timeout count on successful read
             defer entry.deinit();
-            
+
             // Add key to set (duplicates are automatically handled)
             const owned_key = try arena_allocator.dupe(u8, entry.key);
             try keys_set.put(owned_key, {});
