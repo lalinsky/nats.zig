@@ -176,11 +176,11 @@ test "KV watch basic functionality" {
     _ = try kv.put(key, "initial", .{});
 
     // Start watching
-    const watcher = try kv.watch(key, .{});
+    var watcher = try kv.watch(key, .{});
     defer watcher.deinit();
 
     // Should get initial value (with timeout)
-    var entry = try watcher.next();
+    var entry = try watcher.next(1000);
     defer entry.deinit();
 
     try testing.expectEqualSlices(u8, key, entry.key);
@@ -189,6 +189,6 @@ test "KV watch basic functionality" {
 
     // For async implementation, there's no end-of-initial-data marker
     // The queue will timeout if no more messages are available
-    const result = watcher.next();
+    const result = watcher.next(1000);
     try testing.expect(result == error.Timeout or result == error.QueueEmpty);
 }

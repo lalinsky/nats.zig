@@ -67,6 +67,7 @@ pub const Message = struct {
     // Metadata
     sid: u64 = 0,
     seq: u64 = 0, // TODO this doesn't really belong here
+    time: u64 = 0,
     status_code: u16 = 0,
 
     // Headers
