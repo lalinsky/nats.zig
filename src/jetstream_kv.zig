@@ -18,7 +18,7 @@ const StreamInfo = @import("jetstream.zig").StreamInfo;
 const ConsumerConfig = @import("jetstream.zig").ConsumerConfig;
 const ConsumerInfo = @import("jetstream.zig").ConsumerInfo;
 const PublishOptions = @import("jetstream.zig").PublishOptions;
-const Result = @import("jetstream.zig").Result;
+const Result = @import("result.zig").Result;
 const StoredMessage = @import("jetstream.zig").StoredMessage;
 const PullSubscription = @import("jetstream.zig").PullSubscription;
 const JetStreamSubscription = @import("jetstream.zig").JetStreamSubscription;
@@ -592,6 +592,30 @@ pub const KV = struct {
         return try KVWatcher.init(self, &.{subject}, options);
     }
 
+    /// Watch multiple key patterns for updates
+    pub fn watchMulti(self: *KV, key_patterns: []const []const u8, options: WatchOptions) !KVWatcher {
+        // Validate all keys first
+        for (key_patterns) |key| {
+            try validateKey(key);
+        }
+
+        // Create subjects for all keys
+        var subjects = try std.ArrayList([]u8).initCapacity(self.allocator, key_patterns.len);
+        defer {
+            for (subjects.items) |subject| {
+                self.allocator.free(subject);
+            }
+            subjects.deinit();
+        }
+
+        for (key_patterns) |key| {
+            const subject = try self.getKeySubject(key);
+            subjects.appendAssumeCapacity(subject);
+        }
+
+        return try KVWatcher.init(self, subjects.items, options);
+    }
+
     /// Watch all keys in the bucket
     pub fn watchAll(self: *KV, options: WatchOptions) !KVWatcher {
         const subject = try std.fmt.allocPrint(self.allocator, "{s}>", .{self.subject_prefix});
@@ -659,12 +683,19 @@ pub const KV = struct {
     }
 
     /// Get historical values for a key
-    pub fn history(self: *KV, key: []const u8, allocator: std.mem.Allocator) ![]KVEntry {
+    pub fn history(self: *KV, key: []const u8) !Result([]KVEntry) {
         var watcher = try self.watch(key, .{ .include_history = true });
         defer watcher.deinit();
 
-        var entries = try std.ArrayListUnmanaged(KVEntry).initCapacity(allocator, 64);
-        defer entries.deinit(allocator);
+        const arena = try self.allocator.create(std.heap.ArenaAllocator);
+        errdefer self.allocator.destroy(arena);
+
+        arena.* = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+
+        const arena_allocator = arena.allocator();
+
+        var entries = try std.ArrayListUnmanaged(KVEntry).initCapacity(arena_allocator, 64);
 
         errdefer {
             for (entries.items) |*entry| {
@@ -684,14 +715,17 @@ pub const KV = struct {
             const remaining_ms = total_timeout_ms - elapsed_ms;
             const entry = try watcher.next(remaining_ms) orelse break;
 
-            try entries.append(allocator, entry);
+            try entries.append(arena_allocator, entry);
         }
 
         if (entries.items.len == 0) {
             return KVError.KeyNotFound;
         }
 
-        return try entries.toOwnedSlice(allocator);
+        return Result([]KVEntry){
+            .arena = arena,
+            .value = try entries.toOwnedSlice(arena_allocator),
+        };
     }
 
     /// Get all keys in the bucket
@@ -700,45 +734,51 @@ pub const KV = struct {
         defer watcher.deinit();
 
         const arena = try self.allocator.create(std.heap.ArenaAllocator);
+        errdefer self.allocator.destroy(arena);
         arena.* = std.heap.ArenaAllocator.init(self.allocator);
-        errdefer {
-            arena.deinit();
-            self.allocator.destroy(arena);
-        }
+        errdefer arena.deinit();
 
         const arena_allocator = arena.allocator();
-        var keys_set = std.StringHashMap(void).init(arena_allocator);
+        var keys_set = std.StringHashMap(void).init(self.allocator);
+        defer keys_set.deinit();
 
-        // Collect unique keys - use short timeout to get initial data
-        var timeout_count: u32 = 0;
-        while (timeout_count < 5) { // Allow a few timeouts to collect initial data
-            var entry = try watcher.next(1000) orelse break;
-            timeout_count = 0; // Reset timeout count on successful read
-            defer entry.deinit();
+        // Collect unique keys - use completion marker to know when done
+        while (true) {
+            var maybe_entry = watcher.next(5000) catch |err| {
+                if (err == error.Timeout or err == error.QueueEmpty) {
+                    break;
+                }
+                return err;
+            };
 
-            // Add key to set (duplicates are automatically handled)
-            const owned_key = try arena_allocator.dupe(u8, entry.key);
-            try keys_set.put(owned_key, {});
+            if (maybe_entry) |*entry| {
+                // Copy key before entry goes out of scope
+                const owned_key = try arena_allocator.dupe(u8, entry.key);
+                entry.deinit();
+                try keys_set.put(owned_key, {});
+            } else {
+                // Completion marker - all initial keys collected
+                break;
+            }
         }
 
         if (keys_set.count() == 0) {
-            arena.deinit();
-            self.allocator.destroy(arena);
             return KVError.KeyNotFound;
         }
 
         // Convert set to array
-        var keys_list = try std.ArrayList([]const u8).initCapacity(arena_allocator, keys_set.count());
+        const keys_slice = try arena_allocator.alloc([]const u8, keys_set.count());
+        var i: usize = 0;
         var iterator = keys_set.iterator();
         while (iterator.next()) |entry| {
-            keys_list.appendAssumeCapacity(entry.key_ptr.*);
+            keys_slice[i] = entry.key_ptr.*;
+            i += 1;
         }
 
-        const result: Result([][]const u8) = .{
+        return Result([][]const u8){
             .arena = arena,
-            .value = try keys_list.toOwnedSlice(),
+            .value = keys_slice,
         };
-        return result;
     }
 
     /// Get all keys in the bucket matching the provided filters
@@ -763,45 +803,51 @@ pub const KV = struct {
         defer watcher.deinit();
 
         const arena = try self.allocator.create(std.heap.ArenaAllocator);
+        errdefer self.allocator.destroy(arena);
         arena.* = std.heap.ArenaAllocator.init(self.allocator);
-        errdefer {
-            arena.deinit();
-            self.allocator.destroy(arena);
-        }
+        errdefer arena.deinit();
 
         const arena_allocator = arena.allocator();
-        var keys_set = std.StringHashMap(void).init(arena_allocator);
+        var keys_set = std.StringHashMap(void).init(self.allocator);
+        defer keys_set.deinit();
 
-        // Collect unique keys - use short timeout to get initial data
-        var timeout_count: u32 = 0;
-        while (timeout_count < 5) { // Allow a few timeouts to collect initial data
-            var entry = try watcher.next(1000) orelse break;
-            timeout_count = 0; // Reset timeout count on successful read
-            defer entry.deinit();
+        // Collect unique keys - use completion marker to know when done
+        while (true) {
+            var maybe_entry = watcher.next(5000) catch |err| {
+                if (err == error.Timeout or err == error.QueueEmpty) {
+                    break;
+                }
+                return err;
+            };
 
-            // Add key to set (duplicates are automatically handled)
-            const owned_key = try arena_allocator.dupe(u8, entry.key);
-            try keys_set.put(owned_key, {});
+            if (maybe_entry) |*entry| {
+                // Copy key before entry goes out of scope
+                const owned_key = try arena_allocator.dupe(u8, entry.key);
+                entry.deinit();
+                try keys_set.put(owned_key, {});
+            } else {
+                // Completion marker - all initial keys collected
+                break;
+            }
         }
 
         if (keys_set.count() == 0) {
-            arena.deinit();
-            self.allocator.destroy(arena);
             return KVError.KeyNotFound;
         }
 
         // Convert set to array
-        var keys_list = try std.ArrayList([]const u8).initCapacity(arena_allocator, keys_set.count());
+        const keys_slice = try arena_allocator.alloc([]const u8, keys_set.count());
+        var i: usize = 0;
         var iterator = keys_set.iterator();
         while (iterator.next()) |entry| {
-            keys_list.appendAssumeCapacity(entry.key_ptr.*);
+            keys_slice[i] = entry.key_ptr.*;
+            i += 1;
         }
 
-        const result: Result([][]const u8) = .{
+        return Result([][]const u8){
             .arena = arena,
-            .value = try keys_list.toOwnedSlice(),
+            .value = keys_slice,
         };
-        return result;
     }
 };
 

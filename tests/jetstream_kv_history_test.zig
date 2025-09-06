@@ -34,7 +34,6 @@ test "KV history retrieval" {
         .history = 3,
     });
     defer kv.deinit();
-    defer kv_manager.deleteBucket(bucket_name) catch {};
 
     const key = "test-key";
 
@@ -44,12 +43,14 @@ test "KV history retrieval" {
     _ = try kv.put(key, "value3", .{});
 
     // Get history
-    const history = try kv.history(key, testing.allocator);
+    const history_result = try kv.history(key);
+    defer history_result.deinit();
+
+    const history = history_result.value;
     defer {
         for (history) |*entry| {
             entry.deinit();
         }
-        testing.allocator.free(history);
     }
 
     try testing.expect(history.len == 3);
