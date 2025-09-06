@@ -605,7 +605,6 @@ pub const JetStreamOptions = struct {
     // Add options here
 };
 
-
 pub const JetStream = struct {
     allocator: std.mem.Allocator,
     nc: *Connection,
@@ -660,7 +659,7 @@ pub const JetStream = struct {
             log.debug("Full response: {s}", .{msg.data});
             return error.JetStreamParseError;
         };
-        
+
         // Reuse the arena from std.json.Parsed in our Result
         return Result(T){
             .arena = parsed.arena,
