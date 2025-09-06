@@ -44,7 +44,7 @@ test "KV history retrieval" {
     _ = try kv.put(key, "value3", .{});
 
     // Get history
-    const history = try kv.history(key);
+    const history = try kv.history(key, testing.allocator);
     defer {
         for (history) |*entry| {
             entry.deinit();
@@ -180,15 +180,20 @@ test "KV watch basic functionality" {
     defer watcher.deinit();
 
     // Should get initial value (with timeout)
-    var entry = try watcher.next(1000);
+    const maybe_entry = try watcher.next(1000);
+    try testing.expect(maybe_entry != null); // Should not be the completion marker
+    var entry = maybe_entry.?;
     defer entry.deinit();
 
     try testing.expectEqualSlices(u8, key, entry.key);
     try testing.expectEqualSlices(u8, "initial", entry.value);
     try testing.expect(entry.operation == .PUT);
 
-    // For async implementation, there's no end-of-initial-data marker
-    // The queue will timeout if no more messages are available
+    // Should get completion marker (null) indicating initial data is done
+    const completion_marker = try watcher.next(1000);
+    try testing.expect(completion_marker == null);
+
+    // After completion marker, should timeout on further attempts
     const result = watcher.next(1000);
     try testing.expect(result == error.Timeout or result == error.QueueEmpty);
 }

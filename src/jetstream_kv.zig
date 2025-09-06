@@ -190,7 +190,10 @@ pub const KVWatcher = struct {
     kv: *KV,
     sub: *JetStreamSubscription,
     options: WatchOptions,
+    init_pending: usize,
     received: usize = 0,
+    init_done: bool = false,
+    return_marker: bool = false,
 
     const Self = @This();
 
@@ -213,15 +216,29 @@ pub const KVWatcher = struct {
         var sub = try kv.js.subscribeSync(kv.stream_name, consumer_config);
         errdefer sub.deinit();
 
-        return .{ .kv = kv, .sub = sub, .options = options };
+        const init_pending = if (options.updates_only) 0 else sub.consumer_info.value.num_pending;
+
+        return .{
+            .kv = kv,
+            .sub = sub,
+            .options = options,
+            .init_pending = init_pending,
+            .init_done = options.updates_only,
+        };
     }
 
     pub fn deinit(self: *KVWatcher) void {
         self.sub.deinit();
     }
 
-    /// Get the next entry from the watcher (returns error.Timeout if no entry available)
-    pub fn next(self: *KVWatcher, timeout_ms: u64) !KVEntry {
+    /// Get the next entry from the watcher (returns null for completion marker, error.Timeout if no entry available)
+    pub fn next(self: *KVWatcher, timeout_ms: u64) !?KVEntry {
+        // If we need to return the completion marker, do it now
+        if (self.return_marker) {
+            self.return_marker = false;
+            return null;
+        }
+
         var timer = try std.time.Timer.start();
         var remaining_ns = timeout_ms * std.time.ns_per_ms;
         while (true) {
@@ -231,7 +248,22 @@ pub const KVWatcher = struct {
             var delete_msg = true;
             defer if (delete_msg) msg.deinit();
 
-            log.debug("pending: {}", .{msg.metadata.num_pending});
+            const delta = msg.metadata.num_pending;
+            log.debug("pending: {}", .{delta});
+
+            // Check for completion detection
+            if (!self.init_done) {
+                self.received += 1;
+                // Set init_pending from first message if not set
+                if (self.init_pending == 0) {
+                    self.init_pending = delta;
+                }
+                // Check completion: received >= initPending OR delta == 0
+                if (self.received >= self.init_pending or delta == 0) {
+                    self.init_done = true;
+                    self.return_marker = true;
+                }
+            }
 
             var entry = try self.kv.parseJetStreamMessage(msg);
             if (!self.options.ignore_deletes or !entry.isDeleted()) {
@@ -245,14 +277,6 @@ pub const KVWatcher = struct {
             }
             remaining_ns -= elapsed_ns;
         }
-    }
-
-    /// Try to get the next entry without waiting
-    pub fn tryNext(self: *KVWatcher) ?KVEntry {
-        return self.next(0) catch |err| switch (err) {
-            error.Timeout => return null,
-            else => return err,
-        };
     }
 };
 
@@ -635,39 +659,39 @@ pub const KV = struct {
     }
 
     /// Get historical values for a key
-    pub fn history(self: *KV, key: []const u8) ![]KVEntry {
+    pub fn history(self: *KV, key: []const u8, allocator: std.mem.Allocator) ![]KVEntry {
         var watcher = try self.watch(key, .{ .include_history = true });
         defer watcher.deinit();
 
-        var entries = std.ArrayList(KVEntry).init(self.allocator);
+        var entries = try std.ArrayListUnmanaged(KVEntry).initCapacity(allocator, 64);
+        defer entries.deinit(allocator);
+
         errdefer {
             for (entries.items) |*entry| {
                 entry.deinit();
             }
-            entries.deinit();
         }
 
-        // Collect all entries - use short timeout to get initial data
-        var timeout_count: u32 = 0;
-        while (timeout_count < 5) { // Allow a few timeouts to collect initial data
-            const entry = watcher.next(1000) catch |err| {
-                if (err == error.Timeout or err == error.QueueEmpty) {
-                    timeout_count += 1;
-                    continue;
-                }
-                entries.deinit();
-                return err;
-            };
-            timeout_count = 0; // Reset timeout count on successful read
-            try entries.append(entry);
-            log.info("got msg {}", .{entries.items.len});
+        const total_timeout_ms = self.js.nc.options.timeout_ms;
+        var timer = try std.time.Timer.start();
+
+        while (true) {
+            const elapsed_ms = timer.read() / std.time.ns_per_ms;
+            if (elapsed_ms >= total_timeout_ms) {
+                return error.Timeout;
+            }
+
+            const remaining_ms = total_timeout_ms - elapsed_ms;
+            const entry = try watcher.next(remaining_ms) orelse break;
+
+            try entries.append(allocator, entry);
         }
 
         if (entries.items.len == 0) {
             return KVError.KeyNotFound;
         }
 
-        return try entries.toOwnedSlice();
+        return try entries.toOwnedSlice(allocator);
     }
 
     /// Get all keys in the bucket
@@ -688,15 +712,7 @@ pub const KV = struct {
         // Collect unique keys - use short timeout to get initial data
         var timeout_count: u32 = 0;
         while (timeout_count < 5) { // Allow a few timeouts to collect initial data
-            var entry = watcher.next(1000) catch |err| {
-                if (err == error.Timeout or err == error.QueueEmpty) {
-                    timeout_count += 1;
-                    continue;
-                }
-                arena.deinit();
-                self.allocator.destroy(arena);
-                return err;
-            };
+            var entry = try watcher.next(1000) orelse break;
             timeout_count = 0; // Reset timeout count on successful read
             defer entry.deinit();
 
@@ -759,15 +775,7 @@ pub const KV = struct {
         // Collect unique keys - use short timeout to get initial data
         var timeout_count: u32 = 0;
         while (timeout_count < 5) { // Allow a few timeouts to collect initial data
-            var entry = watcher.next(1000) catch |err| {
-                if (err == error.Timeout or err == error.QueueEmpty) {
-                    timeout_count += 1;
-                    continue;
-                }
-                arena.deinit();
-                self.allocator.destroy(arena);
-                return err;
-            };
+            var entry = try watcher.next(1000) orelse break;
             timeout_count = 0; // Reset timeout count on successful read
             defer entry.deinit();
 
