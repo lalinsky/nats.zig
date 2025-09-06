@@ -290,8 +290,8 @@ test "JetStream message metadata parsing" {
             if (std.mem.eql(u8, stream_name, "TEST_METADATA_STREAM") and
                 std.mem.eql(u8, consumer_name, "metadata_consumer") and
                 js_msg.metadata.num_delivered == 1 and
-                js_msg.metadata.sequence.consumer != null and
-                js_msg.metadata.sequence.stream != null)
+                js_msg.metadata.sequence.consumer > 0 and
+                js_msg.metadata.sequence.stream > 0)
             {
                 verified.* = true;
             }

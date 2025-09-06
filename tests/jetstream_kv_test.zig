@@ -30,7 +30,7 @@ test "KV basic create bucket" {
     defer kv.deinit();
 
     // Clean up
-    try kv.destroy();
+    try kv_manager.deleteBucket(bucket_name);
 }
 
 test "KV put and get operations" {
@@ -53,7 +53,6 @@ test "KV put and get operations" {
 
     var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
-    defer kv.destroy() catch {};
 
     // Test put operation
     const key = "test-key";
@@ -93,7 +92,6 @@ test "KV create and update operations" {
 
     var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
-    defer kv.destroy() catch {};
 
     const key = "test-key";
 
@@ -138,7 +136,6 @@ test "KV delete operation" {
 
     var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
-    defer kv.destroy() catch {};
 
     const key = "test-key";
 
@@ -180,7 +177,6 @@ test "KV purge operation" {
 
     var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
-    defer kv.destroy() catch {};
 
     const key = "test-key";
 
@@ -221,7 +217,6 @@ test "KV status operation" {
 
     var kv = try kv_manager.createBucket(config);
     defer kv.deinit();
-    defer kv.destroy() catch {};
 
     // Add some data
     _ = try kv.put("key1", "value1", .{});
