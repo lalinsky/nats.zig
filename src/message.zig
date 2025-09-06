@@ -304,6 +304,7 @@ pub const Message = struct {
         self.data = &[_]u8{};
         self.sid = 0;
         self.seq = 0;
+        self.time = 0;
         self.status_code = 0;
         self.headers = .{}; // Completely reset HashMap instead of clearRetainingCapacity()
         self.raw_headers = null;
