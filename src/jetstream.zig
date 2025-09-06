@@ -24,6 +24,8 @@ const Subscription = @import("subscription.zig").Subscription;
 const subscription_mod = @import("subscription.zig");
 const jetstream_message = @import("jetstream_message.zig");
 const inbox = @import("inbox.zig");
+const parseTimestamp = @import("timestamp.zig").parseTimestamp;
+const Result = @import("result.zig").Result;
 
 const log = @import("log.zig").log;
 
@@ -588,17 +590,13 @@ pub const JetStreamSubscription = struct {
     }
 
     /// Get the next JetStream message synchronously (for sync subscriptions)
-    pub fn nextMsg(self: *JetStreamSubscription, timeout_ms: u64) error{Timeout}!*JetStreamMessage {
+    pub fn nextMsg(self: *JetStreamSubscription, timeout_ms: u64) !*JetStreamMessage {
         // Get the next message from the underlying subscription
-        const msg = self.subscription.nextMsg(timeout_ms) catch |err| return err;
+        const msg = try self.subscription.nextMsg(timeout_ms);
+        errdefer msg.deinit();
 
         // Convert to JetStream message
-        const js_msg = jetstream_message.createJetStreamMessage(self.js.nc, msg) catch {
-            msg.deinit(); // Clean up on error
-            return error.Timeout; // Convert any error to Timeout for API consistency
-        };
-
-        return js_msg;
+        return try jetstream_message.createJetStreamMessage(self.js.nc, msg);
     }
 };
 
@@ -606,8 +604,6 @@ pub const JetStreamOptions = struct {
     request_timeout_ms: u64 = default_request_timeout_ms,
     // Add options here
 };
-
-pub const Result = std.json.Parsed;
 
 pub const JetStream = struct {
     allocator: std.mem.Allocator,
@@ -655,13 +651,19 @@ pub const JetStream = struct {
     fn parseResponse(self: *JetStream, comptime T: type, msg: *Message) !Result(T) {
         try self.maybeParseErrorResponse(msg);
 
-        return std.json.parseFromSlice(T, self.allocator, msg.data, .{
+        const parsed = std.json.parseFromSlice(T, self.allocator, msg.data, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
         }) catch |err| {
             log.err("Failed to parse response: {}", .{err});
             log.debug("Full response: {s}", .{msg.data});
             return error.JetStreamParseError;
+        };
+
+        // Reuse the arena from std.json.Parsed in our Result
+        return Result(T){
+            .arena = parsed.arena,
+            .value = parsed.value,
         };
     }
 
@@ -939,6 +941,7 @@ pub const JetStream = struct {
 
         // Set the sequence number
         msg.seq = stored_msg.seq;
+        msg.time = try parseTimestamp(stored_msg.time);
 
         // Decode base64 data
         if (stored_msg.data.len > 0) {
