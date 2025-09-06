@@ -216,14 +216,17 @@ pub const KVWatcher = struct {
         var sub = try kv.js.subscribeSync(kv.stream_name, consumer_config);
         errdefer sub.deinit();
 
-        const init_pending = if (options.updates_only) 0 else sub.consumer_info.value.num_pending;
+        // Match C logic: only use num_pending to detect empty streams
+        const init_done = options.updates_only or sub.consumer_info.value.num_pending == 0;
+        const return_marker = init_done and !options.updates_only;
 
         return .{
             .kv = kv,
             .sub = sub,
             .options = options,
-            .init_pending = init_pending,
-            .init_done = options.updates_only,
+            .init_pending = 0, // Always start at 0, set from first message like C code
+            .init_done = init_done,
+            .return_marker = return_marker,
         };
     }
 
@@ -258,8 +261,8 @@ pub const KVWatcher = struct {
                 if (self.init_pending == 0) {
                     self.init_pending = delta;
                 }
-                // Check completion: received >= initPending OR delta == 0
-                if (self.received >= self.init_pending or delta == 0) {
+                // Check completion: received > initPending OR delta == 0 (match C logic)
+                if (self.received > self.init_pending or delta == 0) {
                     self.init_done = true;
                     self.return_marker = true;
                 }
