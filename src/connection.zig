@@ -35,6 +35,7 @@ const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
 const ResponseManager = @import("response_manager.zig").ResponseManager;
 const MAX_CONTROL_LINE_SIZE = @import("parser.zig").MAX_CONTROL_LINE_SIZE;
 const Socket = @import("socket.zig").Socket;
+const validation = @import("validation.zig");
 
 const log = @import("log.zig").log;
 
@@ -531,6 +532,8 @@ pub const Connection = struct {
 
     /// Publishes data on a subject.
     pub fn publish(self: *Self, subject: []const u8, data: []const u8) !void {
+        try validation.validateSubject(subject);
+
         var msg = Message{
             .subject = subject,
             .data = data,
@@ -547,6 +550,9 @@ pub const Connection = struct {
 
     /// Publishes data on a subject, with a reply subject.
     pub fn publishRequest(self: *Self, subject: []const u8, reply: []const u8, data: []const u8) !void {
+        try validation.validateSubject(subject);
+        try validation.validateSubject(reply);
+
         var msg = Message{
             .subject = subject,
             .reply = reply,
@@ -559,6 +565,7 @@ pub const Connection = struct {
 
     /// Publishes a message on a subject, with a reply subject.
     pub fn publishRequestMsg(self: *Self, msg: *Message, reply: []const u8) !void {
+        try validation.validateSubject(reply);
         return self.publishMsgInternal(msg, reply);
     }
 
@@ -665,6 +672,8 @@ pub const Connection = struct {
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
+        try validation.validateSubject(subject);
+
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
         errdefer handler.cleanup(self.allocator);
 
@@ -683,6 +692,8 @@ pub const Connection = struct {
 
     /// Subscribe to a subject, the code is responsible for handling the fetching
     pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
+        try validation.validateSubject(subject);
+
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.create(self, sid, subject, null, null);
         errdefer sub.release();
@@ -694,7 +705,8 @@ pub const Connection = struct {
     }
 
     pub fn queueSubscribe(self: *Self, subject: []const u8, queue: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
-        if (queue.len == 0) return error.EmptyQueueGroupName;
+        try validation.validateSubject(subject);
+        try validation.validateQueueName(queue);
 
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
         errdefer handler.cleanup(self.allocator);
@@ -714,7 +726,8 @@ pub const Connection = struct {
 
     /// Subscribe to a subject, the code is responsible for handling the fetching
     pub fn queueSubscribeSync(self: *Self, subject: []const u8, queue: []const u8) !*Subscription {
-        if (queue.len == 0) return error.EmptyQueueGroupName;
+        try validation.validateSubject(subject);
+        try validation.validateQueueName(queue);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.create(self, sid, subject, queue, null);
