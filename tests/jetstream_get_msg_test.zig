@@ -192,8 +192,8 @@ test "get message with headers" {
     var msg = try conn.newMsg();
     defer msg.deinit();
 
-    try msg.setSubject(subject);
-    try msg.setPayload("Message with headers");
+    try msg.setSubject(subject, true);
+    try msg.setPayload("Message with headers", true);
     try msg.headerSet("X-Custom-Header", "custom-value");
     try msg.headerSet("X-Test-ID", "12345");
 

@@ -67,6 +67,7 @@ pub const Message = struct {
     // Metadata
     sid: u64 = 0,
     seq: u64 = 0, // TODO this doesn't really belong here
+    time: u64 = 0,
     status_code: u16 = 0,
 
     // Headers
@@ -101,20 +102,39 @@ pub const Message = struct {
         }
     }
 
-    pub fn setSubject(self: *Self, subject: []const u8) !void {
-        self.subject = try self.arena.allocator().dupe(u8, subject);
+    pub fn setSubject(self: *Self, subject: []const u8, copy: bool) !void {
+        if (copy) {
+            self.subject = try self.arena.allocator().dupe(u8, subject);
+        } else {
+            self.subject = subject;
+        }
     }
 
-    pub fn setReply(self: *Self, reply: []const u8) !void {
-        self.reply = try self.arena.allocator().dupe(u8, reply);
+    pub fn setReply(self: *Self, reply: []const u8, copy: bool) !void {
+        if (copy) {
+            self.reply = try self.arena.allocator().dupe(u8, reply);
+        } else {
+            self.reply = reply;
+        }
     }
 
-    pub fn setPayload(self: *Self, payload: []const u8) !void {
-        self.data = try self.arena.allocator().dupe(u8, payload);
+    pub fn setPayload(self: *Self, payload: []const u8, copy: bool) !void {
+        if (copy) {
+            self.data = try self.arena.allocator().dupe(u8, payload);
+        } else {
+            self.data = payload;
+        }
     }
 
-    pub fn setRawHeaders(self: *Self, headers: []const u8) !void {
-        self.raw_headers = try self.arena.allocator().dupe(u8, headers);
+    pub fn setRawHeaders(self: *Self, headers: []const u8, copy: bool) !void {
+        if (copy) {
+            self.raw_headers = try self.arena.allocator().dupe(u8, headers);
+        } else {
+            self.raw_headers = headers;
+        }
+        // Reset parsed header state before parsing new raw headers
+        self.headers = .{};
+        self.status_code = 0;
         try self.parseHeaders();
     }
 
@@ -284,6 +304,7 @@ pub const Message = struct {
         self.data = &[_]u8{};
         self.sid = 0;
         self.seq = 0;
+        self.time = 0;
         self.status_code = 0;
         self.headers = .{}; // Completely reset HashMap instead of clearRetainingCapacity()
         self.raw_headers = null;

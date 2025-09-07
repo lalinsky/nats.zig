@@ -168,8 +168,8 @@ test "requestMsg basic functionality" {
     var request_msg = try conn.newMsg();
     defer request_msg.deinit();
 
-    try request_msg.setSubject("test.requestmsg");
-    try request_msg.setPayload("requestMsg test data");
+    try request_msg.setSubject("test.requestmsg", true);
+    try request_msg.setPayload("requestMsg test data", true);
 
     // Send request using requestMsg
     const response = try conn.requestMsg(request_msg, 1000);
@@ -192,8 +192,8 @@ test "requestMsg with headers" {
     var request_msg = try conn.newMsg();
     defer request_msg.deinit();
 
-    try request_msg.setSubject("test.requestmsg.headers");
-    try request_msg.setPayload("header test");
+    try request_msg.setSubject("test.requestmsg.headers", true);
+    try request_msg.setPayload("header test", true);
 
     // Add some headers
     try request_msg.headerSet("X-Test-Header", "test-value");
@@ -215,8 +215,8 @@ test "requestMsg validation errors" {
     defer request_msg.deinit();
 
     // Test invalid subject (empty)
-    try request_msg.setSubject("");
-    try request_msg.setPayload("test data");
+    try request_msg.setSubject("", false);
+    try request_msg.setPayload("test data", true);
 
     const result = conn.requestMsg(request_msg, 1000);
     try std.testing.expectError(error.InvalidSubject, result);
