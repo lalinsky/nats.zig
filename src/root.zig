@@ -61,8 +61,12 @@ pub const KVConfig = @import("jetstream_kv.zig").KVConfig;
 pub const PutOptions = @import("jetstream_kv.zig").PutOptions;
 pub const KVOperation = @import("jetstream_kv.zig").KVOperation;
 pub const KVError = @import("jetstream_kv.zig").KVError;
-pub const validateKey = @import("jetstream_kv.zig").validateKey;
-pub const validateBucketName = @import("jetstream_kv.zig").validateBucketName;
+// Validation functions
+pub const validateStreamName = @import("validation.zig").validateStreamName;
+pub const validateConsumerName = @import("validation.zig").validateConsumerName;
+pub const validateSubject = @import("validation.zig").validateSubject;
+pub const validateKVBucketName = @import("validation.zig").validateKVBucketName;
+pub const validateKVKeyName = @import("validation.zig").validateKVKeyName;
 
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 
