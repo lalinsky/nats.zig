@@ -15,8 +15,8 @@ test "publish and receive message with headers" {
     var msg = try conn.newMsg();
     defer msg.deinit();
 
-    try msg.setSubject("test.headers");
-    try msg.setPayload("Hello with headers!");
+    try msg.setSubject("test.headers", true);
+    try msg.setPayload("Hello with headers!", true);
     try msg.headerSet("X-Test-Key", "test-value");
     try msg.headerSet("X-Another-Key", "another-value");
 
@@ -55,8 +55,8 @@ test "publish message without headers using publishMsg" {
     var msg = try conn.newMsg();
     defer msg.deinit();
 
-    try msg.setSubject("test.no-headers");
-    try msg.setPayload("Hello without headers!");
+    try msg.setSubject("test.no-headers", true);
+    try msg.setPayload("Hello without headers!", true);
 
     // Publish the message (should use regular PUB, not HPUB)
     try conn.publishMsg(msg);
@@ -119,9 +119,9 @@ test "message with reply and headers" {
     var msg = try conn.newMsg();
     defer msg.deinit();
 
-    try msg.setSubject("test.reply-headers");
-    try msg.setReply("reply.subject");
-    try msg.setPayload("Request with headers");
+    try msg.setSubject("test.reply-headers", true);
+    try msg.setReply("reply.subject", true);
+    try msg.setPayload("Request with headers", true);
     try msg.headerSet("Request-ID", "12345");
     try msg.headerSet("Content-Type", "text/plain");
 
@@ -155,7 +155,7 @@ test "no responders header detection" {
     var msg = nats.Message.init(std.testing.allocator);
     defer msg.deinit();
 
-    try msg.setRawHeaders("NATS/1.0 503\r\n");
+    try msg.setRawHeaders("NATS/1.0 503\r\n", true);
 
     // Test no responders detection
     const is_no_responders = msg.isNoResponders();

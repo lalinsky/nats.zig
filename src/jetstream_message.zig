@@ -29,8 +29,8 @@ const AckType = enum(u8) {
 
 /// Consumer and stream sequence pair (matches Go NATS library SequencePair)
 pub const SequencePair = struct {
-    consumer: ?u64 = null, // Consumer sequence number
-    stream: ?u64 = null, // Stream sequence number
+    consumer: u64 = 0, // Consumer sequence number
+    stream: u64 = 0, // Stream sequence number
 };
 
 /// JetStream message metadata (matches Go NATS library MsgMetadata)

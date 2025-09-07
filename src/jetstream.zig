@@ -24,6 +24,8 @@ const Subscription = @import("subscription.zig").Subscription;
 const subscription_mod = @import("subscription.zig");
 const jetstream_message = @import("jetstream_message.zig");
 const inbox = @import("inbox.zig");
+const parseTimestamp = @import("timestamp.zig").parseTimestamp;
+const Result = @import("result.zig").Result;
 
 const log = @import("log.zig").log;
 
@@ -161,6 +163,12 @@ pub const StreamConfig = struct {
     duplicate_window: u64 = 0,
     /// Allow direct get on any replica instead of just the leader
     allow_direct: ?bool = null,
+    /// Allows the use of the Nats-Rollup header to replace all contents of a stream, or subject in a stream, with a single new message
+    allow_rollup_hdrs: ?bool = null,
+    /// Whether to allow delete operations on individual messages
+    deny_delete: ?bool = null,
+    /// TTL for delete markers when subject is deleted by TTL (nanoseconds)
+    subject_delete_marker_ttl: ?u64 = null,
 };
 
 /// Response from $JS.API.STREAM.NAMES
@@ -365,12 +373,12 @@ const GetMsgResponse = struct {
 };
 
 /// Stored message data from JetStream
-const StoredMessage = struct {
+pub const StoredMessage = struct {
     subject: []const u8,
     seq: u64,
     time: []const u8,
     hdrs: ?[]const u8 = null,
-    data: ?[]const u8 = null,
+    data: []const u8,
 };
 
 /// Request for fetching messages from a pull consumer
@@ -582,17 +590,13 @@ pub const JetStreamSubscription = struct {
     }
 
     /// Get the next JetStream message synchronously (for sync subscriptions)
-    pub fn nextMsg(self: *JetStreamSubscription, timeout_ms: u64) error{Timeout}!*JetStreamMessage {
+    pub fn nextMsg(self: *JetStreamSubscription, timeout_ms: u64) !*JetStreamMessage {
         // Get the next message from the underlying subscription
-        const msg = self.subscription.nextMsg(timeout_ms) catch |err| return err;
+        const msg = try self.subscription.nextMsg(timeout_ms);
+        errdefer msg.deinit();
 
         // Convert to JetStream message
-        const js_msg = jetstream_message.createJetStreamMessage(self.js.nc, msg) catch {
-            msg.deinit(); // Clean up on error
-            return error.Timeout; // Convert any error to Timeout for API consistency
-        };
-
-        return js_msg;
+        return try jetstream_message.createJetStreamMessage(self.js.nc, msg);
     }
 };
 
@@ -600,8 +604,6 @@ pub const JetStreamOptions = struct {
     request_timeout_ms: u64 = default_request_timeout_ms,
     // Add options here
 };
-
-pub const Result = std.json.Parsed;
 
 pub const JetStream = struct {
     allocator: std.mem.Allocator,
@@ -649,13 +651,19 @@ pub const JetStream = struct {
     fn parseResponse(self: *JetStream, comptime T: type, msg: *Message) !Result(T) {
         try self.maybeParseErrorResponse(msg);
 
-        return std.json.parseFromSlice(T, self.allocator, msg.data, .{
+        const parsed = std.json.parseFromSlice(T, self.allocator, msg.data, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
         }) catch |err| {
             log.err("Failed to parse response: {}", .{err});
             log.debug("Full response: {s}", .{msg.data});
             return error.JetStreamParseError;
+        };
+
+        // Reuse the arena from std.json.Parsed in our Result
+        return Result(T){
+            .arena = parsed.arena,
+            .value = parsed.value,
         };
     }
 
@@ -924,39 +932,35 @@ pub const JetStream = struct {
 
         const stored_msg = parsed_resp.value.message;
 
-        // Create empty message and populate it
+        // Create a new Message using the proper API
         const msg = try self.nc.newMsg();
         errdefer msg.deinit();
 
-        const arena_allocator = msg.arena.allocator();
+        // Set the subject
+        try msg.setSubject(stored_msg.subject, true);
 
-        // Set basic fields
-        msg.subject = try arena_allocator.dupe(u8, stored_msg.subject);
+        // Set the sequence number
         msg.seq = stored_msg.seq;
+        msg.time = try parseTimestamp(stored_msg.time);
 
-        // Decode and set data
-        if (stored_msg.data) |data_b64| {
+        // Decode base64 data
+        if (stored_msg.data.len > 0) {
             const decoder = std.base64.standard.Decoder;
-            const data_len = try decoder.calcSizeForSlice(data_b64);
-            const decoded_data = try arena_allocator.alloc(u8, data_len);
-            try decoder.decode(decoded_data, data_b64);
-            msg.data = decoded_data;
+            const data_len = try decoder.calcSizeForSlice(stored_msg.data);
+            const decoded_data = try msg.arena.allocator().alloc(u8, data_len);
+            try decoder.decode(decoded_data, stored_msg.data);
+            try msg.setPayload(decoded_data, false);
+        } else {
+            try msg.setPayload("", false);
         }
 
-        // Decode and set headers
+        // Decode base64 headers if present
         if (stored_msg.hdrs) |hdrs_b64| {
             const decoder = std.base64.standard.Decoder;
             const hdrs_len = try decoder.calcSizeForSlice(hdrs_b64);
-            const decoded_headers = try arena_allocator.alloc(u8, hdrs_len);
+            const decoded_headers = try msg.arena.allocator().alloc(u8, hdrs_len);
             try decoder.decode(decoded_headers, hdrs_b64);
-            msg.raw_headers = decoded_headers;
-            try msg.parseHeaders();
-        }
-
-        // Parse time from RFC3339 format
-        if (stored_msg.time.len > 0) {
-            // TODO: Parse RFC3339 timestamp like "2023-01-15T14:30:45.123456789Z"
-            // msg.time = ...
+            try msg.setRawHeaders(decoded_headers, false);
         }
 
         return msg;
@@ -1035,7 +1039,7 @@ pub const JetStream = struct {
 
         // For direct get, extract metadata from JetStream headers
         if (resp.headerGet("Nats-Subject")) |nats_subject| {
-            resp.subject = nats_subject;
+            try resp.setSubject(nats_subject, false);
         }
 
         if (resp.headerGet("Nats-Sequence")) |nats_seq_str| {
@@ -1261,8 +1265,8 @@ pub const JetStream = struct {
         defer msg.deinit();
 
         // Set message fields
-        try msg.setSubject(subject);
-        try msg.setPayload(data);
+        try msg.setSubject(subject, false);
+        try msg.setPayload(data, false);
 
         // Use publishMsg to handle the actual publishing
         return self.publishMsgInternal(msg, options);
@@ -1283,13 +1287,13 @@ pub const JetStream = struct {
             try msg.headerSet(ExpectedStreamHdr, stream);
         }
         if (options.expected_last_seq) |seq| {
-            const seq_str = try std.fmt.allocPrint(self.allocator, "{d}", .{seq});
-            defer self.allocator.free(seq_str);
+            var buf: [256]u8 = undefined;
+            const seq_str = try std.fmt.bufPrint(&buf, "{d}", .{seq});
             try msg.headerSet(ExpectedLastSeqHdr, seq_str);
         }
         if (options.expected_last_subject_seq) |seq| {
-            const seq_str = try std.fmt.allocPrint(self.allocator, "{d}", .{seq});
-            defer self.allocator.free(seq_str);
+            var buf: [256]u8 = undefined;
+            const seq_str = try std.fmt.bufPrint(&buf, "{d}", .{seq});
             try msg.headerSet(ExpectedLastSubjSeqHdr, seq_str);
         }
         if (options.expected_last_subject_seq_subject) |subject| {
@@ -1299,8 +1303,8 @@ pub const JetStream = struct {
             try msg.headerSet(ExpectedLastMsgIdHdr, id);
         }
         if (options.msg_ttl) |ttl| {
-            const ttl_str = try std.fmt.allocPrint(self.allocator, "{d}ns", .{ttl});
-            defer self.allocator.free(ttl_str);
+            var buf: [256]u8 = undefined;
+            const ttl_str = try std.fmt.bufPrint(&buf, "{d}ns", .{ttl});
             try msg.headerSet(MsgTTLHdr, ttl_str);
         }
 
@@ -1320,5 +1324,17 @@ pub const JetStream = struct {
         };
 
         return parsed_resp;
+    }
+
+    /// Create a KV manager for bucket operations
+    pub fn kvManager(self: *JetStream) @import("jetstream_kv.zig").KVManager {
+        const jetstream_kv = @import("jetstream_kv.zig");
+        return jetstream_kv.KVManager.init(self.allocator, self);
+    }
+
+    /// Open an existing KV bucket
+    pub fn kvBucket(self: *JetStream, bucket_name: []const u8) !*@import("jetstream_kv.zig").KV {
+        var manager = self.kvManager();
+        return try manager.openBucket(bucket_name);
     }
 };
