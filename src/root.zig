@@ -64,6 +64,17 @@ pub const KVError = @import("jetstream_kv.zig").KVError;
 pub const validateKey = @import("jetstream_kv.zig").validateKey;
 pub const validateBucketName = @import("jetstream_kv.zig").validateBucketName;
 
+// JetStream Object Store types
+pub const ObjectStore = @import("jetstream_objstore.zig").ObjectStore;
+pub const ObjectStoreManager = @import("jetstream_objstore.zig").ObjectStoreManager;
+pub const ObjectMeta = @import("jetstream_objstore.zig").ObjectMeta;
+pub const ObjectInfo = @import("jetstream_objstore.zig").ObjectInfo;
+pub const ObjectStoreConfig = @import("jetstream_objstore.zig").ObjectStoreConfig;
+pub const PutObjectOptions = @import("jetstream_objstore.zig").PutObjectOptions;
+pub const ObjectStoreError = @import("jetstream_objstore.zig").ObjectStoreError;
+pub const validateStoreName = @import("jetstream_objstore.zig").validateStoreName;
+pub const validateObjectName = @import("jetstream_objstore.zig").validateObjectName;
+
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 
 test {
@@ -71,4 +82,5 @@ test {
     _ = @import("jetstream.zig");
     _ = @import("jetstream_message.zig");
     _ = @import("jetstream_kv.zig");
+    _ = @import("jetstream_objstore.zig");
 }

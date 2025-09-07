@@ -1337,4 +1337,10 @@ pub const JetStream = struct {
         var manager = self.kvManager();
         return try manager.openBucket(bucket_name);
     }
+
+    /// Create an object store manager
+    pub fn objectStoreManager(self: *JetStream) @import("jetstream_objstore.zig").ObjectStoreManager {
+        const jetstream_objstore = @import("jetstream_objstore.zig");
+        return jetstream_objstore.ObjectStoreManager.init(self.allocator, self);
+    }
 };
