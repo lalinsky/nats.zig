@@ -46,7 +46,15 @@ pub const ObjectMeta = struct {
     /// Object name
     name: []const u8,
     /// Optional description
-    description: ?[]const u8,
+    description: ?[]const u8 = null,
+};
+
+/// Object info contains metadata plus instance information (what gets stored as JSON)
+pub const ObjectInfo = struct {
+    /// Object name
+    name: []const u8,
+    /// Optional description
+    description: ?[]const u8 = null,
     /// Store/bucket name
     bucket: []const u8,
     /// Unique object identifier (NUID)
@@ -57,32 +65,8 @@ pub const ObjectMeta = struct {
     chunks: u32,
     /// SHA-256 digest hex string
     digest: []const u8,
-    /// Creation timestamp
-    created: u64,
-    /// Modification timestamp
-    modified: u64,
     /// True if object is deleted
-    deleted: bool,
-};
-
-/// Object info (lighter version of metadata)
-pub const ObjectInfo = struct {
-    /// Object name
-    name: []const u8,
-    /// Store/bucket name
-    bucket: []const u8,
-    /// Unique object identifier
-    nuid: []const u8,
-    /// Total object size
-    size: u64,
-    /// Number of chunks
-    chunks: u32,
-    /// SHA-256 digest
-    digest: []const u8,
-    /// Modification timestamp
-    modified: u64,
-    /// True if deleted
-    deleted: bool,
+    deleted: bool = false,
 };
 
 /// Options for putting objects
@@ -253,9 +237,8 @@ pub const ObjectStore = struct {
             offset += chunk_size;
         }
 
-        // Create metadata
-        const now = std.time.nanoTimestamp();
-        const meta = ObjectMeta{
+        // Create object info for storage (without mtime - that's populated on retrieval)
+        const info = ObjectInfo{
             .name = object_name,
             .description = options.description,
             .bucket = self.store_name,
@@ -263,29 +246,27 @@ pub const ObjectStore = struct {
             .size = data.len,
             .chunks = num_chunks,
             .digest = digest,
-            .created = @intCast(now),
-            .modified = @intCast(now),
             .deleted = false,
         };
 
-        // Serialize and store metadata
-        const meta_json = try self.serializeObjectMeta(meta);
-        defer self.allocator.free(meta_json);
+        // Serialize and store object info
+        const info_json = try self.serializeObjectInfo(info);
+        defer self.allocator.free(info_json);
 
         const meta_subject = try self.getMetaSubject(object_name);
         defer self.allocator.free(meta_subject);
 
-        const meta_result = try self.js.publish(meta_subject, meta_json, .{});
+        const meta_result = try self.js.publish(meta_subject, info_json, .{});
         defer meta_result.deinit();
 
         return ObjectInfo{
             .name = object_name,
+            .description = options.description,
             .bucket = self.store_name,
             .nuid = object_nuid,
             .size = data.len,
             .chunks = num_chunks,
             .digest = digest,
-            .modified = @intCast(now),
             .deleted = false,
         };
     }
@@ -389,28 +370,19 @@ pub const ObjectStore = struct {
 
         const arena_allocator = arena.allocator();
 
-        // Parse metadata JSON
-        const meta_result = try self.parseObjectMeta(self.allocator, meta_msg.data);
-        defer meta_result.deinit();
-        const meta = meta_result.value;
+        // Parse object info JSON
+        const info_result = try self.parseObjectInfo(self.allocator, meta_msg.data);
+        var obj_info = info_result.value;
 
-        const obj_info = ObjectInfo{
-            .name = try arena_allocator.dupe(u8, meta.name),
-            .bucket = try arena_allocator.dupe(u8, meta.bucket),
-            .nuid = try arena_allocator.dupe(u8, meta.nuid),
-            .size = meta.size,
-            .chunks = meta.chunks,
-            .digest = try arena_allocator.dupe(u8, meta.digest),
-            .modified = meta.modified,
-            .deleted = meta.deleted,
-        };
+        // Populate mtime from message timestamp (never stored in JSON)
+        obj_info.mtime = meta_msg.time;
 
         // Transfer ownership of message to arena
         _ = arena_allocator.create(Message) catch unreachable;
         meta_msg.* = undefined; // Prevent double-free
 
         return Result(ObjectInfo){
-            .arena = arena,
+            .arena = info_result.arena,
             .value = obj_info,
         };
     }
@@ -426,29 +398,26 @@ pub const ObjectStore = struct {
             return ObjectStoreError.ObjectNotFound;
         }
 
-        // Create updated metadata with deleted flag
-        const now = std.time.nanoTimestamp();
-        const meta = ObjectMeta{
+        // Create updated object info with deleted flag
+        const updated_info = ObjectInfo{
             .name = object_name,
-            .description = null,
+            .description = obj_info.description,
             .bucket = self.store_name,
             .nuid = obj_info.nuid,
             .size = obj_info.size,
             .chunks = obj_info.chunks,
             .digest = obj_info.digest,
-            .created = 0, // Not preserving creation time for simplicity
-            .modified = @intCast(now),
             .deleted = true,
         };
 
-        // Serialize and store updated metadata
-        const meta_json = try self.serializeObjectMeta(meta);
-        defer self.allocator.free(meta_json);
+        // Serialize and store updated object info
+        const info_json = try self.serializeObjectInfo(updated_info);
+        defer self.allocator.free(info_json);
 
         const meta_subject = try self.getMetaSubject(object_name);
         defer self.allocator.free(meta_subject);
 
-        const result = try self.js.publish(meta_subject, meta_json, .{});
+        const result = try self.js.publish(meta_subject, info_json, .{});
         defer result.deinit();
     }
 
@@ -520,19 +489,19 @@ pub const ObjectStore = struct {
         };
     }
 
-    /// Serialize ObjectMeta to JSON string
-    fn serializeObjectMeta(self: *ObjectStore, meta: ObjectMeta) ![]u8 {
-        return std.json.stringifyAlloc(self.allocator, meta, .{});
+    /// Serialize ObjectInfo to JSON string  
+    fn serializeObjectInfo(self: *ObjectStore, info: ObjectInfo) ![]u8 {
+        return std.json.stringifyAlloc(self.allocator, info, .{});
     }
 
-    /// Parse ObjectMeta from JSON string
-    fn parseObjectMeta(_: *ObjectStore, allocator: std.mem.Allocator, json_data: []const u8) !Result(ObjectMeta) {
-        var parsed = try std.json.parseFromSlice(ObjectMeta, allocator, json_data, .{
+    /// Parse ObjectInfo from JSON string
+    fn parseObjectInfo(_: *ObjectStore, allocator: std.mem.Allocator, json_data: []const u8) !Result(ObjectInfo) {
+        var parsed = try std.json.parseFromSlice(ObjectInfo, allocator, json_data, .{
             .allocate = .alloc_always,
         });
         errdefer parsed.deinit();
 
-        return Result(ObjectMeta){
+        return Result(ObjectInfo){
             .arena = parsed.arena,
             .value = parsed.value,
         };
