@@ -848,8 +848,6 @@ pub const JetStream = struct {
     fn getMsgLegacy(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
         try validation.validateStreamName(stream_name);
 
-        // Validation already done in getMsg(), no need to repeat
-
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.MSG.GET.{s}", .{stream_name});
         defer self.allocator.free(subject);
