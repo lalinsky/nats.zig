@@ -239,21 +239,19 @@ pub const ObjectStore = struct {
         const chunk_size = options.chunk_size orelse self.chunk_size;
         const num_chunks = @as(u32, @intCast((data.len + chunk_size - 1) / chunk_size)); // Round up division
 
-        // Store chunks first
-        var chunk_idx: u32 = 0;
+        // Store chunks - all chunks go to the same subject
+        const chunk_subject = try self.getChunkSubject(object_nuid);
+        defer self.allocator.free(chunk_subject);
+
         var offset: usize = 0;
-        while (offset < data.len) : ({
-            chunk_idx += 1;
-            offset += chunk_size;
-        }) {
+        while (offset < data.len) {
             const end = @min(offset + chunk_size, data.len);
             const chunk_data = data[offset..end];
 
-            const chunk_subject = try std.fmt.allocPrint(self.allocator, "{s}{s}.{d}", .{ self.chunk_subject_prefix, object_nuid, chunk_idx });
-            defer self.allocator.free(chunk_subject);
-
             const result = try self.js.publish(chunk_subject, chunk_data, .{});
             defer result.deinit();
+
+            offset += chunk_size;
         }
 
         // Create metadata
@@ -316,25 +314,45 @@ pub const ObjectStore = struct {
         const data = try arena_allocator.alloc(u8, obj_info.size);
         var offset: usize = 0;
 
-        // Retrieve and reassemble chunks
-        var chunk_idx: u32 = 1;
-        while (chunk_idx <= obj_info.chunks) : (chunk_idx += 1) {
-            const chunk_subject = try std.fmt.allocPrint(self.allocator, "{s}{s}.{d}", .{ self.chunk_subject_prefix, obj_info.nuid, chunk_idx });
-            defer self.allocator.free(chunk_subject);
+        // Retrieve all chunks from the single chunk subject
+        const chunk_subject = try self.getChunkSubject(obj_info.nuid);
+        defer self.allocator.free(chunk_subject);
 
-            const chunk_msg = self.js.getMsg(self.stream_name, .{ .last_by_subj = chunk_subject, .direct = true }) catch |err| {
-                return if (err == error.MessageNotFound) ObjectStoreError.ChunkMismatch else err;
+        // Get all messages from the chunk subject using a consumer
+        const inbox = try newInbox(self.allocator);
+        defer self.allocator.free(inbox);
+
+        const consumer_config = ConsumerConfig{
+            .description = "Object chunk retrieval",
+            .deliver_subject = inbox,
+            .deliver_policy = .all,
+            .ack_policy = .none,
+            .max_ack_pending = 0,
+            .filter_subjects = &.{chunk_subject},
+        };
+
+        const sub = try self.js.subscribeSync(self.stream_name, consumer_config);
+        defer sub.deinit();
+
+        // Collect all chunk messages
+        var chunks_received: u32 = 0;
+        const timeout_ms = self.js.nc.options.timeout_ms;
+
+        while (chunks_received < obj_info.chunks) {
+            const js_msg = sub.nextMsg(timeout_ms) catch |err| {
+                return if (err == error.Timeout or err == error.QueueEmpty) ObjectStoreError.ChunkMismatch else err;
             };
-            defer chunk_msg.deinit();
+            defer js_msg.deinit();
 
             // Copy chunk data
-            const chunk_size = chunk_msg.data.len;
+            const chunk_size = js_msg.msg.data.len;
             if (offset + chunk_size > obj_info.size) {
                 return ObjectStoreError.ChunkMismatch;
             }
 
-            @memcpy(data[offset .. offset + chunk_size], chunk_msg.data);
+            @memcpy(data[offset .. offset + chunk_size], js_msg.msg.data);
             offset += chunk_size;
+            chunks_received += 1;
         }
 
         if (offset != obj_info.size) {
