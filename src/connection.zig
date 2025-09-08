@@ -113,6 +113,7 @@ pub const ConnectionError = error{
     AlreadyReconnecting,
     NotConnected,
     ManualReconnect,
+    StaleConnection,
 } || PublishError || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
 
 pub const ConnectionStatus = enum {
@@ -181,6 +182,8 @@ pub const ConnectionOptions = struct {
     trace: bool = false,
     no_responders: bool = true,
     max_scratch_size: usize = 1024 * 1024 * 10,
+    ping_interval_ms: u64 = 120000, // 2 minutes default, 0 = disabled
+    max_pings_out: u32 = 2, // max unanswered keep-alive PINGs
 };
 
 pub const Connection = struct {
@@ -224,6 +227,10 @@ pub const Connection = struct {
     incoming_pongs: u64 = 0,
     pong_condition: std.Thread.Condition = .{},
 
+    // PING/PONG keep-alive tracking
+    ping_timer: std.time.Timer, // Timer for tracking ping intervals
+    pings_out: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Outstanding keep-alive pings (atomic)
+
     // Write buffer (thread-safe, 64KB chunk size)
     write_buffer: WriteBuffer,
 
@@ -258,6 +265,7 @@ pub const Connection = struct {
             .response_manager = ResponseManager.init(allocator),
             .parser = Parser.init(allocator),
             .scratch = std.heap.ArenaAllocator.init(allocator),
+            .ping_timer = std.time.Timer.start() catch unreachable,
         };
     }
 
@@ -944,6 +952,12 @@ pub const Connection = struct {
                     },
                 }
             };
+
+            // Check if we need to send a PING
+            self.checkAndSendPing() catch |err| {
+                self.markNeedsReconnect(err);
+                continue;
+            };
         }
 
         log.debug("Reader loop exited", .{});
@@ -1251,6 +1265,22 @@ pub const Connection = struct {
         }
     }
 
+    fn checkAndSendPing(self: *Self) !void {
+        if (self.options.ping_interval_ms == 0) return;
+
+        const interval_ns = self.options.ping_interval_ms * std.time.ns_per_ms;
+        const elapsed_ns = self.ping_timer.read();
+        if (elapsed_ns >= interval_ns) {
+            try self.write_buffer.append("PING\r\n");
+            const current_pings = self.pings_out.fetchAdd(1, .monotonic) + 1;
+            if (self.options.max_pings_out > 0 and current_pings > self.options.max_pings_out) {
+                log.warn("Stale connection: {} unanswered PINGs", .{current_pings});
+                return error.StaleConnection;
+            }
+            self.ping_timer.reset();
+        }
+    }
+
     pub fn processPong(self: *Self) !void {
         if (self.should_stop.load(.acquire)) {
             return error.ShouldStop;
@@ -1270,6 +1300,9 @@ pub const Connection = struct {
         // Regular PONG handling for flush() calls
         self.incoming_pongs += 1;
         self.pong_condition.broadcast();
+
+        // Reset keep-alive ping counter - ANY PONG proves connection is alive
+        self.pings_out.store(0, .monotonic);
 
         log.debug("Received PONG for ping_id={}", .{self.incoming_pongs});
     }
