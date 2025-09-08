@@ -452,7 +452,7 @@ pub const MessageBatch = struct {
 /// JetStream pull subscription
 pub const PullSubscription = struct {
     /// JetStream context
-    js: *JetStream,
+    js: JetStream,
     /// Stream name
     stream_name: []const u8,
     /// Consumer name
@@ -579,7 +579,7 @@ pub const JetStreamSubscription = struct {
     /// Underlying NATS subscription
     subscription: *Subscription,
     /// JetStream context
-    js: *JetStream,
+    js: JetStream,
     /// Consumer information (Result wrapper)
     consumer_info: Result(ConsumerInfo),
 
@@ -1175,7 +1175,7 @@ pub const JetStream = struct {
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
             .subscription = subscription,
-            .js = self,
+            .js = self.*,
             .consumer_info = consumer_info,
         };
 
@@ -1205,7 +1205,7 @@ pub const JetStream = struct {
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
             .subscription = subscription,
-            .js = self,
+            .js = self.*,
             .consumer_info = consumer_info,
         };
         return js_sub;
@@ -1245,7 +1245,7 @@ pub const JetStream = struct {
         // Allocate PullSubscription
         const pull_subscription = try self.nc.allocator.create(PullSubscription);
         pull_subscription.* = PullSubscription{
-            .js = self,
+            .js = self.*,
             .stream_name = stream_name,
             .consumer_name = consumer_name,
             .consumer_info = consumer_info,
