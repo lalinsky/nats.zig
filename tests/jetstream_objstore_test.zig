@@ -59,7 +59,7 @@ test "ObjectStore put and get operations" {
     const object_name = "test-object.txt";
 
     // Put object
-    const put_result = try objstore.putBytes(object_name, test_data, .{});
+    const put_result = try objstore.putBytes(object_name, test_data);
     try testing.expectEqualStrings(object_name, put_result.name);
     try testing.expectEqualStrings(store_name, put_result.bucket);
     try testing.expect(put_result.size == test_data.len);
@@ -96,6 +96,7 @@ test "ObjectStore chunked operations" {
     const config = nats.ObjectStoreConfig{
         .store_name = store_name,
         .description = "Test object store for chunked data",
+        .chunk_size = 1024,
     };
 
     var objstore = try objstore_manager.createStore(config);
@@ -116,7 +117,7 @@ test "ObjectStore chunked operations" {
     const object_name = "large-object.bin";
 
     // Put large object with custom chunk size
-    const put_result = try objstore.putBytes(object_name, large_data, .{ .chunk_size = chunk_size });
+    const put_result = try objstore.putBytes(object_name, large_data);
     try testing.expectEqualStrings(object_name, put_result.name);
     try testing.expect(put_result.size == large_data.len);
     try testing.expect(put_result.chunks == 4); // Should be 4 chunks

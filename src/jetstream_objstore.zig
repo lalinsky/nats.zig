@@ -63,18 +63,12 @@ pub const ObjectInfo = struct {
     size: u64,
     /// Number of chunks
     chunks: u32,
+    /// Last modified time
+    mtime: ?u64 = null,
     /// SHA-256 digest hex string
     digest: []const u8,
     /// True if object is deleted
     deleted: bool = false,
-};
-
-/// Options for putting objects
-pub const PutObjectOptions = struct {
-    /// Custom chunk size (defaults to 128KB)
-    chunk_size: ?u32 = null,
-    /// Optional description
-    description: ?[]const u8 = null,
 };
 
 /// Configuration for creating object stores
@@ -93,6 +87,8 @@ pub const ObjectStoreConfig = struct {
     replicas: u8 = 1,
     /// Enable compression
     compression: bool = false,
+    /// Chunk size
+    chunk_size: u32 = DEFAULT_CHUNK_SIZE,
 };
 
 /// Validate store name according to object store rules
@@ -207,20 +203,22 @@ pub const ObjectStore = struct {
     }
 
     /// Put bytes as an object into the store
-    pub fn putBytes(self: *ObjectStore, object_name: []const u8, data: []const u8, options: PutObjectOptions) !ObjectInfo {
+    pub fn putBytes(self: *ObjectStore, object_name: []const u8, data: []const u8) !ObjectInfo {
         try validateObjectName(object_name);
+
+        var result = Result(ObjectInfo).init(self.allocator, undefined);
+        errdefer result.deinit();
 
         // Generate unique identifier for this object
         const object_nuid = try nuid.nextString(self.allocator);
-        defer self.allocator.free(object_nuid);
+        errdefer self.allocator.free(object_nuid);
 
         // Calculate digest
         const digest_array = try self.calculateDigest(data);
         const digest = digest_array[0..];
 
         // Determine chunk size
-        const chunk_size = options.chunk_size orelse self.chunk_size;
-        const num_chunks = @as(u32, @intCast((data.len + chunk_size - 1) / chunk_size)); // Round up division
+        const num_chunks = (data.len + self.chunk_size - 1) / self.chunk_size; // Round up division
 
         // Store chunks - all chunks go to the same subject
         const chunk_subject = try self.getChunkSubject(object_nuid);
@@ -228,47 +226,37 @@ pub const ObjectStore = struct {
 
         var offset: usize = 0;
         while (offset < data.len) {
-            const end = @min(offset + chunk_size, data.len);
+            const end = @min(offset + self.chunk_size, data.len);
             const chunk_data = data[offset..end];
 
-            const result = try self.js.publish(chunk_subject, chunk_data, .{});
-            defer result.deinit();
+            const chunk_ack = try self.js.publish(chunk_subject, chunk_data, .{});
+            defer chunk_ack.deinit();
 
-            offset += chunk_size;
+            offset += chunk_data.len;
         }
 
-        // Create object info for storage (without mtime - that's populated on retrieval)
-        const info = ObjectInfo{
-            .name = object_name,
-            .description = options.description,
+        result.value.* = .{
             .bucket = self.store_name,
             .nuid = object_nuid,
+            .name = object_name,
+            .description = "",
             .size = data.len,
             .chunks = num_chunks,
             .digest = digest,
             .deleted = false,
         };
+        const obj_info = &result.value;
 
-        // Serialize and store object info
-        const info_json = try self.serializeObjectInfo(info);
+        const info_json = try self.serializeObjectInfo(obj_info);
         defer self.allocator.free(info_json);
 
         const meta_subject = try self.getMetaSubject(object_name);
         defer self.allocator.free(meta_subject);
 
-        const meta_result = try self.js.publish(meta_subject, info_json, .{});
-        defer meta_result.deinit();
+        const meta_ack = try self.js.publish(meta_subject, info_json, .{});
+        defer meta_ack.deinit();
 
-        return ObjectInfo{
-            .name = object_name,
-            .description = options.description,
-            .bucket = self.store_name,
-            .nuid = object_nuid,
-            .size = data.len,
-            .chunks = num_chunks,
-            .digest = digest,
-            .deleted = false,
-        };
+        return result;
     }
 
     /// Get object data as bytes
@@ -276,7 +264,7 @@ pub const ObjectStore = struct {
         // First get metadata
         const info_result = try self.info(object_name);
         defer info_result.deinit();
-        const obj_info = info_result.value;
+        const obj_info = &info_result.value;
 
         if (obj_info.deleted) {
             return ObjectStoreError.ObjectNotFound;
@@ -489,16 +477,14 @@ pub const ObjectStore = struct {
         };
     }
 
-    /// Serialize ObjectInfo to JSON string  
-    fn serializeObjectInfo(self: *ObjectStore, info: ObjectInfo) ![]u8 {
-        return std.json.stringifyAlloc(self.allocator, info, .{});
+    /// Serialize ObjectInfo to JSON string
+    fn serializeObjectInfo(self: *ObjectStore, obj_info: ObjectInfo) ![]u8 {
+        return std.json.stringifyAlloc(self.allocator, obj_info, .{});
     }
 
     /// Parse ObjectInfo from JSON string
-    fn parseObjectInfo(_: *ObjectStore, allocator: std.mem.Allocator, json_data: []const u8) !Result(ObjectInfo) {
-        var parsed = try std.json.parseFromSlice(ObjectInfo, allocator, json_data, .{
-            .allocate = .alloc_always,
-        });
+    fn parseObjectInfo(_: *ObjectStore, allocator: std.mem.Allocator, obj_info_json: []const u8) !Result(ObjectInfo) {
+        var parsed = try std.json.parseFromSlice(ObjectInfo, allocator, obj_info_json, .{});
         errdefer parsed.deinit();
 
         return Result(ObjectInfo){
