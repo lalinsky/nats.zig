@@ -64,6 +64,9 @@ pub const KVError = @import("jetstream_kv.zig").KVError;
 pub const validateKey = @import("jetstream_kv.zig").validateKey;
 pub const validateBucketName = @import("jetstream_kv.zig").validateBucketName;
 
+// Utility types
+pub const Result = @import("result.zig").Result;
+
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 
 test {
