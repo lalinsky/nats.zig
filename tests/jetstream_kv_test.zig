@@ -226,24 +226,3 @@ test "KV status operation" {
     try testing.expect(status.value.is_compressed == true);
     try testing.expectEqualStrings("JetStream", status.value.backing_store);
 }
-
-test "KV validation" {
-    // Create a minimal JetStream instance for testing
-    const js = nats.JetStream.init(undefined, .{});
-
-    // Test bucket name validation
-    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(js, ""));
-    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(js, "invalid.name"));
-    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(js, "invalid name"));
-
-    // Test key validation
-    try testing.expectError(nats.KVError.InvalidKey, nats.validateKey(""));
-    try testing.expectError(nats.KVError.InvalidKey, nats.validateKey(".starts-with-dot"));
-    try testing.expectError(nats.KVError.InvalidKey, nats.validateKey("ends-with-dot."));
-    try testing.expectError(nats.KVError.InvalidKey, nats.validateKey("_kv_reserved"));
-    try testing.expectError(nats.KVError.InvalidKey, nats.validateKey("invalid key"));
-
-    // Valid names should pass
-    try nats.validateBucketName("valid-bucket_123");
-    try nats.validateKey("valid-key/path_123.foo");
-}

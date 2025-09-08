@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const JetStream = @import("jetstream.zig").JetStream;
+const validation = @import("validation.zig");
 const StreamConfig = @import("jetstream.zig").StreamConfig;
 const StreamInfo = @import("jetstream.zig").StreamInfo;
 const ConsumerConfig = @import("jetstream.zig").ConsumerConfig;
@@ -283,63 +284,6 @@ pub const KVWatcher = struct {
     }
 };
 
-/// Validate bucket name according to KV rules: alphanumeric, underscore, hyphen only
-pub fn validateBucketName(name: []const u8) !void {
-    if (name.len == 0) {
-        return KVError.InvalidBucketName;
-    }
-
-    for (name) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-') {
-            return KVError.InvalidBucketName;
-        }
-    }
-}
-
-/// Validate key name according to KV rules: [-/_=\.a-zA-Z0-9]+, no leading/trailing dots
-pub fn validateKey(key: []const u8) !void {
-    if (key.len == 0) {
-        return KVError.InvalidKey;
-    }
-
-    // Check for leading or trailing dots
-    if (key[0] == '.' or key[key.len - 1] == '.') {
-        return KVError.InvalidKey;
-    }
-
-    // Check for reserved prefix
-    if (std.mem.startsWith(u8, key, "_kv")) {
-        return KVError.InvalidKey;
-    }
-
-    // Validate each character
-    for (key) |c| {
-        const valid = std.ascii.isAlphanumeric(c) or
-            c == '-' or c == '/' or c == '_' or c == '=' or c == '.';
-        if (!valid) {
-            return KVError.InvalidKey;
-        }
-    }
-}
-
-test "validateBucketName" {
-    try validateBucketName("valid-bucket_name123");
-    try std.testing.expectError(KVError.InvalidBucketName, validateBucketName(""));
-    try std.testing.expectError(KVError.InvalidBucketName, validateBucketName("foo bar"));
-    try std.testing.expectError(KVError.InvalidBucketName, validateBucketName("foo.bar"));
-    try std.testing.expectError(KVError.InvalidBucketName, validateBucketName("foo*"));
-}
-
-test "validateKey" {
-    try validateKey("valid-key/name_123.foo");
-    try std.testing.expectError(KVError.InvalidKey, validateKey(""));
-    try std.testing.expectError(KVError.InvalidKey, validateKey(".starts-with-dot"));
-    try std.testing.expectError(KVError.InvalidKey, validateKey("ends-with-dot."));
-    try std.testing.expectError(KVError.InvalidKey, validateKey("_kv_reserved"));
-    try std.testing.expectError(KVError.InvalidKey, validateKey("foo bar"));
-    try std.testing.expectError(KVError.InvalidKey, validateKey("foo*"));
-}
-
 /// KV bucket implementation
 pub const KV = struct {
     /// JetStream context
@@ -355,7 +299,7 @@ pub const KV = struct {
 
     /// Initialize KV bucket handle
     pub fn init(js: JetStream, bucket_name: []const u8) !KV {
-        try validateBucketName(bucket_name);
+        try validation.validateKVBucketName(bucket_name);
 
         // Create owned copies of names
         const owned_bucket_name = try js.nc.allocator.dupe(u8, bucket_name);
@@ -383,7 +327,7 @@ pub const KV = struct {
 
     /// Get the full subject for a key
     fn getKeySubject(self: *KV, key: []const u8) ![]u8 {
-        try validateKey(key);
+        try validation.validateKVKeyName(key);
         return std.fmt.allocPrint(self.js.nc.allocator, "{s}{s}", .{ self.subject_prefix, key });
     }
 
@@ -584,7 +528,7 @@ pub const KV = struct {
 
     /// Watch a key or key pattern for updates
     pub fn watch(self: *KV, key: []const u8, options: WatchOptions) !KVWatcher {
-        try validateKey(key);
+        try validation.validateKVKeyName(key);
 
         const subject = try self.getKeySubject(key);
         defer self.js.nc.allocator.free(subject);
@@ -596,7 +540,7 @@ pub const KV = struct {
     pub fn watchMulti(self: *KV, key_patterns: []const []const u8, options: WatchOptions) !KVWatcher {
         // Validate all keys first
         for (key_patterns) |key| {
-            try validateKey(key);
+            try validation.validateKVKeyName(key);
         }
 
         // Create subjects for all keys
@@ -795,6 +739,8 @@ pub const KV = struct {
         // Convert filters to full subjects
         for (filters) |filter| {
             const subject = try std.fmt.allocPrint(self.js.nc.allocator, "{s}{s}", .{ self.subject_prefix, filter });
+            errdefer self.js.nc.allocator.free(subject);
+            try validation.validateSubject(subject);
             filter_subjects.appendAssumeCapacity(subject);
         }
 
@@ -863,7 +809,7 @@ pub const KVManager = struct {
 
     /// Create a new KV bucket
     pub fn createBucket(self: KVManager, config: KVConfig) !KV {
-        try validateBucketName(config.bucket);
+        try validation.validateKVBucketName(config.bucket);
 
         if (config.history < 1 or config.history > 64) {
             return error.InvalidConfiguration;
@@ -918,6 +864,7 @@ pub const KVManager = struct {
 
     /// Open an existing KV bucket
     pub fn openBucket(self: KVManager, bucket_name: []const u8) !KV {
+        try validation.validateKVBucketName(bucket_name);
         // Verify bucket exists by getting stream info
         const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "KV_{s}", .{bucket_name});
         defer self.js.nc.allocator.free(stream_name);
@@ -932,7 +879,7 @@ pub const KVManager = struct {
 
     /// Delete a KV bucket
     pub fn deleteBucket(self: KVManager, bucket_name: []const u8) !void {
-        try validateBucketName(bucket_name);
+        try validation.validateKVBucketName(bucket_name);
 
         const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "KV_{s}", .{bucket_name});
         defer self.js.nc.allocator.free(stream_name);
