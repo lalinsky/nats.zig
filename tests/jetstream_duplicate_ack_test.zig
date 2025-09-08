@@ -10,7 +10,6 @@ test "ack should succeed on first call" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create stream
     const stream_config = nats.StreamConfig{
@@ -89,7 +88,6 @@ test "ack should fail on second call" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create stream
     const stream_config = nats.StreamConfig{
@@ -177,7 +175,6 @@ test "nak should fail after ack" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create stream
     const stream_config = nats.StreamConfig{
@@ -265,7 +262,6 @@ test "inProgress can be called multiple times" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create stream
     const stream_config = nats.StreamConfig{

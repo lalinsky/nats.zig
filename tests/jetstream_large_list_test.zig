@@ -10,7 +10,6 @@ test "create many streams and list them" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     const num_streams = 10;
     var created_streams: [num_streams][]u8 = undefined;
@@ -73,7 +72,6 @@ test "stress test: create 20 streams and list them" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     const num_streams = 20;
     var created_streams: [num_streams][]u8 = undefined;

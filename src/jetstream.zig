@@ -616,10 +616,6 @@ pub const JetStream = struct {
         };
     }
 
-    pub fn deinit(self: *JetStream) void {
-        _ = self;
-    }
-
     fn sendRequest(self: JetStream, subject: []const u8, payload: []const u8) !*Message {
         const full_subject = try std.fmt.allocPrint(self.nc.allocator, "{s}{s}", .{ default_api_prefix, subject });
         defer self.nc.allocator.free(full_subject);

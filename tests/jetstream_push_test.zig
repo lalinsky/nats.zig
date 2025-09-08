@@ -10,7 +10,6 @@ test "basic push subscription" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create a test stream
     const stream_config = nats.StreamConfig{
@@ -70,7 +69,6 @@ test "push subscription with flow control" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create a test stream
     const stream_config = nats.StreamConfig{
@@ -131,7 +129,6 @@ test "push subscription error handling" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Try to create push subscription without deliver_subject (should fail)
     const invalid_config = nats.ConsumerConfig{
