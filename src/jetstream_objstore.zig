@@ -214,7 +214,6 @@ pub const ObjectStore = struct {
 
     /// Get the meta subject for an object name
     fn getMetaSubject(self: *ObjectStore, object_name: []const u8) ![]u8 {
-        try validateObjectName(object_name);
         return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.meta_subject_prefix, object_name });
     }
 
@@ -373,6 +372,8 @@ pub const ObjectStore = struct {
 
     /// Get object metadata
     pub fn info(self: *ObjectStore, object_name: []const u8) !Result(ObjectInfo) {
+        try validateObjectName(object_name);
+
         const meta_subject = try self.getMetaSubject(object_name);
         defer self.allocator.free(meta_subject);
 
