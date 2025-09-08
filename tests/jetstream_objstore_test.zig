@@ -59,7 +59,7 @@ test "ObjectStore put and get operations" {
     const object_name = "test-object.txt";
 
     // Put object
-    const put_result = try objstore.put(object_name, test_data, .{});
+    const put_result = try objstore.putBytes(object_name, test_data, .{});
     try testing.expectEqualStrings(object_name, put_result.name);
     try testing.expectEqualStrings(store_name, put_result.bucket);
     try testing.expect(put_result.size == test_data.len);
@@ -67,7 +67,7 @@ test "ObjectStore put and get operations" {
     try testing.expect(!put_result.deleted);
 
     // Get object
-    const get_result = try objstore.get(object_name);
+    const get_result = try objstore.getBytes(object_name);
     defer get_result.deinit();
     try testing.expectEqualStrings(test_data, get_result.value);
 
@@ -116,13 +116,13 @@ test "ObjectStore chunked operations" {
     const object_name = "large-object.bin";
 
     // Put large object with custom chunk size
-    const put_result = try objstore.put(object_name, large_data, .{ .chunk_size = chunk_size });
+    const put_result = try objstore.putBytes(object_name, large_data, .{ .chunk_size = chunk_size });
     try testing.expectEqualStrings(object_name, put_result.name);
     try testing.expect(put_result.size == large_data.len);
     try testing.expect(put_result.chunks == 4); // Should be 4 chunks
 
     // Get large object
-    const get_result = try objstore.get(object_name);
+    const get_result = try objstore.getBytes(object_name);
     defer get_result.deinit();
     try testing.expectEqualSlices(u8, large_data, get_result.value);
 }
@@ -153,10 +153,10 @@ test "ObjectStore delete operations" {
     const object_name = "doomed-object.txt";
 
     // Put object
-    _ = try objstore.put(object_name, test_data, .{});
+    _ = try objstore.putBytes(object_name, test_data, .{});
 
     // Verify object exists
-    const get_result = try objstore.get(object_name);
+    const get_result = try objstore.getBytes(object_name);
     defer get_result.deinit();
     try testing.expectEqualStrings(test_data, get_result.value);
 
@@ -164,7 +164,7 @@ test "ObjectStore delete operations" {
     try objstore.delete(object_name);
 
     // Verify object is deleted
-    try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.get(object_name));
+    try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.getBytes(object_name));
 
     // Info should show deleted status
     const info_result = try objstore.info(object_name);
@@ -202,7 +202,7 @@ test "ObjectStore list operations" {
     };
 
     for (objects) |obj| {
-        _ = try objstore.put(obj.name, obj.data, .{});
+        _ = try objstore.putBytes(obj.name, obj.data, .{});
     }
 
     // List all objects
@@ -287,7 +287,7 @@ test "ObjectStore error handling" {
     defer objstore_manager.deleteStore(store_name) catch {};
 
     // Try to get non-existent object
-    try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.get("nonexistent.txt"));
+    try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.getBytes("nonexistent.txt"));
     try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.info("nonexistent.txt"));
 
     // Try to delete non-existent object

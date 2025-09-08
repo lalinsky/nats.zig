@@ -222,8 +222,8 @@ pub const ObjectStore = struct {
         return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.chunk_subject_prefix, object_nuid });
     }
 
-    /// Put an object into the store
-    pub fn put(self: *ObjectStore, object_name: []const u8, data: []const u8, options: PutObjectOptions) !ObjectInfo {
+    /// Put bytes as an object into the store
+    pub fn putBytes(self: *ObjectStore, object_name: []const u8, data: []const u8, options: PutObjectOptions) !ObjectInfo {
         try validateObjectName(object_name);
 
         // Generate unique identifier for this object
@@ -290,8 +290,8 @@ pub const ObjectStore = struct {
         };
     }
 
-    /// Get object data
-    pub fn get(self: *ObjectStore, object_name: []const u8) !Result([]u8) {
+    /// Get object data as bytes
+    pub fn getBytes(self: *ObjectStore, object_name: []const u8) !Result([]u8) {
         // First get metadata
         const info_result = try self.info(object_name);
         defer info_result.deinit();
