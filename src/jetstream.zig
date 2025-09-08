@@ -1219,6 +1219,7 @@ pub const JetStream = struct {
 
     /// Publish a pre-constructed message to JetStream
     pub fn publishMsg(self: *JetStream, msg: *Message, options: PublishOptions) !Result(PubAck) {
+        try validation.validateSubject(msg.subject);
         return self.publishMsgInternal(msg, options);
     }
 

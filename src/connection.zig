@@ -545,6 +545,7 @@ pub const Connection = struct {
 
     /// Publishes a message on a subject.
     pub fn publishMsg(self: *Self, msg: *Message) !void {
+        try validation.validateSubject(msg.subject);
         return self.publishMsgInternal(msg, null);
     }
 
@@ -565,15 +566,12 @@ pub const Connection = struct {
 
     /// Publishes a message on a subject, with a reply subject.
     pub fn publishRequestMsg(self: *Self, msg: *Message, reply: []const u8) !void {
+        try validation.validateSubject(msg.subject);
         try validation.validateSubject(reply);
         return self.publishMsgInternal(msg, reply);
     }
 
     fn publishMsgInternal(self: *Self, msg: *Message, reply_override: ?[]const u8) !void {
-        if (msg.subject.len == 0) {
-            return error.InvalidSubject;
-        }
-
         self.mutex.lock();
         defer self.mutex.unlock();
 
