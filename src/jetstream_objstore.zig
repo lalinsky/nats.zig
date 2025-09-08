@@ -371,7 +371,9 @@ pub const ObjectStore = struct {
         const arena_allocator = arena.allocator();
 
         // Parse metadata JSON
-        const meta = try self.parseObjectMeta(arena_allocator, meta_msg.data);
+        const meta_result = try self.parseObjectMeta(self.allocator, meta_msg.data);
+        defer meta_result.deinit();
+        const meta = meta_result.value;
 
         const obj_info = ObjectInfo{
             .name = try arena_allocator.dupe(u8, meta.name),
@@ -472,7 +474,9 @@ pub const ObjectStore = struct {
             defer js_msg.deinit();
 
             // Parse metadata
-            const meta = try self.parseObjectMeta(arena_allocator, js_msg.msg.data);
+            const meta_result = try self.parseObjectMeta(self.allocator, js_msg.msg.data);
+            defer meta_result.deinit();
+            const meta = meta_result.value;
 
             // Only include non-deleted objects
             if (!meta.deleted) {
@@ -499,60 +503,19 @@ pub const ObjectStore = struct {
 
     /// Serialize ObjectMeta to JSON string
     fn serializeObjectMeta(self: *ObjectStore, meta: ObjectMeta) ![]u8 {
-        // Simple JSON serialization (could use a proper JSON library in production)
-        const desc_str = if (meta.description) |desc|
-            try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{desc})
-        else
-            try self.allocator.dupe(u8, "null");
-        defer self.allocator.free(desc_str);
-
-        return std.fmt.allocPrint(self.allocator,
-            \\{{"name":"{s}","description":{s},"bucket":"{s}","nuid":"{s}","size":{d},"chunks":{d},"digest":"{s}","created":{d},"modified":{d},"deleted":{s}}}
-        , .{
-            meta.name,
-            desc_str,
-            meta.bucket,
-            meta.nuid,
-            meta.size,
-            meta.chunks,
-            meta.digest,
-            meta.created,
-            meta.modified,
-            if (meta.deleted) "true" else "false",
-        });
+        return std.json.stringifyAlloc(self.allocator, meta, .{});
     }
 
     /// Parse ObjectMeta from JSON string
-    fn parseObjectMeta(_: *ObjectStore, allocator: std.mem.Allocator, json_data: []const u8) !ObjectMeta {
-        // Simple JSON parsing (could use a proper JSON library in production)
-        // This is a basic implementation - in production, use std.json or similar
+    fn parseObjectMeta(_: *ObjectStore, allocator: std.mem.Allocator, json_data: []const u8) !Result(ObjectMeta) {
+        var parsed = try std.json.parseFromSlice(ObjectMeta, allocator, json_data, .{
+            .allocate = .alloc_always,
+        });
+        errdefer parsed.deinit();
 
-        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_data, .{});
-        defer parsed.deinit();
-
-        const root = parsed.value.object;
-
-        const name = try allocator.dupe(u8, root.get("name").?.string);
-        const bucket = try allocator.dupe(u8, root.get("bucket").?.string);
-        const nuid_str = try allocator.dupe(u8, root.get("nuid").?.string);
-        const digest = try allocator.dupe(u8, root.get("digest").?.string);
-
-        const description = if (root.get("description")) |desc_val|
-            if (desc_val == .null) null else try allocator.dupe(u8, desc_val.string)
-        else
-            null;
-
-        return ObjectMeta{
-            .name = name,
-            .description = description,
-            .bucket = bucket,
-            .nuid = nuid_str,
-            .size = @intCast(root.get("size").?.integer),
-            .chunks = @intCast(root.get("chunks").?.integer),
-            .digest = digest,
-            .created = @intCast(root.get("created").?.integer),
-            .modified = @intCast(root.get("modified").?.integer),
-            .deleted = root.get("deleted").?.bool,
+        return Result(ObjectMeta){
+            .arena = parsed.arena,
+            .value = parsed.value,
         };
     }
 };
