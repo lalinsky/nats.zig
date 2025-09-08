@@ -858,13 +858,11 @@ pub const KVManager = struct {
     const Self = @This();
 
     pub fn init(js: JetStream) KVManager {
-        return KVManager{
-            .js = js,
-        };
+        return .{ .js = js };
     }
 
     /// Create a new KV bucket
-    pub fn createBucket(self: *KVManager, config: KVConfig) !KV {
+    pub fn createBucket(self: KVManager, config: KVConfig) !KV {
         try validateBucketName(config.bucket);
 
         if (config.history < 1 or config.history > 64) {
@@ -919,7 +917,7 @@ pub const KVManager = struct {
     }
 
     /// Open an existing KV bucket
-    pub fn openBucket(self: *KVManager, bucket_name: []const u8) !KV {
+    pub fn openBucket(self: KVManager, bucket_name: []const u8) !KV {
         // Verify bucket exists by getting stream info
         const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "KV_{s}", .{bucket_name});
         defer self.js.nc.allocator.free(stream_name);
@@ -933,7 +931,7 @@ pub const KVManager = struct {
     }
 
     /// Delete a KV bucket
-    pub fn deleteBucket(self: *KVManager, bucket_name: []const u8) !void {
+    pub fn deleteBucket(self: KVManager, bucket_name: []const u8) !void {
         try validateBucketName(bucket_name);
 
         const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "KV_{s}", .{bucket_name});
