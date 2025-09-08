@@ -742,6 +742,7 @@ pub const KV = struct {
         // Convert filters to full subjects
         for (filters) |filter| {
             const subject = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.subject_prefix, filter });
+            errdefer self.allocator.free(subject);
             try validation.validateSubject(subject);
             filter_subjects.appendAssumeCapacity(subject);
         }
