@@ -847,6 +847,8 @@ pub const JetStream = struct {
     /// Internal function for getting messages from the stream using legacy API
     fn getMsgLegacy(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
         try validation.validateStreamName(stream_name);
+        if (options.last_by_subj) |subject| try validation.validateSubject(subject);
+        if (options.next_by_subj) |subject| try validation.validateSubject(subject);
 
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.MSG.GET.{s}", .{stream_name});
@@ -948,6 +950,8 @@ pub const JetStream = struct {
     fn getMsgDirect(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
         log.debug("getMsgDirect: Starting with stream_name={s}", .{stream_name});
         try validation.validateStreamName(stream_name);
+        if (options.last_by_subj) |subject| try validation.validateSubject(subject);
+        if (options.next_by_subj) |subject| try validation.validateSubject(subject);
         log.debug("getMsgDirect: Stream name validation passed", .{});
 
         // Build the subject for the direct get API call
