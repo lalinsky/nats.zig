@@ -1329,7 +1329,7 @@ pub const JetStream = struct {
     /// Create a KV manager for bucket operations
     pub fn kvManager(self: *JetStream) @import("jetstream_kv.zig").KVManager {
         const jetstream_kv = @import("jetstream_kv.zig");
-        return jetstream_kv.KVManager.init(self.allocator, self);
+        return jetstream_kv.KVManager.init(self.*);
     }
 
     /// Open an existing KV bucket

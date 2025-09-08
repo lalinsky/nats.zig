@@ -234,10 +234,13 @@ test "KV status operation" {
 }
 
 test "KV validation" {
+    // Create a minimal JetStream instance for testing
+    const js = nats.JetStream.init(testing.allocator, undefined, .{});
+    
     // Test bucket name validation
-    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(testing.allocator, undefined, ""));
-    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(testing.allocator, undefined, "invalid.name"));
-    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(testing.allocator, undefined, "invalid name"));
+    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(js, ""));
+    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(js, "invalid.name"));
+    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(js, "invalid name"));
 
     // Test key validation
     try testing.expectError(nats.KVError.InvalidKey, nats.validateKey(""));
