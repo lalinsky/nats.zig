@@ -1082,7 +1082,7 @@ pub const JetStream = struct {
 
     /// Subscribe to a JetStream push consumer with callback handler
     /// Handle JetStream status messages (heartbeats and flow control)
-    fn handleStatusMessage(msg: *Message, js: *JetStream) !void {
+    fn handleStatusMessage(msg: *Message, nc: *Connection) !void {
         // Debug: Print all headers to understand the actual format
         log.debug("Status message headers:", .{});
         var header_iter = msg.headers.iterator();
@@ -1109,7 +1109,7 @@ pub const JetStream = struct {
 
                     if (msg.reply) |reply_subject| {
                         // Respond with empty message to acknowledge flow control
-                        try js.nc.publish(reply_subject, "");
+                        try nc.publish(reply_subject, "");
                         log.debug("Sent flow control response to: {s}", .{reply_subject});
                     } else {
                         log.warn("Flow control request missing reply subject", .{});
@@ -1142,11 +1142,11 @@ pub const JetStream = struct {
 
         // Define the handler inline to avoid the two-level context issue
         const JSHandler = struct {
-            fn wrappedHandler(msg: *Message, js: *JetStream, user_args: @TypeOf(args)) anyerror!void {
+            fn wrappedHandler(msg: *Message, nc: *Connection, user_args: @TypeOf(args)) anyerror!void {
                 // Check for status messages (heartbeats and flow control)
                 if (msg.status_code == STATUS_CONTROL) {
                     // Handle status message internally, don't pass to user callback
-                    handleStatusMessage(msg, js) catch |err| {
+                    handleStatusMessage(msg, nc) catch |err| {
                         log.err("Failed to handle status message: {}", .{err});
                     };
                     msg.deinit(); // Clean up status message
@@ -1154,7 +1154,7 @@ pub const JetStream = struct {
                 }
 
                 // Create JetStream message wrapper for regular messages
-                const js_msg = jetstream_message.createJetStreamMessage(js.nc, msg) catch {
+                const js_msg = jetstream_message.createJetStreamMessage(nc, msg) catch {
                     msg.deinit(); // Clean up on error
                     return;
                 };
@@ -1171,7 +1171,7 @@ pub const JetStream = struct {
         };
 
         // Subscribe to the delivery subject with simple arguments
-        const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self, args });
+        const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self.nc, args });
 
         // Create JetStream subscription wrapper
         const js_sub = try self.allocator.create(JetStreamSubscription);
