@@ -830,6 +830,7 @@ pub const JetStream = struct {
     /// Purges messages from a stream.
     pub fn purgeStream(self: *JetStream, stream_name: []const u8, request: StreamPurgeRequest) !Result(StreamPurgeResponse) {
         try validation.validateStreamName(stream_name);
+        if (request.filter) |subject| try validation.validateSubject(subject);
 
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.PURGE.{s}", .{stream_name});
         defer self.allocator.free(subject);

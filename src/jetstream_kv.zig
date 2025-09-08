@@ -330,7 +330,6 @@ pub const KV = struct {
 
     /// Get the full subject for a key
     fn getKeySubject(self: *KV, key: []const u8) ![]u8 {
-        try validation.validateKVKeyName(key);
         return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.subject_prefix, key });
     }
 
@@ -871,6 +870,7 @@ pub const KVManager = struct {
 
     /// Open an existing KV bucket
     pub fn openBucket(self: *KVManager, bucket_name: []const u8) !KV {
+        try validation.validateKVBucketName(bucket_name);
         // Verify bucket exists by getting stream info
         const stream_name = try std.fmt.allocPrint(self.allocator, "KV_{s}", .{bucket_name});
         defer self.allocator.free(stream_name);
