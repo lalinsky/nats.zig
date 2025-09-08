@@ -659,6 +659,9 @@ pub const JetStream = struct {
     /// Creates a new stream with the provided configuration.
     pub fn addStream(self: *JetStream, config: StreamConfig) !Result(StreamInfo) {
         try validation.validateStreamName(config.name);
+        for (config.subjects) |subject| {
+            try validation.validateSubject(subject);
+        }
 
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.CREATE.{s}", .{config.name});
@@ -677,6 +680,9 @@ pub const JetStream = struct {
     /// Updates a stream with the provided configuration.
     pub fn updateStream(self: *JetStream, config: StreamConfig) !Result(StreamInfo) {
         try validation.validateStreamName(config.name);
+        for (config.subjects) |subject| {
+            try validation.validateSubject(subject);
+        }
 
         // Build the subject for the API call
         const subject = try std.fmt.allocPrint(self.allocator, "STREAM.UPDATE.{s}", .{config.name});
