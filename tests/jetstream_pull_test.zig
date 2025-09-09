@@ -16,7 +16,6 @@ test "JetStream pull consumer basic fetch" {
     defer utils.closeConnection(nc);
 
     var js = nc.jetstream(.{});
-    defer js.deinit();
 
     const stream_name = "TEST_PULL_STREAM";
     const consumer_name = "test_pull_consumer";
