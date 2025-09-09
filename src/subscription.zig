@@ -54,6 +54,10 @@ pub const Subscription = struct {
     // Assigned dispatcher (for async subscriptions only)
     dispatcher: ?*Dispatcher = null,
 
+    // Track pending messages and bytes for both sync and async subscriptions
+    pending_msgs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    pending_bytes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
     pub fn create(nc: *Connection, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
@@ -115,11 +119,17 @@ pub const Subscription = struct {
     }
 
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {
-        return self.messages.pop(timeout_ms) catch |err| switch (err) {
-            error.BufferFrozen => error.Timeout,
-            error.QueueEmpty => error.Timeout,
-            error.QueueClosed => error.Timeout, // TODO: this should be mapped to ConnectionClosed
+        const msg = self.messages.pop(timeout_ms) catch |err| switch (err) {
+            error.BufferFrozen => return error.Timeout,
+            error.QueueEmpty => return error.Timeout,
+            error.QueueClosed => return error.Timeout, // TODO: this should be mapped to ConnectionClosed
         };
+
+        // Decrement pending counters when message is consumed
+        _ = self.pending_msgs.fetchSub(1, .acq_rel);
+        _ = self.pending_bytes.fetchSub(msg.data.len, .acq_rel);
+
+        return msg;
     }
 };
 
