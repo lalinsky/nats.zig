@@ -182,12 +182,18 @@ test "subscription drain timeout" {
     var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    // Create subscription that never processes messages
+    // Create sync subscription and leave one message unconsumed
     const sub = try conn.subscribeSync("test.drain.timeout");
     defer sub.deinit();
 
-    // Manually mark as draining without completing
-    sub.draining.store(true, .release);
+    try conn.publish("test.drain.timeout", "will block drain");
+    try conn.flush();
+    // Wait briefly for arrival
+    var waited: u64 = 0;
+    while (sub.pending_msgs.load(.acquire) < 1 and waited < 200) : (waited += 5) {
+        std.time.sleep(5 * std.time.ns_per_ms);
+    }
+    sub.drain();
 
     // waitForDrainCompletion should timeout
     const result = sub.waitForDrainCompletion(100); // 100ms timeout
