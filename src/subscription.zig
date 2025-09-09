@@ -58,6 +58,10 @@ pub const Subscription = struct {
     pending_msgs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     pending_bytes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
+    // Drain state
+    draining: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    drain_complete: std.Thread.ResetEvent = .{},
+
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
     pub fn create(nc: *Connection, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
@@ -118,6 +122,47 @@ pub const Subscription = struct {
         }
     }
 
+    pub fn drain(self: *Subscription) void {
+        // Mark as draining
+        self.draining.store(true, .release);
+
+        // Send UNSUB to server
+        self.nc.unsubscribeInternal(self.sid);
+
+        // Check if already empty (immediate completion)
+        if (self.pending_msgs.load(.acquire) == 0) {
+            log.debug("Subscription {d} drain completed immediately", .{self.sid});
+            self.drain_complete.set();
+        } else {
+            log.debug("Subscription {d} draining started, {d} pending messages", .{ self.sid, self.pending_msgs.load(.acquire) });
+        }
+    }
+
+    pub fn isDraining(self: *Subscription) bool {
+        return self.draining.load(.acquire);
+    }
+
+    pub fn isDrainComplete(self: *Subscription) bool {
+        return self.draining.load(.acquire) and self.pending_msgs.load(.acquire) == 0;
+    }
+
+    pub fn waitForDrainCompletion(self: *Subscription, timeout_ms: u64) !void {
+        if (!self.draining.load(.acquire)) {
+            return error.NotDraining;
+        }
+
+        if (timeout_ms == 0) {
+            // No timeout - wait indefinitely
+            self.drain_complete.wait();
+        } else {
+            // Convert timeout to nanoseconds
+            const timeout_ns = timeout_ms * std.time.ns_per_ms;
+            self.drain_complete.timedWait(timeout_ns) catch {
+                return error.Timeout;
+            };
+        }
+    }
+
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {
         const msg = self.messages.pop(timeout_ms) catch |err| switch (err) {
             error.BufferFrozen => return error.Timeout,
@@ -126,8 +171,7 @@ pub const Subscription = struct {
         };
 
         // Decrement pending counters when message is consumed
-        _ = self.pending_msgs.fetchSub(1, .acq_rel);
-        _ = self.pending_bytes.fetchSub(msg.data.len, .acq_rel);
+        decrementPending(self, msg.data.len);
 
         return msg;
     }
@@ -168,4 +212,21 @@ pub fn createMsgHandler(allocator: Allocator, comptime handlerFn: anytype, args:
         .callFn = Context.call,
         .cleanupFn = Context.cleanup,
     };
+}
+
+// Internal functions for pending counter management (not part of public API)
+pub fn incrementPending(sub: *Subscription, msg_size: usize) void {
+    _ = sub.pending_msgs.fetchAdd(1, .acq_rel);
+    _ = sub.pending_bytes.fetchAdd(msg_size, .acq_rel);
+}
+
+pub fn decrementPending(sub: *Subscription, msg_size: usize) void {
+    const remaining_msgs = sub.pending_msgs.fetchSub(1, .acq_rel);
+    _ = sub.pending_bytes.fetchSub(msg_size, .acq_rel);
+
+    // Check if drain is complete (we just decremented from 1 to 0)
+    if (sub.draining.load(.acquire) and remaining_msgs == 1) {
+        log.debug("Subscription {d} drain completed", .{sub.sid});
+        sub.drain_complete.set();
+    }
 }

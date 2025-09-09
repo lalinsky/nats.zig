@@ -14,7 +14,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
-const Subscription = @import("subscription.zig").Subscription;
+const subscription_mod = @import("subscription.zig");
+const Subscription = subscription_mod.Subscription;
 const ConcurrentQueue = @import("queue.zig").ConcurrentQueue;
 
 const log = @import("log.zig").log;
@@ -60,8 +61,7 @@ pub const Dispatcher = struct {
             // Save message data length before cleanup
             const message_data_len = dispatch_msg.message.data.len;
             // Decrement pending counters for dropped messages
-            _ = dispatch_msg.subscription.pending_msgs.fetchSub(1, .acq_rel);
-            _ = dispatch_msg.subscription.pending_bytes.fetchSub(message_data_len, .acq_rel);
+            subscription_mod.decrementPending(dispatch_msg.subscription, message_data_len);
             dispatch_msg.message.deinit();
             dispatch_msg.deinit(); // Release subscription reference
         }
@@ -144,8 +144,7 @@ pub const Dispatcher = struct {
         }
 
         // Decrement pending counters after handler completes (success or failure)
-        _ = subscription.pending_msgs.fetchSub(1, .acq_rel);
-        _ = subscription.pending_bytes.fetchSub(message_data_len, .acq_rel);
+        subscription_mod.decrementPending(subscription, message_data_len);
     }
 };
 

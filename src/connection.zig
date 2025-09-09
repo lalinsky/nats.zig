@@ -1095,9 +1095,14 @@ pub const Connection = struct {
         if (sub) |s| {
             defer s.release(); // Release when done
 
+            // Check if subscription is draining - drop message if so
+            if (s.isDraining()) {
+                log.debug("Dropping message for draining subscription {d}", .{message.sid});
+                return;
+            }
+
             // Increment pending message count and bytes for this subscription
-            _ = s.pending_msgs.fetchAdd(1, .acq_rel);
-            _ = s.pending_bytes.fetchAdd(message.data.len, .acq_rel);
+            subscription_mod.incrementPending(s, message.data.len);
 
             // Log before consuming message (to avoid use-after-free)
             log.debug("Delivering message to subscription {d}: {s}", .{ message.sid, message.data });
@@ -1108,16 +1113,14 @@ pub const Connection = struct {
                     dispatcher.enqueue(s, message) catch |err| {
                         log.err("Failed to dispatch message for sid {d}: {}", .{ message.sid, err });
                         // Undo the pending counters since we failed to enqueue
-                        _ = s.pending_msgs.fetchSub(1, .acq_rel);
-                        _ = s.pending_bytes.fetchSub(message.data.len, .acq_rel);
+                        subscription_mod.decrementPending(s, message.data.len);
                         return;
                     };
                     owns_message = false;
                 } else {
                     log.err("Async subscription {} has no assigned dispatcher", .{message.sid});
                     // Undo the pending counters since we can't process
-                    _ = s.pending_msgs.fetchSub(1, .acq_rel);
-                    _ = s.pending_bytes.fetchSub(message.data.len, .acq_rel);
+                    subscription_mod.decrementPending(s, message.data.len);
                     return;
                 }
             } else {
@@ -1128,16 +1131,14 @@ pub const Connection = struct {
                             // Queue is closed; drop gracefully.
                             log.debug("Queue closed for sid {d}; dropping message", .{message.sid});
                             // Undo the pending counters since queue is closed
-                            _ = s.pending_msgs.fetchSub(1, .acq_rel);
-                            _ = s.pending_bytes.fetchSub(message.data.len, .acq_rel);
+                            subscription_mod.decrementPending(s, message.data.len);
                             return;
                         },
                         else => {
                             // Allocation or unexpected push failure; log and tear down the connection.
                             log.err("Failed to enqueue message for sid {d}: {}", .{ message.sid, err });
                             // Undo the pending counters since we failed to enqueue
-                            _ = s.pending_msgs.fetchSub(1, .acq_rel);
-                            _ = s.pending_bytes.fetchSub(message.data.len, .acq_rel);
+                            subscription_mod.decrementPending(s, message.data.len);
                             return err;
                         },
                     }
