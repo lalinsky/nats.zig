@@ -1,6 +1,7 @@
 - read README.md for overview of the project
 - read files in docs/reference/*.md if you need knowledge about the NATS protocol
-- run `zig build test` to confirm your changes are working
-- use the env variable `TEST_FILTER="test name"` to run specific tests, if needed
-- use the env variable `TEST_LOG_CAPTURE=0` to see log output from successful tests, if needed
-- format code using `zig fmt` before commit
+- use `./check.sh` to format code, run unit tests, and run integration tests
+- use `./check.sh --test-filter "test name" ` to run specific tests
+- use `./check.sh --test-fail-first true` to stop on first test failure
+- prefer only running specific tests and stopping on the first failure, while working on the feature
+- run full check after you are done
