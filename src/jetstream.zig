@@ -1073,11 +1073,18 @@ pub const JetStream = struct {
     }
 
     pub fn subscribe(self: JetStream, stream_name: []const u8, consumer_config: ConsumerConfig, comptime handlerFn: anytype, args: anytype) !*JetStreamSubscription {
-        // Validate that this is a push consumer configuration
-        const deliver_subject = consumer_config.deliver_subject orelse return error.MissingDeliverSubject;
-
-        // Create push consumer config by removing pull-only fields
+        // Generate deliver_subject if not provided and create push consumer config
         var push_config = consumer_config;
+        const generated_deliver_subject = if (consumer_config.deliver_subject == null) 
+            try inbox.newInbox(self.nc.allocator)
+        else 
+            null;
+        errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
+
+        const deliver_subject = consumer_config.deliver_subject orelse generated_deliver_subject.?;
+        push_config.deliver_subject = deliver_subject;
+
+        // Remove pull-only fields from push consumer config
         push_config.max_waiting = 0; // Push consumers don't support max_waiting
         push_config.max_batch = null; // Push consumers don't support max_batch
         push_config.max_expires = null; // Push consumers don't support max_expires
@@ -1132,11 +1139,18 @@ pub const JetStream = struct {
 
     /// Create a synchronous push subscription for manual message consumption
     pub fn subscribeSync(self: JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*JetStreamSubscription {
-        // Validate that this is a push consumer configuration with deliver_subject
-        const deliver_subject = consumer_config.deliver_subject orelse return error.MissingDeliverSubject;
-
-        // Create push consumer config
+        // Generate deliver_subject if not provided and create push consumer config
         var push_config = consumer_config;
+        const generated_deliver_subject = if (consumer_config.deliver_subject == null) 
+            try inbox.newInbox(self.nc.allocator)
+        else 
+            null;
+        errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
+
+        const deliver_subject = consumer_config.deliver_subject orelse generated_deliver_subject.?;
+        push_config.deliver_subject = deliver_subject;
+
+        // Remove pull-only fields from push consumer config
         push_config.max_waiting = 0; // Push consumers don't support max_waiting
         push_config.max_batch = null; // Push consumers don't support max_batch
         push_config.max_expires = null; // Push consumers don't support max_expires
