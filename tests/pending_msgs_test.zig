@@ -19,8 +19,13 @@ test "pending_msgs counter sync subscription" {
     try conn.publish("test.pending.sync", msg1_data);
     try conn.flush();
 
-    // Give it a moment for message to arrive
-    std.time.sleep(10 * std.time.ns_per_ms);
+    // Wait (up to 1s) for message to arrive
+    var waited_ms: u32 = 0;
+    while (waited_ms < 1000) : (waited_ms += 10) {
+        if (sub.pending_msgs.load(.acquire) == 1 and
+            sub.pending_bytes.load(.acquire) == msg1_data.len) break;
+        std.time.sleep(10 * std.time.ns_per_ms);
+    }
 
     // Should have 1 pending message and correct bytes
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 1);
@@ -30,7 +35,13 @@ test "pending_msgs counter sync subscription" {
     const msg2_data = "test message 2";
     try conn.publish("test.pending.sync", msg2_data);
     try conn.flush();
-    std.time.sleep(10 * std.time.ns_per_ms);
+
+    waited_ms = 0;
+    while (waited_ms < 1000) : (waited_ms += 10) {
+        if (sub.pending_msgs.load(.acquire) == 2 and
+            sub.pending_bytes.load(.acquire) == msg1_data.len + msg2_data.len) break;
+        std.time.sleep(10 * std.time.ns_per_ms);
+    }
 
     // Should have 2 pending messages and correct total bytes
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 2);
@@ -57,24 +68,24 @@ test "pending_msgs counter async subscription" {
     var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    var message_count: u32 = 0;
-    var processed_count: u32 = 0;
-    var total_bytes_processed: u64 = 0;
+    var message_count = std.atomic.Value(u32).init(0);
+    var processed_count = std.atomic.Value(u32).init(0);
+    var total_bytes_processed = std.atomic.Value(u64).init(0);
 
     const TestContext = struct {
-        message_count_ptr: *u32,
-        processed_count_ptr: *u32,
-        total_bytes_ptr: *u64,
+        message_count_ptr: *std.atomic.Value(u32),
+        processed_count_ptr: *std.atomic.Value(u32),
+        total_bytes_ptr: *std.atomic.Value(u64),
     };
 
     const testHandler = struct {
         fn handle(msg: *nats.Message, ctx: TestContext) void {
             defer msg.deinit();
-            ctx.message_count_ptr.* += 1;
-            ctx.total_bytes_ptr.* += msg.data.len;
+            _ = ctx.message_count_ptr.fetchAdd(1, .acq_rel);
+            _ = ctx.total_bytes_ptr.fetchAdd(@intCast(msg.data.len), .acq_rel);
             // Add a small delay to simulate processing
             std.time.sleep(5 * std.time.ns_per_ms);
-            ctx.processed_count_ptr.* += 1;
+            _ = ctx.processed_count_ptr.fetchAdd(1, .acq_rel);
         }
     }.handle;
 
@@ -107,18 +118,18 @@ test "pending_msgs counter async subscription" {
 
     // Wait for all messages to be processed
     var attempts: u32 = 0;
-    while (processed_count < 3 and attempts < 200) {
+    while (processed_count.load(.acquire) < 3 and attempts < 200) {
         std.time.sleep(10 * std.time.ns_per_ms);
         attempts += 1;
     }
 
     // All messages should be processed now
-    try std.testing.expect(processed_count == 3);
+    try std.testing.expect(processed_count.load(.acquire) == 3);
 
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 0);
     try std.testing.expect(sub.pending_bytes.load(.acquire) == 0);
 
     // Verify total bytes processed matches expected
     const expected_bytes = msg1_data.len + msg2_data.len + msg3_data.len;
-    try std.testing.expect(total_bytes_processed == expected_bytes);
+    try std.testing.expect(total_bytes_processed.load(.acquire) == expected_bytes);
 }
