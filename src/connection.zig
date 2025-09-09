@@ -1096,8 +1096,8 @@ pub const Connection = struct {
             defer s.release(); // Release when done
 
             // Check if subscription is draining - if so, drop new messages
-            if (s.draining) {
-                log.debug("Dropping message for draining subscription {d}: {s}", .{ message.sid, message.data });
+            if (s.isDraining()) {
+                log.debug("Dropping message for draining subscription {d} ({} bytes)", .{ message.sid, message.data.len });
                 return;
             }
 

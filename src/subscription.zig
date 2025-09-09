@@ -54,9 +54,8 @@ pub const Subscription = struct {
     // Assigned dispatcher (for async subscriptions only)
     dispatcher: ?*Dispatcher = null,
 
-    // Drain state
-    draining: bool = false,
-    drain_timeout_ms: ?u64 = null,
+    // Drain state (atomic to avoid cross-thread races)
+    draining: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
@@ -127,9 +126,10 @@ pub const Subscription = struct {
     }
 
     pub fn drain(self: *Subscription, timeout_ms: ?u64) void {
+        _ = timeout_ms; // Timeout parameter removed as requested
+
         // Set draining state to prevent new messages from being queued
-        self.draining = true;
-        self.drain_timeout_ms = timeout_ms;
+        self.draining.store(true, .release);
 
         // Send UNSUB command to server and flush
         self.nc.unsubscribeInternal(self.sid);
@@ -142,7 +142,7 @@ pub const Subscription = struct {
     }
 
     pub fn isDraining(self: *Subscription) bool {
-        return self.draining;
+        return self.draining.load(.acquire);
     }
 };
 
