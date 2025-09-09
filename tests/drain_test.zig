@@ -20,7 +20,7 @@ test "subscription drain sync - immediate completion" {
     // Should be draining and complete immediately
     try std.testing.expect(sub.isDraining());
     try std.testing.expect(sub.isDrainComplete());
-    
+
     // Wait should return immediately
     try sub.waitForDrainCompletion(1000);
 }
@@ -48,7 +48,7 @@ test "subscription drain sync - with pending messages" {
 
     // Drain subscription
     sub.drain();
-    
+
     // Should be draining but not complete yet
     try std.testing.expect(sub.isDraining());
     try std.testing.expect(!sub.isDrainComplete());
@@ -73,7 +73,7 @@ test "subscription drain sync - with pending messages" {
     try std.testing.expect(sub.isDrainComplete());
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 0);
 
-    // Wait should return immediately  
+    // Wait should return immediately
     try sub.waitForDrainCompletion(1000);
 }
 
@@ -92,10 +92,10 @@ test "subscription drain async - with callback processing" {
     const testHandler = struct {
         fn handle(msg: *nats.Message, ctx: TestContext) void {
             defer msg.deinit();
-            
+
             // Simulate some processing time
             std.time.sleep(5 * std.time.ns_per_ms);
-            
+
             ctx.processed_count_ptr.* += 1;
             if (ctx.processed_count_ptr.* == 3) {
                 ctx.completion_event_ptr.set();
@@ -125,7 +125,7 @@ test "subscription drain async - with callback processing" {
 
     // Drain subscription
     sub.drain();
-    
+
     // Should be draining
     try std.testing.expect(sub.isDraining());
 
@@ -135,7 +135,7 @@ test "subscription drain async - with callback processing" {
     // Should be complete
     try std.testing.expect(sub.isDrainComplete());
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 0);
-    
+
     // Wait for all messages to be processed
     processing_complete.wait();
     try std.testing.expect(messages_processed == 3);

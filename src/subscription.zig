@@ -125,10 +125,10 @@ pub const Subscription = struct {
     pub fn drain(self: *Subscription) void {
         // Mark as draining
         self.draining.store(true, .release);
-        
-        // Send UNSUB to server  
+
+        // Send UNSUB to server
         self.nc.unsubscribeInternal(self.sid);
-        
+
         // Check if already empty (immediate completion)
         if (self.pending_msgs.load(.acquire) == 0) {
             log.debug("Subscription {d} drain completed immediately", .{self.sid});
@@ -162,7 +162,6 @@ pub const Subscription = struct {
             };
         }
     }
-
 
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {
         const msg = self.messages.pop(timeout_ms) catch |err| switch (err) {
@@ -224,7 +223,7 @@ pub fn incrementPending(sub: *Subscription, msg_size: usize) void {
 pub fn decrementPending(sub: *Subscription, msg_size: usize) void {
     const remaining_msgs = sub.pending_msgs.fetchSub(1, .acq_rel);
     _ = sub.pending_bytes.fetchSub(msg_size, .acq_rel);
-    
+
     // Check if drain is complete (we just decremented from 1 to 0)
     if (sub.draining.load(.acquire) and remaining_msgs == 1) {
         log.debug("Subscription {d} drain completed", .{sub.sid});
