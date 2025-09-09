@@ -525,10 +525,15 @@ pub const JetStreamSubscription = struct {
     js: JetStream,
     /// Consumer information (Result wrapper)
     consumer_info: Result(ConsumerInfo),
+    /// Owned deliver subject when auto-generated (null if provided by user)
+    deliver_subject_owned: ?[]u8 = null,
 
     pub fn deinit(self: *JetStreamSubscription) void {
         self.consumer_info.deinit();
         self.subscription.deinit();
+        if (self.deliver_subject_owned) |ds| {
+            self.js.nc.allocator.free(ds);
+        }
         self.js.nc.allocator.destroy(self);
     }
 
@@ -1075,13 +1080,14 @@ pub const JetStream = struct {
     pub fn subscribe(self: JetStream, stream_name: []const u8, consumer_config: ConsumerConfig, comptime handlerFn: anytype, args: anytype) !*JetStreamSubscription {
         // Generate deliver_subject if not provided and create push consumer config
         var push_config = consumer_config;
-        const generated_deliver_subject = if (consumer_config.deliver_subject == null) 
+        const generated_deliver_subject = if (consumer_config.deliver_subject == null)
             try inbox.newInbox(self.nc.allocator)
-        else 
+        else
             null;
         errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
 
         const deliver_subject = consumer_config.deliver_subject orelse generated_deliver_subject.?;
+        try validation.validateSubject(deliver_subject);
         push_config.deliver_subject = deliver_subject;
 
         // Remove pull-only fields from push consumer config
@@ -1107,7 +1113,8 @@ pub const JetStream = struct {
                 }
 
                 // Create JetStream message wrapper for regular messages
-                const js_msg = jetstream_message.createJetStreamMessage(nc, msg) catch {
+                const js_msg = jetstream_message.createJetStreamMessage(nc, msg) catch |err| {
+                    log.err("Failed to wrap JetStream message: {}", .{err});
                     msg.deinit(); // Clean up on error
                     return;
                 };
@@ -1125,6 +1132,7 @@ pub const JetStream = struct {
 
         // Subscribe to the delivery subject with simple arguments
         const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self.nc, args });
+        errdefer self.nc.unsubscribe(subscription);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
@@ -1132,6 +1140,7 @@ pub const JetStream = struct {
             .subscription = subscription,
             .js = self,
             .consumer_info = consumer_info,
+            .deliver_subject_owned = generated_deliver_subject,
         };
 
         return js_sub;
@@ -1141,13 +1150,14 @@ pub const JetStream = struct {
     pub fn subscribeSync(self: JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*JetStreamSubscription {
         // Generate deliver_subject if not provided and create push consumer config
         var push_config = consumer_config;
-        const generated_deliver_subject = if (consumer_config.deliver_subject == null) 
+        const generated_deliver_subject = if (consumer_config.deliver_subject == null)
             try inbox.newInbox(self.nc.allocator)
-        else 
+        else
             null;
         errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
 
         const deliver_subject = consumer_config.deliver_subject orelse generated_deliver_subject.?;
+        try validation.validateSubject(deliver_subject);
         push_config.deliver_subject = deliver_subject;
 
         // Remove pull-only fields from push consumer config
@@ -1169,6 +1179,7 @@ pub const JetStream = struct {
             .subscription = subscription,
             .js = self,
             .consumer_info = consumer_info,
+            .deliver_subject_owned = generated_deliver_subject,
         };
         return js_sub;
     }
