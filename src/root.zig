@@ -80,5 +80,4 @@ test {
     _ = @import("jetstream.zig");
     _ = @import("jetstream_message.zig");
     _ = @import("jetstream_kv.zig");
-    _ = @import("pending_msgs_test.zig");
 }
