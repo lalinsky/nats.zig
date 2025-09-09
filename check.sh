@@ -1,6 +1,7 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
+IFS=$'\n\t'
 
 # Default values
 TEST_FILTER=""
@@ -10,23 +11,30 @@ TEST_VERBOSE="true"
 CI_MODE=false
 
 # Parse arguments
+usage() {
+  echo "Usage: $0 [--test-filter \"test name\"] [--test-log-capture true|false] [--test-fail-first true|false] [--test-verbose true|false] [--ci]"
+}
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -h|--help)
+            usage
+            exit 0
+            ;;
         --test-filter)
-            TEST_FILTER="$2"
-            shift 2
+            [[ $# -ge 2 ]] || { echo "--test-filter requires an argument"; usage; exit 1; }
+            TEST_FILTER="$2"; shift 2
             ;;
         --test-log-capture)
-            TEST_LOG_CAPTURE="$2"
-            shift 2
+            [[ $# -ge 2 ]] || { echo "--test-log-capture requires true|false"; usage; exit 1; }
+            TEST_LOG_CAPTURE="$2"; shift 2
             ;;
         --test-fail-first)
-            TEST_FAIL_FIRST="$2"
-            shift 2
+            [[ $# -ge 2 ]] || { echo "--test-fail-first requires true|false"; usage; exit 1; }
+            TEST_FAIL_FIRST="$2"; shift 2
             ;;
         --test-verbose)
-            TEST_VERBOSE="$2"
-            shift 2
+            [[ $# -ge 2 ]] || { echo "--test-verbose requires true|false"; usage; exit 1; }
+            TEST_VERBOSE="$2"; shift 2
             ;;
         --ci)
             CI_MODE=true
@@ -34,7 +42,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--test-filter \"test name\"] [--test-log-capture true/false] [--test-fail-first true/false] [--test-verbose true/false] [--ci]"
+            usage
             exit 1
             ;;
     esac
