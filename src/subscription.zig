@@ -54,6 +54,10 @@ pub const Subscription = struct {
     // Assigned dispatcher (for async subscriptions only)
     dispatcher: ?*Dispatcher = null,
 
+    // Drain state
+    draining: bool = false,
+    drain_timeout_ms: ?u64 = null,
+
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
     pub fn create(nc: *Connection, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
@@ -120,6 +124,25 @@ pub const Subscription = struct {
             error.QueueEmpty => error.Timeout,
             error.QueueClosed => error.Timeout, // TODO: this should be mapped to ConnectionClosed
         };
+    }
+
+    pub fn drain(self: *Subscription, timeout_ms: ?u64) void {
+        // Set draining state to prevent new messages from being queued
+        self.draining = true;
+        self.drain_timeout_ms = timeout_ms;
+
+        // Send UNSUB command to server and flush
+        self.nc.unsubscribeInternal(self.sid);
+
+        // For async subscriptions, the dispatcher will continue processing
+        // messages until the queue is empty or timeout is reached.
+        // For sync subscriptions, messages remain available via nextMsg().
+
+        log.debug("Started draining subscription {d} on subject '{s}'", .{ self.sid, self.subject });
+    }
+
+    pub fn isDraining(self: *Subscription) bool {
+        return self.draining;
     }
 };
 
