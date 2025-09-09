@@ -40,8 +40,11 @@ test "subscription drain sync - with pending messages" {
     try conn.publish("test.drain.sync.pending", msg2_data);
     try conn.flush();
 
-    // Give messages time to arrive
-    std.time.sleep(10 * std.time.ns_per_ms);
+    // Wait (up to 1s) for both messages to be counted as pending
+    var waited: u64 = 0;
+    while (sub.pending_msgs.load(.acquire) < 2 and waited < 1000) : (waited += 5) {
+        std.time.sleep(5 * std.time.ns_per_ms);
+    }
 
     // Should have pending messages
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 2);
@@ -176,6 +179,10 @@ test "subscription drain blocks new messages" {
 
     // Should be complete
     try std.testing.expect(sub.isDrainComplete());
+
+    // And no extra messages should be retrievable
+    const maybe = sub.nextMsg(50);
+    try std.testing.expectError(error.Timeout, maybe);
 }
 
 test "subscription drain timeout" {
