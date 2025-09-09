@@ -22,6 +22,7 @@ pub const PublishError = @import("connection.zig").PublishError;
 pub const Message = @import("message.zig").Message;
 pub const Subscription = @import("subscription.zig").Subscription;
 pub const MsgHandler = @import("subscription.zig").MsgHandler;
+pub const createMsgHandler = @import("subscription.zig").createMsgHandler;
 pub const Dispatcher = @import("dispatcher.zig").Dispatcher;
 pub const DispatcherPool = @import("dispatcher.zig").DispatcherPool;
 pub const ServerPool = @import("server_pool.zig").ServerPool;

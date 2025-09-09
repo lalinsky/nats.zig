@@ -57,6 +57,11 @@ pub const Dispatcher = struct {
         // Clean up any remaining messages in the queue
         while (self.queue.tryPop()) |dispatch_msg| {
             log.warn("Dropping unprocessed message for subscription {}", .{dispatch_msg.subscription.sid});
+            // Save message data length before cleanup
+            const message_data_len = dispatch_msg.message.data.len;
+            // Decrement pending counters for dropped messages
+            _ = dispatch_msg.subscription.pending_msgs.fetchSub(1, .acq_rel);
+            _ = dispatch_msg.subscription.pending_bytes.fetchSub(message_data_len, .acq_rel);
             dispatch_msg.message.deinit();
             dispatch_msg.deinit(); // Release subscription reference
         }
@@ -122,6 +127,9 @@ pub const Dispatcher = struct {
         const subscription = dispatch_msg.subscription;
         const message = dispatch_msg.message;
 
+        // Save message data length before handler is called (handler may deinit the message)
+        const message_data_len = message.data.len;
+
         // Call the subscription's handler in this dispatcher thread context
         // Message ownership is transferred to the handler - handler is responsible for cleanup
         if (subscription.handler) |handler| {
@@ -134,6 +142,10 @@ pub const Dispatcher = struct {
             log.warn("Received message for subscription {} without handler", .{subscription.sid});
             message.deinit(); // Clean up orphaned message (no handler to transfer ownership to)
         }
+
+        // Decrement pending counters after handler completes (success or failure)
+        _ = subscription.pending_msgs.fetchSub(1, .acq_rel);
+        _ = subscription.pending_bytes.fetchSub(message_data_len, .acq_rel);
     }
 };
 
