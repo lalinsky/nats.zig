@@ -1715,6 +1715,6 @@ pub const Connection = struct {
 
     // JetStream support
     pub fn jetstream(self: *Self, options: JetStreamOptions) JetStream {
-        return JetStream.init(self.allocator, self, options);
+        return JetStream.init(self, options);
     }
 };

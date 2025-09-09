@@ -10,7 +10,6 @@ test "list stream names" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -50,7 +49,6 @@ test "add stream" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -86,7 +84,6 @@ test "list streams" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -132,7 +129,6 @@ test "update stream" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -174,7 +170,6 @@ test "delete stream" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -226,7 +221,6 @@ test "get stream info" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);

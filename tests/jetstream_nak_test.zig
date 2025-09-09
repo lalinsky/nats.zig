@@ -10,7 +10,6 @@ test "NAK redelivery with delivery count verification" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create a test stream
     const stream_config = nats.StreamConfig{
@@ -151,7 +150,6 @@ test "NAK with max delivery limit" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create a test stream
     const stream_config = nats.StreamConfig{
@@ -250,7 +248,6 @@ test "JetStream message metadata parsing" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create a test stream
     const stream_config = nats.StreamConfig{

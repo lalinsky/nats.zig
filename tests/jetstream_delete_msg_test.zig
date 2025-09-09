@@ -8,7 +8,6 @@ test "delete message" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -58,7 +57,6 @@ test "erase message" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -108,7 +106,6 @@ test "delete vs erase message behavior" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -161,7 +158,6 @@ test "delete message error cases" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -199,7 +195,6 @@ test "erase message error cases" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);

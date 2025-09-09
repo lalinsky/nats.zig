@@ -9,8 +9,8 @@ test "connect" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    var js = conn.jetstream(.{});
-    defer js.deinit();
+    const js = conn.jetstream(.{});
+    _ = js;
 }
 
 test "get account info" {
@@ -18,7 +18,6 @@ test "get account info" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     var result = try js.getAccountInfo();
     defer result.deinit();
@@ -32,7 +31,6 @@ test "add consumer" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique names
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -70,7 +68,6 @@ test "list consumer names" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique names
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -119,7 +116,6 @@ test "list consumers" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique names
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -171,7 +167,6 @@ test "get consumer info" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique names
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -214,7 +209,6 @@ test "delete consumer" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique names
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -277,7 +271,6 @@ test "delete consumer" {
 
 //     // Create JetStream context
 //     var js = conn.jetstreamDefault();
-//     defer js.deinit();
 
 //     // Create a test stream
 //     const stream_name = "TEST_STREAM_CREATION";
@@ -356,7 +349,6 @@ test "delete consumer" {
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
-//     defer js.deinit();
 
 //     // Test different stream configurations
 //     const configs = [_]struct {
@@ -424,7 +416,6 @@ test "delete consumer" {
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
-//     defer js.deinit();
 
 //     const stream_name = "TEST_OPERATIONS";
 //     const stream_config = nats.StreamConfig{
@@ -509,7 +500,6 @@ test "delete consumer" {
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
-//     defer js.deinit();
 
 //     const stream_name = "TEST_UPDATE";
 //     const initial_config = nats.StreamConfig{
@@ -548,7 +538,6 @@ test "delete consumer" {
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
-//     defer js.deinit();
 
 //     // Test getting account information
 //     log.info("Getting account info", .{});
@@ -570,7 +559,6 @@ test "delete consumer" {
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
-//     defer js.deinit();
 
 //     // Test error handling for non-existent stream
 //     log.info("Testing error handling", .{});
@@ -596,7 +584,6 @@ test "delete consumer" {
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
-//     defer js.deinit();
 
 //     const stream_name = "TEST_CONCURRENT";
 //     const stream_config = nats.StreamConfig{
@@ -654,7 +641,6 @@ test "JetStream publish basic message" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique names
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -686,7 +672,6 @@ test "JetStream publish with message deduplication" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique names
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -729,7 +714,6 @@ test "JetStream publish with expected sequence" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique names
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -765,7 +749,6 @@ test "JetStream publish with expected last subject sequence" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique names
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -802,7 +785,6 @@ test "JetStream publishMsg with pre-constructed message" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique names
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);

@@ -21,7 +21,6 @@ test "KV history retrieval" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     var kv_manager = js.kvManager();
 
@@ -65,7 +64,6 @@ test "KV keys listing" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     var kv_manager = js.kvManager();
 
@@ -112,7 +110,6 @@ test "KV keys with filters" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     var kv_manager = js.kvManager();
 
@@ -158,7 +155,6 @@ test "KV watch basic functionality" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     var kv_manager = js.kvManager();
 

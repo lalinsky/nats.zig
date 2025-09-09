@@ -8,7 +8,6 @@ test "purge stream" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // First create a stream
     const stream_config = nats.StreamConfig{
@@ -40,7 +39,6 @@ test "purge stream with filter" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // First create a stream
     const stream_config = nats.StreamConfig{
@@ -74,7 +72,6 @@ test "purge stream with sequence limit" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // First create a stream
     const stream_config = nats.StreamConfig{
@@ -108,7 +105,6 @@ test "purge stream with keep parameter" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // First create a stream
     const stream_config = nats.StreamConfig{

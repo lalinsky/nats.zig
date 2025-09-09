@@ -10,7 +10,6 @@ test "JetStream synchronous subscription basic functionality" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create a test stream
     const stream_config = nats.StreamConfig{
@@ -53,7 +52,6 @@ test "JetStream synchronous subscription timeout" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create a test stream
     const stream_config = nats.StreamConfig{
@@ -90,7 +88,6 @@ test "JetStream synchronous subscription multiple messages" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create a test stream
     const stream_config = nats.StreamConfig{

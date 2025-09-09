@@ -395,7 +395,7 @@ pub const MessageBatch = struct {
 /// JetStream pull subscription
 pub const PullSubscription = struct {
     /// JetStream context
-    js: *JetStream,
+    js: JetStream,
     /// Stream name
     stream_name: []const u8,
     /// Consumer name
@@ -414,8 +414,8 @@ pub const PullSubscription = struct {
     pub fn deinit(self: *PullSubscription) void {
         self.consumer_info.deinit();
         self.js.nc.unsubscribe(self.inbox_subscription);
-        self.js.allocator.free(self.inbox_prefix);
-        self.js.allocator.destroy(self);
+        self.js.nc.allocator.free(self.inbox_prefix);
+        self.js.nc.allocator.destroy(self);
     }
 
     /// Fetch a batch of messages from the pull consumer
@@ -429,8 +429,8 @@ pub const PullSubscription = struct {
         self.fetch_id_counter += 1;
         const fetch_id = self.fetch_id_counter;
 
-        const reply_subject = try std.fmt.allocPrint(self.js.allocator, "{s}{d}", .{ self.inbox_prefix, fetch_id });
-        defer self.js.allocator.free(reply_subject);
+        const reply_subject = try std.fmt.allocPrint(self.js.nc.allocator, "{s}{d}", .{ self.inbox_prefix, fetch_id });
+        defer self.js.nc.allocator.free(reply_subject);
 
         const request = FetchRequest{
             .batch = batch,
@@ -438,20 +438,20 @@ pub const PullSubscription = struct {
         };
 
         // Serialize the fetch request to JSON
-        const request_json = try std.json.stringifyAlloc(self.js.allocator, request, .{
+        const request_json = try std.json.stringifyAlloc(self.js.nc.allocator, request, .{
             .emit_null_optional_fields = false,
         });
-        defer self.js.allocator.free(request_json);
+        defer self.js.nc.allocator.free(request_json);
 
         // Build the full API subject
-        const api_subject = try std.fmt.allocPrint(self.js.allocator, "{s}CONSUMER.MSG.NEXT.{s}.{s}", .{ default_api_prefix, self.stream_name, self.consumer_name });
-        defer self.js.allocator.free(api_subject);
+        const api_subject = try std.fmt.allocPrint(self.js.nc.allocator, "{s}CONSUMER.MSG.NEXT.{s}.{s}", .{ default_api_prefix, self.stream_name, self.consumer_name });
+        defer self.js.nc.allocator.free(api_subject);
 
         // Send the pull request with reply subject
         try self.js.nc.publishRequest(api_subject, reply_subject, request_json);
 
         // Collect messages
-        var messages = std.ArrayList(*JetStreamMessage).init(self.js.allocator);
+        var messages = std.ArrayList(*JetStreamMessage).init(self.js.nc.allocator);
         defer messages.deinit();
 
         var batch_complete = false;
@@ -512,7 +512,7 @@ pub const PullSubscription = struct {
         return MessageBatch{
             .messages = messages_slice,
             .err = fetch_error,
-            .allocator = self.js.allocator,
+            .allocator = self.js.nc.allocator,
         };
     }
 };
@@ -522,14 +522,14 @@ pub const JetStreamSubscription = struct {
     /// Underlying NATS subscription
     subscription: *Subscription,
     /// JetStream context
-    js: *JetStream,
+    js: JetStream,
     /// Consumer information (Result wrapper)
     consumer_info: Result(ConsumerInfo),
 
     pub fn deinit(self: *JetStreamSubscription) void {
         self.consumer_info.deinit();
         self.subscription.deinit();
-        self.js.allocator.destroy(self);
+        self.js.nc.allocator.destroy(self);
     }
 
     /// Get the next JetStream message synchronously (for sync subscriptions)
@@ -549,31 +549,25 @@ pub const JetStreamOptions = struct {
 };
 
 pub const JetStream = struct {
-    allocator: std.mem.Allocator,
     nc: *Connection,
     opts: JetStreamOptions,
 
-    pub fn init(allocator: std.mem.Allocator, nc: *Connection, options: JetStreamOptions) JetStream {
+    pub fn init(nc: *Connection, options: JetStreamOptions) JetStream {
         return .{
-            .allocator = allocator,
             .nc = nc,
             .opts = options,
         };
     }
 
-    pub fn deinit(self: *JetStream) void {
-        _ = self;
-    }
-
-    fn sendRequest(self: *JetStream, subject: []const u8, payload: []const u8) !*Message {
-        const full_subject = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ default_api_prefix, subject });
-        defer self.allocator.free(full_subject);
+    fn sendRequest(self: JetStream, subject: []const u8, payload: []const u8) !*Message {
+        const full_subject = try std.fmt.allocPrint(self.nc.allocator, "{s}{s}", .{ default_api_prefix, subject });
+        defer self.nc.allocator.free(full_subject);
 
         return try self.nc.request(full_subject, payload, self.opts.request_timeout_ms);
     }
 
     /// Parse an error response from the server, if present.
-    fn maybeParseErrorResponse(_: *JetStream, msg: *Message) !void {
+    fn maybeParseErrorResponse(msg: *Message) !void {
         var buf: [1024]u8 = undefined;
         var allocator = std.heap.FixedBufferAllocator.init(&buf);
 
@@ -591,10 +585,10 @@ pub const JetStream = struct {
     }
 
     /// Parse a response from the server, handling errors if present.
-    fn parseResponse(self: *JetStream, comptime T: type, msg: *Message) !Result(T) {
-        try self.maybeParseErrorResponse(msg);
+    fn parseResponse(self: JetStream, comptime T: type, msg: *Message) !Result(T) {
+        try maybeParseErrorResponse(msg);
 
-        const parsed = std.json.parseFromSlice(T, self.allocator, msg.data, .{
+        const parsed = std.json.parseFromSlice(T, self.nc.allocator, msg.data, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
         }) catch |err| {
@@ -611,7 +605,7 @@ pub const JetStream = struct {
     }
 
     // Retrieves stats and limits for the connected user's account.
-    pub fn getAccountInfo(self: *JetStream) !Result(AccountInfoResponse) {
+    pub fn getAccountInfo(self: JetStream) !Result(AccountInfoResponse) {
         const msg = try self.sendRequest("INFO", "");
         defer msg.deinit();
 
@@ -619,7 +613,7 @@ pub const JetStream = struct {
     }
 
     /// Retrieves a list of stream names.
-    pub fn listStreamNames(self: *JetStream) !Result([]const []const u8) {
+    pub fn listStreamNames(self: JetStream) !Result([]const []const u8) {
         const msg = try self.sendRequest("STREAM.NAMES", "");
         defer msg.deinit();
 
@@ -638,7 +632,7 @@ pub const JetStream = struct {
     }
 
     /// Retrieves a list of streams with full information.
-    pub fn listStreams(self: *JetStream) !Result([]const StreamInfo) {
+    pub fn listStreams(self: JetStream) !Result([]const StreamInfo) {
         const msg = try self.sendRequest("STREAM.LIST", "");
         defer msg.deinit();
 
@@ -657,19 +651,19 @@ pub const JetStream = struct {
     }
 
     /// Creates a new stream with the provided configuration.
-    pub fn addStream(self: *JetStream, config: StreamConfig) !Result(StreamInfo) {
+    pub fn addStream(self: JetStream, config: StreamConfig) !Result(StreamInfo) {
         try validation.validateStreamName(config.name);
         for (config.subjects) |subject| {
             try validation.validateSubject(subject);
         }
 
         // Build the subject for the API call
-        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.CREATE.{s}", .{config.name});
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "STREAM.CREATE.{s}", .{config.name});
+        defer self.nc.allocator.free(subject);
 
         // Serialize the config to JSON
-        const config_json = try std.json.stringifyAlloc(self.allocator, config, .{});
-        defer self.allocator.free(config_json);
+        const config_json = try std.json.stringifyAlloc(self.nc.allocator, config, .{});
+        defer self.nc.allocator.free(config_json);
 
         const msg = try self.sendRequest(subject, config_json);
         defer msg.deinit();
@@ -678,19 +672,19 @@ pub const JetStream = struct {
     }
 
     /// Updates a stream with the provided configuration.
-    pub fn updateStream(self: *JetStream, config: StreamConfig) !Result(StreamInfo) {
+    pub fn updateStream(self: JetStream, config: StreamConfig) !Result(StreamInfo) {
         try validation.validateStreamName(config.name);
         for (config.subjects) |subject| {
             try validation.validateSubject(subject);
         }
 
         // Build the subject for the API call
-        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.UPDATE.{s}", .{config.name});
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "STREAM.UPDATE.{s}", .{config.name});
+        defer self.nc.allocator.free(subject);
 
         // Serialize the config to JSON
-        const config_json = try std.json.stringifyAlloc(self.allocator, config, .{});
-        defer self.allocator.free(config_json);
+        const config_json = try std.json.stringifyAlloc(self.nc.allocator, config, .{});
+        defer self.nc.allocator.free(config_json);
 
         const msg = try self.sendRequest(subject, config_json);
         defer msg.deinit();
@@ -699,27 +693,27 @@ pub const JetStream = struct {
     }
 
     /// Deletes a stream.
-    pub fn deleteStream(self: *JetStream, stream_name: []const u8) !void {
+    pub fn deleteStream(self: JetStream, stream_name: []const u8) !void {
         try validation.validateStreamName(stream_name);
 
         // Build the subject for the API call
-        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.DELETE.{s}", .{stream_name});
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "STREAM.DELETE.{s}", .{stream_name});
+        defer self.nc.allocator.free(subject);
 
         const msg = try self.sendRequest(subject, "");
         defer msg.deinit();
 
         // Just check for errors, don't need to parse the response
-        try self.maybeParseErrorResponse(msg);
+        try maybeParseErrorResponse(msg);
     }
 
     /// Gets information about a specific stream.
-    pub fn getStreamInfo(self: *JetStream, stream_name: []const u8) !Result(StreamInfo) {
+    pub fn getStreamInfo(self: JetStream, stream_name: []const u8) !Result(StreamInfo) {
         try validation.validateStreamName(stream_name);
 
         // Build the subject for the API call
-        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.INFO.{s}", .{stream_name});
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "STREAM.INFO.{s}", .{stream_name});
+        defer self.nc.allocator.free(subject);
 
         const msg = try self.sendRequest(subject, "");
         defer msg.deinit();
@@ -728,11 +722,11 @@ pub const JetStream = struct {
     }
 
     /// Retrieves a list of consumer names for a stream.
-    pub fn listConsumerNames(self: *JetStream, stream_name: []const u8) !Result([]const []const u8) {
+    pub fn listConsumerNames(self: JetStream, stream_name: []const u8) !Result([]const []const u8) {
         try validation.validateStreamName(stream_name);
 
-        const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.NAMES.{s}", .{stream_name});
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "CONSUMER.NAMES.{s}", .{stream_name});
+        defer self.nc.allocator.free(subject);
 
         const msg = try self.sendRequest(subject, "");
         defer msg.deinit();
@@ -752,11 +746,11 @@ pub const JetStream = struct {
     }
 
     /// Retrieves a list of consumers with full information for a stream.
-    pub fn listConsumers(self: *JetStream, stream_name: []const u8) !Result([]const ConsumerInfo) {
+    pub fn listConsumers(self: JetStream, stream_name: []const u8) !Result([]const ConsumerInfo) {
         try validation.validateStreamName(stream_name);
 
-        const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.LIST.{s}", .{stream_name});
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "CONSUMER.LIST.{s}", .{stream_name});
+        defer self.nc.allocator.free(subject);
 
         const msg = try self.sendRequest(subject, "");
         defer msg.deinit();
@@ -777,17 +771,17 @@ pub const JetStream = struct {
 
     /// Creates a new consumer with the provided configuration.
     /// Uses DURABLE endpoint only if durable_name is provided, otherwise creates ephemeral consumer.
-    pub fn addConsumer(self: *JetStream, stream_name: []const u8, config: ConsumerConfig) !Result(ConsumerInfo) {
+    pub fn addConsumer(self: JetStream, stream_name: []const u8, config: ConsumerConfig) !Result(ConsumerInfo) {
         try validation.validateStreamName(stream_name);
         if (config.name) |n| try validation.validateConsumerName(n);
         if (config.durable_name) |n| try validation.validateConsumerName(n);
 
         log.info("adding consumer", .{});
         const subject = if (config.durable_name) |durable_name|
-            try std.fmt.allocPrint(self.allocator, "CONSUMER.DURABLE.CREATE.{s}.{s}", .{ stream_name, durable_name })
+            try std.fmt.allocPrint(self.nc.allocator, "CONSUMER.DURABLE.CREATE.{s}.{s}", .{ stream_name, durable_name })
         else
-            try std.fmt.allocPrint(self.allocator, "CONSUMER.CREATE.{s}", .{stream_name});
-        defer self.allocator.free(subject);
+            try std.fmt.allocPrint(self.nc.allocator, "CONSUMER.CREATE.{s}", .{stream_name});
+        defer self.nc.allocator.free(subject);
 
         // Create request payload
         const request_payload = struct {
@@ -795,8 +789,8 @@ pub const JetStream = struct {
             config: ConsumerConfig,
         }{ .stream_name = stream_name, .config = config };
 
-        const config_json = try std.json.stringifyAlloc(self.allocator, request_payload, .{});
-        defer self.allocator.free(config_json);
+        const config_json = try std.json.stringifyAlloc(self.nc.allocator, request_payload, .{});
+        defer self.nc.allocator.free(config_json);
 
         const msg = try self.sendRequest(subject, config_json);
         defer msg.deinit();
@@ -805,12 +799,12 @@ pub const JetStream = struct {
     }
 
     /// Gets information about a specific consumer.
-    pub fn getConsumerInfo(self: *JetStream, stream_name: []const u8, consumer_name: []const u8) !Result(ConsumerInfo) {
+    pub fn getConsumerInfo(self: JetStream, stream_name: []const u8, consumer_name: []const u8) !Result(ConsumerInfo) {
         try validation.validateStreamName(stream_name);
         try validation.validateConsumerName(consumer_name);
 
-        const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.INFO.{s}.{s}", .{ stream_name, consumer_name });
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "CONSUMER.INFO.{s}.{s}", .{ stream_name, consumer_name });
+        defer self.nc.allocator.free(subject);
 
         const msg = try self.sendRequest(subject, "");
         defer msg.deinit();
@@ -819,30 +813,30 @@ pub const JetStream = struct {
     }
 
     /// Deletes a consumer.
-    pub fn deleteConsumer(self: *JetStream, stream_name: []const u8, consumer_name: []const u8) !void {
+    pub fn deleteConsumer(self: JetStream, stream_name: []const u8, consumer_name: []const u8) !void {
         try validation.validateStreamName(stream_name);
         try validation.validateConsumerName(consumer_name);
 
-        const subject = try std.fmt.allocPrint(self.allocator, "CONSUMER.DELETE.{s}.{s}", .{ stream_name, consumer_name });
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "CONSUMER.DELETE.{s}.{s}", .{ stream_name, consumer_name });
+        defer self.nc.allocator.free(subject);
 
         const msg = try self.sendRequest(subject, "");
         defer msg.deinit();
 
         // Just check for errors, don't need to parse the response
-        try self.maybeParseErrorResponse(msg);
+        try maybeParseErrorResponse(msg);
     }
 
     /// Purges messages from a stream.
-    pub fn purgeStream(self: *JetStream, stream_name: []const u8, request: StreamPurgeRequest) !Result(StreamPurgeResponse) {
+    pub fn purgeStream(self: JetStream, stream_name: []const u8, request: StreamPurgeRequest) !Result(StreamPurgeResponse) {
         try validation.validateStreamName(stream_name);
         if (request.filter) |subject| try validation.validateSubject(subject);
 
-        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.PURGE.{s}", .{stream_name});
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "STREAM.PURGE.{s}", .{stream_name});
+        defer self.nc.allocator.free(subject);
 
-        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{});
-        defer self.allocator.free(request_json);
+        const request_json = try std.json.stringifyAlloc(self.nc.allocator, request, .{});
+        defer self.nc.allocator.free(request_json);
 
         const msg = try self.sendRequest(subject, request_json);
         defer msg.deinit();
@@ -851,14 +845,14 @@ pub const JetStream = struct {
     }
 
     /// Internal function for getting messages from the stream using legacy API
-    fn getMsgLegacy(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
+    fn getMsgLegacy(self: JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
         try validation.validateStreamName(stream_name);
         if (options.last_by_subj) |subject| try validation.validateSubject(subject);
         if (options.next_by_subj) |subject| try validation.validateSubject(subject);
 
         // Build the subject for the API call
-        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.MSG.GET.{s}", .{stream_name});
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "STREAM.MSG.GET.{s}", .{stream_name});
+        defer self.nc.allocator.free(subject);
 
         // Create GetMsgRequest from options
         const request = GetMsgRequest{
@@ -868,10 +862,10 @@ pub const JetStream = struct {
         };
 
         // Serialize the request to JSON, omitting null fields
-        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{
+        const request_json = try std.json.stringifyAlloc(self.nc.allocator, request, .{
             .emit_null_optional_fields = false,
         });
-        defer self.allocator.free(request_json);
+        defer self.nc.allocator.free(request_json);
 
         const resp = try self.sendRequest(subject, request_json);
         defer resp.deinit();
@@ -917,7 +911,7 @@ pub const JetStream = struct {
     }
 
     /// Gets a message from the stream using the specified options
-    pub fn getMsg(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
+    pub fn getMsg(self: JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
         // Validate options combinations:
         // 1. seq only - get message by sequence
         // 2. last_by_subj only - get last message for subject
@@ -945,7 +939,7 @@ pub const JetStream = struct {
     }
 
     /// Gets multiple messages from the stream (batch operation) - NOT IMPLEMENTED
-    pub fn getMsgs(self: *JetStream, stream_name: []const u8, options: GetMsgsOptions) !MessageList {
+    pub fn getMsgs(self: JetStream, stream_name: []const u8, options: GetMsgsOptions) !MessageList {
         _ = self;
         _ = stream_name;
         _ = options;
@@ -953,7 +947,7 @@ pub const JetStream = struct {
     }
 
     /// Internal function for direct get messages from any stream replica
-    fn getMsgDirect(self: *JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
+    fn getMsgDirect(self: JetStream, stream_name: []const u8, options: GetMsgOptions) !*Message {
         log.debug("getMsgDirect: Starting with stream_name={s}", .{stream_name});
         try validation.validateStreamName(stream_name);
         if (options.last_by_subj) |subject| try validation.validateSubject(subject);
@@ -961,8 +955,8 @@ pub const JetStream = struct {
         log.debug("getMsgDirect: Stream name validation passed", .{});
 
         // Build the subject for the direct get API call
-        const subject = try std.fmt.allocPrint(self.allocator, "DIRECT.GET.{s}", .{stream_name});
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "DIRECT.GET.{s}", .{stream_name});
+        defer self.nc.allocator.free(subject);
 
         // Convert GetMsgOptions to GetMsgRequest
         const request = GetMsgRequest{
@@ -972,10 +966,10 @@ pub const JetStream = struct {
         };
 
         // Serialize the request to JSON, omitting null fields
-        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{
+        const request_json = try std.json.stringifyAlloc(self.nc.allocator, request, .{
             .emit_null_optional_fields = false,
         });
-        defer self.allocator.free(request_json);
+        defer self.nc.allocator.free(request_json);
 
         const resp = try self.sendRequest(subject, request_json);
         errdefer resp.deinit();
@@ -1002,16 +996,16 @@ pub const JetStream = struct {
     }
 
     /// Internal function for deleting messages from the stream
-    fn deleteMsgInternal(self: *JetStream, stream_name: []const u8, request: DeleteMsgRequest) !bool {
+    fn deleteMsgInternal(self: JetStream, stream_name: []const u8, request: DeleteMsgRequest) !bool {
         try validation.validateStreamName(stream_name);
 
         // Build the subject for the API call
-        const subject = try std.fmt.allocPrint(self.allocator, "STREAM.MSG.DELETE.{s}", .{stream_name});
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.nc.allocator, "STREAM.MSG.DELETE.{s}", .{stream_name});
+        defer self.nc.allocator.free(subject);
 
         // Serialize the request to JSON
-        const request_json = try std.json.stringifyAlloc(self.allocator, request, .{});
-        defer self.allocator.free(request_json);
+        const request_json = try std.json.stringifyAlloc(self.nc.allocator, request, .{});
+        defer self.nc.allocator.free(request_json);
 
         const msg = try self.sendRequest(subject, request_json);
         defer msg.deinit();
@@ -1023,18 +1017,18 @@ pub const JetStream = struct {
     }
 
     /// Deletes a message from the stream (marks as deleted, doesn't erase from storage)
-    pub fn deleteMsg(self: *JetStream, stream_name: []const u8, seq: u64) !bool {
+    pub fn deleteMsg(self: JetStream, stream_name: []const u8, seq: u64) !bool {
         return self.deleteMsgInternal(stream_name, DeleteMsgRequest{ .seq = seq, .no_erase = true });
     }
 
     /// Erases a message from the stream (securely removes from storage)
-    pub fn eraseMsg(self: *JetStream, stream_name: []const u8, seq: u64) !bool {
+    pub fn eraseMsg(self: JetStream, stream_name: []const u8, seq: u64) !bool {
         return self.deleteMsgInternal(stream_name, DeleteMsgRequest{ .seq = seq, .no_erase = null });
     }
 
     /// Subscribe to a JetStream push consumer with callback handler
     /// Handle JetStream status messages (heartbeats and flow control)
-    fn handleStatusMessage(msg: *Message, js: *JetStream) !void {
+    fn handleStatusMessage(msg: *Message, nc: *Connection) !void {
         // Debug: Print all headers to understand the actual format
         log.debug("Status message headers:", .{});
         var header_iter = msg.headers.iterator();
@@ -1061,7 +1055,7 @@ pub const JetStream = struct {
 
                     if (msg.reply) |reply_subject| {
                         // Respond with empty message to acknowledge flow control
-                        try js.nc.publish(reply_subject, "");
+                        try nc.publish(reply_subject, "");
                         log.debug("Sent flow control response to: {s}", .{reply_subject});
                     } else {
                         log.warn("Flow control request missing reply subject", .{});
@@ -1078,7 +1072,7 @@ pub const JetStream = struct {
         }
     }
 
-    pub fn subscribe(self: *JetStream, stream_name: []const u8, consumer_config: ConsumerConfig, comptime handlerFn: anytype, args: anytype) !*JetStreamSubscription {
+    pub fn subscribe(self: JetStream, stream_name: []const u8, consumer_config: ConsumerConfig, comptime handlerFn: anytype, args: anytype) !*JetStreamSubscription {
         // Validate that this is a push consumer configuration
         const deliver_subject = consumer_config.deliver_subject orelse return error.MissingDeliverSubject;
 
@@ -1094,11 +1088,11 @@ pub const JetStream = struct {
 
         // Define the handler inline to avoid the two-level context issue
         const JSHandler = struct {
-            fn wrappedHandler(msg: *Message, js: *JetStream, user_args: @TypeOf(args)) anyerror!void {
+            fn wrappedHandler(msg: *Message, nc: *Connection, user_args: @TypeOf(args)) anyerror!void {
                 // Check for status messages (heartbeats and flow control)
                 if (msg.status_code == STATUS_CONTROL) {
                     // Handle status message internally, don't pass to user callback
-                    handleStatusMessage(msg, js) catch |err| {
+                    handleStatusMessage(msg, nc) catch |err| {
                         log.err("Failed to handle status message: {}", .{err});
                     };
                     msg.deinit(); // Clean up status message
@@ -1106,7 +1100,7 @@ pub const JetStream = struct {
                 }
 
                 // Create JetStream message wrapper for regular messages
-                const js_msg = jetstream_message.createJetStreamMessage(js.nc, msg) catch {
+                const js_msg = jetstream_message.createJetStreamMessage(nc, msg) catch {
                     msg.deinit(); // Clean up on error
                     return;
                 };
@@ -1123,10 +1117,10 @@ pub const JetStream = struct {
         };
 
         // Subscribe to the delivery subject with simple arguments
-        const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self, args });
+        const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self.nc, args });
 
         // Create JetStream subscription wrapper
-        const js_sub = try self.allocator.create(JetStreamSubscription);
+        const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
             .subscription = subscription,
             .js = self,
@@ -1137,7 +1131,7 @@ pub const JetStream = struct {
     }
 
     /// Create a synchronous push subscription for manual message consumption
-    pub fn subscribeSync(self: *JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*JetStreamSubscription {
+    pub fn subscribeSync(self: JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*JetStreamSubscription {
         // Validate that this is a push consumer configuration with deliver_subject
         const deliver_subject = consumer_config.deliver_subject orelse return error.MissingDeliverSubject;
 
@@ -1156,7 +1150,7 @@ pub const JetStream = struct {
         errdefer self.nc.unsubscribe(subscription);
 
         // Create JetStream subscription wrapper
-        const js_sub = try self.allocator.create(JetStreamSubscription);
+        const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
             .subscription = subscription,
             .js = self,
@@ -1166,7 +1160,7 @@ pub const JetStream = struct {
     }
 
     /// Create a pull subscription for the specified stream
-    pub fn pullSubscribe(self: *JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*PullSubscription {
+    pub fn pullSubscribe(self: JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*PullSubscription {
         // Create pull consumer config with appropriate defaults
         var pull_config = consumer_config;
         pull_config.deliver_subject = null; // Force null for pull consumers
@@ -1182,22 +1176,22 @@ pub const JetStream = struct {
             return error.MissingConsumerName;
 
         // Generate unique inbox prefix for this pull subscription
-        const inbox_base = try inbox.newInbox(self.allocator);
-        defer self.allocator.free(inbox_base);
+        const inbox_base = try inbox.newInbox(self.nc.allocator);
+        defer self.nc.allocator.free(inbox_base);
 
-        const inbox_prefix = try std.fmt.allocPrint(self.allocator, "{s}.", .{inbox_base});
-        errdefer self.allocator.free(inbox_prefix);
+        const inbox_prefix = try std.fmt.allocPrint(self.nc.allocator, "{s}.", .{inbox_base});
+        errdefer self.nc.allocator.free(inbox_prefix);
 
         // Create wildcard subscription subject
-        const wildcard_subject = try std.fmt.allocPrint(self.allocator, "{s}*", .{inbox_prefix});
-        defer self.allocator.free(wildcard_subject);
+        const wildcard_subject = try std.fmt.allocPrint(self.nc.allocator, "{s}*", .{inbox_prefix});
+        defer self.nc.allocator.free(wildcard_subject);
 
         // Create the persistent wildcard inbox subscription
         const inbox_subscription = try self.nc.subscribeSync(wildcard_subject);
         errdefer self.nc.unsubscribe(inbox_subscription);
 
         // Allocate PullSubscription
-        const pull_subscription = try self.allocator.create(PullSubscription);
+        const pull_subscription = try self.nc.allocator.create(PullSubscription);
         pull_subscription.* = PullSubscription{
             .js = self,
             .stream_name = stream_name,
@@ -1211,7 +1205,7 @@ pub const JetStream = struct {
     }
 
     /// Publish a message to JetStream
-    pub fn publish(self: *JetStream, subject: []const u8, data: []const u8, options: PublishOptions) !Result(PubAck) {
+    pub fn publish(self: JetStream, subject: []const u8, data: []const u8, options: PublishOptions) !Result(PubAck) {
         // Validate subject according to ADR-6
         try validation.validateSubject(subject);
 
@@ -1228,13 +1222,13 @@ pub const JetStream = struct {
     }
 
     /// Publish a pre-constructed message to JetStream
-    pub fn publishMsg(self: *JetStream, msg: *Message, options: PublishOptions) !Result(PubAck) {
+    pub fn publishMsg(self: JetStream, msg: *Message, options: PublishOptions) !Result(PubAck) {
         try validation.validateSubject(msg.subject);
         return self.publishMsgInternal(msg, options);
     }
 
     /// Internal function to publish a message with header processing
-    fn publishMsgInternal(self: *JetStream, msg: *Message, options: PublishOptions) !Result(PubAck) {
+    fn publishMsgInternal(self: JetStream, msg: *Message, options: PublishOptions) !Result(PubAck) {
         // Set JetStream-specific headers based on options
         if (options.msg_id) |id| {
             try msg.headerSet(MsgIdHdr, id);
@@ -1283,13 +1277,13 @@ pub const JetStream = struct {
     }
 
     /// Create a KV manager for bucket operations
-    pub fn kvManager(self: *JetStream) @import("jetstream_kv.zig").KVManager {
+    pub fn kvManager(self: JetStream) @import("jetstream_kv.zig").KVManager {
         const jetstream_kv = @import("jetstream_kv.zig");
-        return jetstream_kv.KVManager.init(self.allocator, self);
+        return jetstream_kv.KVManager.init(self);
     }
 
     /// Open an existing KV bucket
-    pub fn kvBucket(self: *JetStream, bucket_name: []const u8) !*@import("jetstream_kv.zig").KV {
+    pub fn kvBucket(self: JetStream, bucket_name: []const u8) !*@import("jetstream_kv.zig").KV {
         var manager = self.kvManager();
         return try manager.openBucket(bucket_name);
     }

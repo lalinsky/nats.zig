@@ -8,7 +8,6 @@ test "get message by sequence" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -51,7 +50,6 @@ test "get last message by subject" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subjects
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -107,7 +105,6 @@ test "get next message by subject" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subjects
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -172,7 +169,6 @@ test "get message with headers" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -224,7 +220,6 @@ test "message operations error cases" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -262,7 +257,6 @@ test "invalid option combinations" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -294,7 +288,6 @@ test "getMsgs stub returns not implemented" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);

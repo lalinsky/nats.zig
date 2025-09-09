@@ -10,7 +10,6 @@ test "KV basic create bucket" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
@@ -38,7 +37,6 @@ test "KV put and get operations" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
@@ -77,7 +75,6 @@ test "KV create and update operations" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
@@ -121,7 +118,6 @@ test "KV delete operation" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
@@ -162,7 +158,6 @@ test "KV purge operation" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
@@ -200,7 +195,6 @@ test "KV status operation" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
