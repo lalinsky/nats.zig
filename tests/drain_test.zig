@@ -218,3 +218,125 @@ test "subscription drain not draining error" {
     const result = sub.waitForDrainCompletion(100);
     try std.testing.expectError(error.NotDraining, result);
 }
+
+test "connection drain - no subscriptions" {
+    var conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    // Initially not draining
+    try std.testing.expect(!conn.isDraining());
+
+    // Drain connection with no subscriptions (should complete immediately)
+    try conn.drain();
+
+    // Wait should return quickly as drain completes immediately
+    try conn.waitForDrainCompletion(1000);
+}
+
+test "connection drain - single subscription" {
+    var conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    // Create subscription with pending messages
+    const sub = try conn.subscribeSync("test.connection.drain.single");
+    defer sub.deinit();
+
+    // Publish messages
+    try conn.publish("test.connection.drain.single", "message 1");
+    try conn.publish("test.connection.drain.single", "message 2");
+    try conn.flush();
+
+    // Wait for messages to arrive
+    var waited: u64 = 0;
+    while (sub.pending_msgs.load(.acquire) < 2 and waited < 1000) : (waited += 5) {
+        std.time.sleep(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(sub.pending_msgs.load(.acquire) == 2);
+
+    // Drain connection
+    try conn.drain();
+    try std.testing.expect(conn.isDraining());
+
+    // Subscription should be draining but not complete
+    try std.testing.expect(sub.isDraining());
+    try std.testing.expect(!sub.isDrainComplete());
+
+    // Consume messages to complete drain
+    var msg1 = try sub.nextMsg(1000);
+    defer msg1.deinit();
+    var msg2 = try sub.nextMsg(1000);
+    defer msg2.deinit();
+
+    // Wait for connection drain completion
+    try conn.waitForDrainCompletion(1000);
+}
+
+test "connection drain - multiple subscriptions" {
+    var conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    // Create multiple subscriptions
+    const sub1 = try conn.subscribeSync("test.connection.drain.multi1");
+    defer sub1.deinit();
+    const sub2 = try conn.subscribeSync("test.connection.drain.multi2");
+    defer sub2.deinit();
+
+    // Publish messages to both subscriptions
+    try conn.publish("test.connection.drain.multi1", "message 1");
+    try conn.publish("test.connection.drain.multi2", "message 2");
+    try conn.flush();
+
+    // Wait for messages to arrive
+    var waited: u64 = 0;
+    while ((sub1.pending_msgs.load(.acquire) < 1 or sub2.pending_msgs.load(.acquire) < 1) and waited < 1000) : (waited += 5) {
+        std.time.sleep(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(sub1.pending_msgs.load(.acquire) == 1);
+    try std.testing.expect(sub2.pending_msgs.load(.acquire) == 1);
+
+    // Drain connection
+    try conn.drain();
+    try std.testing.expect(conn.isDraining());
+
+    // Both subscriptions should be draining
+    try std.testing.expect(sub1.isDraining());
+    try std.testing.expect(sub2.isDraining());
+
+    // Consume first subscription's message
+    var msg1 = try sub1.nextMsg(1000);
+    defer msg1.deinit();
+
+    // First subscription should be complete, but connection still draining
+    try std.testing.expect(sub1.isDrainComplete());
+    try std.testing.expect(!sub2.isDrainComplete());
+
+    // Consume second subscription's message
+    var msg2 = try sub2.nextMsg(1000);
+    defer msg2.deinit();
+
+    // Now both should be complete and connection drain should complete
+    try std.testing.expect(sub2.isDrainComplete());
+    try conn.waitForDrainCompletion(1000);
+}
+
+test "connection drain - already draining" {
+    var conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    // First drain call
+    try conn.drain();
+
+    // Second drain call should be a no-op (not error)
+    try conn.drain();
+
+    try conn.waitForDrainCompletion(1000);
+}
+
+test "connection drain not draining error" {
+    var conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    // Should error if not draining
+    const result = conn.waitForDrainCompletion(100);
+    try std.testing.expectError(error.NotDraining, result);
+}
