@@ -778,15 +778,18 @@ pub const Connection = struct {
     }
 
     pub fn unsubscribe(self: *Self, sub: *Subscription) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        // Remove from subscription table first
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-        self.subs_mutex.lock();
-        defer self.subs_mutex.unlock();
+            self.subs_mutex.lock();
+            defer self.subs_mutex.unlock();
 
-        if (!self.subscriptions.remove(sub.sid)) {
-            // Nothing to do, already unsubscribed
-            return;
+            if (!self.subscriptions.remove(sub.sid)) {
+                // Nothing to do, already unsubscribed
+                return;
+            }
         }
 
         // Try to send UNSUB command. Even if it fails internally,
@@ -809,7 +812,7 @@ pub const Connection = struct {
         defer self.subs_mutex.unlock();
 
         if (self.subscriptions.fetchRemove(sid)) |kv| {
-            log.debug("Removed subscription {d} from connection", .{sid});
+            log.debug("Removed subscription {d} ({s}) from connection", .{ sid, kv.value.subject });
             // Release connection's reference to the subscription
             kv.value.release();
         }

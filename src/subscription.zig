@@ -181,6 +181,8 @@ pub const Subscription = struct {
         SendFailed,
     };
 
+    /// Issues an automatic unsubscribe that is processed by the server when 'max' messages have been received.
+    /// This can be useful when sending a request to an unknown number of subscribers.
     pub fn autoUnsubscribe(self: *Subscription, max: u64) AutoUnsubscribeError!void {
         if (max == 0) return AutoUnsubscribeError.InvalidMax;
 

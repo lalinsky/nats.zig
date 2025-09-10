@@ -12,6 +12,7 @@ test "autounsubscribe sync basic functionality" {
 
     // Set autounsubscribe limit to 3 messages
     try sub.autoUnsubscribe(3);
+    try conn.flush();
 
     // Publish 5 messages
     for (0..5) |i| {
@@ -65,6 +66,7 @@ test "autounsubscribe async basic functionality" {
 
     // Set autounsubscribe limit to 2 messages
     try sub.autoUnsubscribe(2);
+    try conn.flush();
 
     // Publish 4 messages
     for (0..4) |i| {
@@ -74,13 +76,16 @@ test "autounsubscribe async basic functionality" {
     }
     try conn.flush();
 
-    // Wait a bit for message processing
-    std.time.sleep(100 * std.time.ns_per_ms);
-
-    // Should have received exactly 2 messages
-    ctx.mutex.lock();
-    const count = messages_received.items.len;
-    ctx.mutex.unlock();
+    // Wait for message processing with bounded wait loop
+    const deadline_ms = std.time.milliTimestamp() + 1000;
+    var count: usize = 0;
+    while (std.time.milliTimestamp() < deadline_ms) {
+        ctx.mutex.lock();
+        count = messages_received.items.len;
+        ctx.mutex.unlock();
+        if (count >= 2) break;
+        std.time.sleep(10 * std.time.ns_per_ms);
+    }
 
     try std.testing.expectEqual(@as(usize, 2), count);
 }
@@ -114,9 +119,10 @@ test "autounsubscribe delivered message counter" {
     defer sub.deinit();
 
     try sub.autoUnsubscribe(2);
+    try conn.flush();
 
     // Verify initial state
-    try std.testing.expectEqual(@as(u64, 0), sub.delivered_msgs.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), sub.delivered_msgs.load(.acquire));
 
     // Publish messages and verify counter increments correctly
     try conn.publish("counter.test", "message 1");
@@ -124,14 +130,14 @@ test "autounsubscribe delivered message counter" {
 
     const msg1 = try sub.nextMsg(1000);
     defer msg1.deinit();
-    try std.testing.expectEqual(@as(u64, 1), sub.delivered_msgs.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), sub.delivered_msgs.load(.acquire));
 
     try conn.publish("counter.test", "message 2");
     try conn.flush();
 
     const msg2 = try sub.nextMsg(1000);
     defer msg2.deinit();
-    try std.testing.expectEqual(@as(u64, 2), sub.delivered_msgs.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 2), sub.delivered_msgs.load(.acquire));
 
     // Third message should timeout due to autounsubscribe
     try conn.publish("counter.test", "message 3");
