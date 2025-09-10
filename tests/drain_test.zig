@@ -229,9 +229,6 @@ test "connection drain - no subscriptions" {
     // Drain connection with no subscriptions (should complete immediately)
     try conn.drain();
 
-    // Should be draining and complete quickly
-    try std.testing.expect(conn.isDraining());
-
     // Wait should return quickly as drain completes immediately
     try conn.waitForDrainCompletion(1000);
 }
@@ -328,11 +325,9 @@ test "connection drain - already draining" {
 
     // First drain call
     try conn.drain();
-    try std.testing.expect(conn.isDraining());
 
     // Second drain call should be a no-op (not error)
     try conn.drain();
-    try std.testing.expect(conn.isDraining());
 
     try conn.waitForDrainCompletion(1000);
 }
