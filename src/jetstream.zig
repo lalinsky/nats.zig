@@ -413,7 +413,7 @@ pub const PullSubscription = struct {
 
     pub fn deinit(self: *PullSubscription) void {
         self.consumer_info.deinit();
-        self.js.nc.unsubscribe(self.inbox_subscription);
+        self.inbox_subscription.deinit(); // This will unsubscribe and release the user reference
         self.js.nc.allocator.free(self.inbox_prefix);
         self.js.nc.allocator.destroy(self);
     }

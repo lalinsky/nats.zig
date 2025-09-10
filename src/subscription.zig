@@ -82,11 +82,21 @@ pub const Subscription = struct {
             .messages = MessageQueue.init(nc.allocator, .{}),
             .handler = handler,
         };
+
+        // Subscription starts with 1 reference (from RefCounter.init())
+        // Add an additional reference for the user - total will be 2 refs:
+        // 1. Connection reference (for hashmap storage)
+        // 2. User reference (for returned pointer)
+        sub.retain();
+
         return sub;
     }
 
+    /// Unsubscribe from the server and release the user reference.
+    /// After calling this, the subscription should not be used.
     pub fn deinit(self: *Subscription) void {
         self.nc.unsubscribe(self);
+        self.release(); // Release user reference
     }
 
     fn destroy(self: *Subscription) void {
