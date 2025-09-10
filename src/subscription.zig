@@ -133,19 +133,16 @@ pub const Subscription = struct {
     }
 
     pub fn drain(self: *Subscription) void {
+        // Temporarily increment pending, to avoid race conditions
+        incrementPending(self, 0);
+        defer decrementPending(self, 0);
+
         // Mark as draining
-        self.draining.store(true, .release);
+        const prev_state = self.draining.cmpxchgStrong(false, true, .acq_rel, .acquire);
+        if (prev_state != null) return; // Already draining
 
         // Send UNSUB to server
         self.nc.unsubscribeInternal(self.sid);
-
-        // Check if already empty (immediate completion)
-        if (self.pending_msgs.load(.acquire) == 0) {
-            log.debug("Subscription {d} drain completed immediately", .{self.sid});
-            self.drain_complete.set();
-        } else {
-            log.debug("Subscription {d} draining started, {d} pending messages", .{ self.sid, self.pending_msgs.load(.acquire) });
-        }
     }
 
     pub fn isDraining(self: *Subscription) bool {
@@ -153,7 +150,7 @@ pub const Subscription = struct {
     }
 
     pub fn isDrainComplete(self: *Subscription) bool {
-        return self.draining.load(.acquire) and self.pending_msgs.load(.acquire) == 0;
+        return self.draining.load(.acquire) and self.drain_complete.isSet();
     }
 
     pub fn waitForDrainCompletion(self: *Subscription, timeout_ms: u64) !void {
@@ -238,5 +235,6 @@ pub fn decrementPending(sub: *Subscription, msg_size: usize) void {
     if (sub.draining.load(.acquire) and remaining_msgs == 1) {
         log.debug("Subscription {d} drain completed", .{sub.sid});
         sub.drain_complete.set();
+        sub.nc.notifySubscriptionDrainComplete();
     }
 }

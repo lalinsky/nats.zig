@@ -99,6 +99,7 @@ pub const ConnectionClosedError = error{
 pub const PublishError = error{
     MaxPayload,
     InvalidSubject,
+    DrainInProgress,
 } || ConnectionClosedError || std.mem.Allocator.Error;
 
 pub const ConnectionError = error{
@@ -122,6 +123,13 @@ pub const ConnectionStatus = enum {
     connecting,
     connected,
     reconnecting,
+};
+
+pub const DrainState = enum(u8) {
+    not_draining = 0,
+    draining_subs = 1,
+    draining_pubs = 2,
+    drain_complete = 3,
 };
 
 pub const HandshakeState = enum {
@@ -245,6 +253,12 @@ pub const Connection = struct {
 
     // Response management (shared subscription for request/reply)
     response_manager: ResponseManager,
+
+    // Connection draining
+    drain_state: std.atomic.Value(DrainState) = std.atomic.Value(DrainState).init(.not_draining),
+    drain_completion: std.Thread.ResetEvent = .{},
+    drain_subscription_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    drain_ping_id: u64 = 0,
 
     scratch: std.heap.ArenaAllocator,
 
@@ -580,6 +594,10 @@ pub const Connection = struct {
     }
 
     fn publishMsgInternal(self: *Self, msg: *Message, reply_override: ?[]const u8) !void {
+        if (self.drain_state.load(.acquire) == .draining_pubs) {
+            return error.DrainInProgress;
+        }
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -788,12 +806,7 @@ pub const Connection = struct {
             return ConnectionError.ConnectionClosed;
         }
 
-        // Buffer the PING first (can fail on allocation)
-        try self.write_buffer.append("PING\r\n");
-
-        // Only increment counter after successful buffering
-        self.outgoing_pings += 1;
-        const our_ping_id = self.outgoing_pings;
+        const our_ping_id = try self.sendPing(false);
 
         log.debug("Sent PING with ping_id={}, waiting for PONG", .{our_ping_id});
 
@@ -1003,7 +1016,7 @@ pub const Connection = struct {
         // Parse the received data
         self.parser.parse(self, buffer[0..bytes_read]) catch |err| {
             switch (err) {
-                error.ShouldStop => return err,
+                error.ShouldStop, error.ShouldClose => return err,
                 else => {
                     log.err("Parser error: {}", .{err});
                     return err;
@@ -1027,6 +1040,10 @@ pub const Connection = struct {
                     },
                 }
             };
+
+            if (self.drain_state.load(.acquire) == .draining_pubs) {
+                self.sendDrainPing();
+            }
         }
 
         log.debug("Flusher loop exited", .{});
@@ -1036,8 +1053,12 @@ pub const Connection = struct {
         // Try to gather data from buffer first
         var iovecs: [16]std.posix.iovec_const = undefined;
         const gather = self.write_buffer.gatherReadVectors(&iovecs, self.options.timeout_ms) catch |err| switch (err) {
-            error.QueueEmpty, error.BufferFrozen => {
-                // No data to write or buffer frozen during reconnection
+            error.QueueEmpty => {
+                // No data to write
+                return;
+            },
+            error.BufferFrozen => {
+                // Buffer frozen during reconnection
                 return;
             },
             error.QueueClosed => return error.ShouldStop,
@@ -1294,13 +1315,23 @@ pub const Connection = struct {
         }
     }
 
+    fn sendPing(self: *Self, comptime lock: bool) !u64 {
+        try self.write_buffer.append("PING\r\n");
+
+        if (lock) self.mutex.lock();
+        defer if (lock) self.mutex.unlock();
+
+        self.outgoing_pings += 1;
+        return self.outgoing_pings;
+    }
+
     fn checkAndSendPing(self: *Self) !void {
         if (self.options.ping_interval_ms == 0) return;
 
         const interval_ns = self.options.ping_interval_ms * std.time.ns_per_ms;
         const elapsed_ns = self.ping_timer.read();
         if (elapsed_ns >= interval_ns) {
-            try self.write_buffer.append("PING\r\n");
+            _ = try self.sendPing(true);
             const current_pings = self.pings_out.fetchAdd(1, .monotonic) + 1;
             if (self.options.max_pings_out > 0 and current_pings > self.options.max_pings_out) {
                 log.warn("Stale connection: {} unanswered PINGs", .{current_pings});
@@ -1330,10 +1361,14 @@ pub const Connection = struct {
         self.incoming_pongs += 1;
         self.pong_condition.broadcast();
 
+        log.debug("Received PONG for ping_id={}", .{self.incoming_pongs});
+
         // Reset keep-alive ping counter - ANY PONG proves connection is alive
         self.pings_out.store(0, .monotonic);
 
-        log.debug("Received PONG for ping_id={}", .{self.incoming_pongs});
+        if (self.drain_ping_id == self.incoming_pongs) {
+            try self.notifyPublishDrainComplete();
+        }
     }
 
     pub fn processPing(self: *Self) !void {
@@ -1407,10 +1442,14 @@ pub const Connection = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        log.info("markNeedsReconnect", .{});
-
         if (self.status != .connected) {
             log.info("Connection not in connected state", .{});
+            return;
+        }
+
+        // Handle explicit close request
+        if (err == error.ShouldClose) {
+            needs_close = true;
             return;
         }
 
@@ -1734,5 +1773,98 @@ pub const Connection = struct {
     // JetStream support
     pub fn jetstream(self: *Self, options: JetStreamOptions) JetStream {
         return JetStream.init(self, options);
+    }
+
+    // Connection draining
+    pub fn drain(self: *Self) !void {
+        const prev_state = self.drain_state.cmpxchgStrong(.not_draining, .draining_subs, .acq_rel, .acquire);
+        if (prev_state != null) return; // Already draining
+
+        // Add one count as a blocker, to avoid early switch to the draining_pubs phase
+        _ = self.drain_subscription_count.fetchAdd(1, .release);
+
+        // Start draining subscriptions
+        self.subs_mutex.lock();
+        var iter = self.subscriptions.valueIterator();
+        while (iter.next()) |sub_ptr| {
+            const sub = sub_ptr.*;
+            _ = self.drain_subscription_count.fetchAdd(1, .release);
+            sub.drain(); // Drain the subscription
+        }
+        self.subs_mutex.unlock();
+
+        // Release the blocker
+        self.notifySubscriptionDrainComplete();
+    }
+
+    pub fn isDraining(self: *Self) bool {
+        const state = self.drain_state.load(.acquire);
+        switch (state) {
+            .draining_subs, .draining_pubs => return true,
+            else => return false,
+        }
+    }
+
+    pub fn isDrainComplete(self: *Self) bool {
+        const state = self.drain_state.load(.acquire);
+        switch (state) {
+            .drain_complete => return true,
+            else => return false,
+        }
+    }
+
+    pub fn waitForDrainCompletion(self: *Self, timeout_ms: ?u64) !void {
+        const state = self.drain_state.load(.acquire);
+        switch (state) {
+            .not_draining => return error.NotDraining,
+            .drain_complete => return,
+            else => {},
+        }
+
+        if (timeout_ms) |timeout| {
+            try self.drain_completion.timedWait(timeout * std.time.ns_per_ms);
+        } else {
+            self.drain_completion.wait();
+        }
+    }
+
+    pub fn notifySubscriptionDrainComplete(self: *Self) void {
+        // Only decrement if we're in the right state
+        const state = self.drain_state.load(.acquire);
+        if (state == .draining_subs) {
+            const remaining = self.drain_subscription_count.fetchSub(1, .acq_rel);
+            std.debug.assert(remaining > 0); // Catch atomic underflow during development
+            if (remaining == 1) { // This was the last one
+                self.startPublicationDrain();
+            }
+        }
+    }
+
+    fn sendDrainPing(self: *Self) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.drain_ping_id > 0) return; // Already sent the last ping
+
+        self.drain_ping_id = self.sendPing(false) catch |err| {
+            log.err("Failed to send drain ping: {}", .{err});
+            return;
+        };
+    }
+
+    fn notifyPublishDrainComplete(self: *Self) !void {
+        const prev_state = self.drain_state.cmpxchgStrong(.draining_pubs, .drain_complete, .acq_rel, .acquire);
+        if (prev_state != null) return; // Already completed
+
+        self.drain_completion.set();
+
+        return error.ShouldClose;
+    }
+
+    fn startPublicationDrain(self: *Self) void {
+        const prev_state = self.drain_state.cmpxchgStrong(.draining_subs, .draining_pubs, .acq_rel, .acquire);
+        if (prev_state != null) return; // Already draining pubs
+
+        self.sendDrainPing();
     }
 };
