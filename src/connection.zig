@@ -776,6 +776,7 @@ pub const Connection = struct {
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
 
+        // Release connection's reference to the subscription
         sub.release();
     }
 
