@@ -99,6 +99,7 @@ pub const ConnectionClosedError = error{
 pub const PublishError = error{
     MaxPayload,
     InvalidSubject,
+    DrainInProgress,
 } || ConnectionClosedError || std.mem.Allocator.Error;
 
 pub const ConnectionError = error{
@@ -1015,7 +1016,7 @@ pub const Connection = struct {
         // Parse the received data
         self.parser.parse(self, buffer[0..bytes_read]) catch |err| {
             switch (err) {
-                error.ShouldStop => return err,
+                error.ShouldStop, error.ShouldClose => return err,
                 else => {
                     log.err("Parser error: {}", .{err});
                     return err;
@@ -1832,6 +1833,7 @@ pub const Connection = struct {
         const state = self.drain_state.load(.acquire);
         if (state == .draining_subs) {
             const remaining = self.drain_subscription_count.fetchSub(1, .acq_rel);
+            std.debug.assert(remaining > 0); // Catch atomic underflow during development
             if (remaining == 1) { // This was the last one
                 self.startPublicationDrain();
             }
