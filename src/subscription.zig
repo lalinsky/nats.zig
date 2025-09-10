@@ -146,7 +146,11 @@ pub const Subscription = struct {
         if (prev_state != null) return; // Already draining
 
         // Send UNSUB to server
-        self.nc.unsubscribeInternal(self.sid);
+        self.nc.unsubscribeInternal(self.sid, null) catch |err| {
+            // Even with this failing, once we set draining to true,
+            // messages will be dropped, so it's OK to continue
+            log.err("Failed to send UNSUB for sid {d}: {}", .{ self.sid, err });
+        };
     }
 
     pub fn isDraining(self: *Subscription) bool {
