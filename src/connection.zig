@@ -763,16 +763,18 @@ pub const Connection = struct {
         return sub;
     }
 
-    pub fn unsubscribeInternal(self: *Self, sid: u64) void {
+    pub fn unsubscribeInternal(self: *Self, sid: u64, max: ?u64) !void {
         var buffer: [256]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
         var writer = stream.writer();
 
-        writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
+        if (max) |m| {
+            writer.print("UNSUB {d} {d}\r\n", .{ sid, m }) catch unreachable; // Will always fit
+        } else {
+            writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
+        }
 
-        self.write_buffer.append(stream.getWritten()) catch |err| {
-            log.err("Failed to enqueue UNSUB message for sid {d}: {}", .{ sid, err });
-        };
+        try self.write_buffer.append(stream.getWritten());
     }
 
     pub fn unsubscribe(self: *Self, sub: *Subscription) void {
@@ -790,12 +792,27 @@ pub const Connection = struct {
         // Try to send UNSUB command. Even if it fails internally,
         // processMsg will keep sending UNSUB commands once
         // it receives a message with unknown sid.
-        self.unsubscribeInternal(sub.sid);
+        self.unsubscribeInternal(sub.sid, null) catch |err| {
+            log.err("Failed to send UNSUB for sid {d}: {}", .{ sub.sid, err });
+        };
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
 
         // Release connection's reference to the subscription
         sub.release();
+    }
+
+    /// Remove subscription from connection's subscription table
+    /// This does not send UNSUB to server - that should be done separately
+    pub fn removeSubscriptionInternal(self: *Self, sid: u64) void {
+        self.subs_mutex.lock();
+        defer self.subs_mutex.unlock();
+
+        if (self.subscriptions.fetchRemove(sid)) |kv| {
+            log.debug("Removed subscription {d} from connection", .{sid});
+            // Release connection's reference to the subscription
+            kv.value.release();
+        }
     }
 
     pub fn flush(self: *Self) !void {
@@ -1169,7 +1186,9 @@ pub const Connection = struct {
             }
         } else {
             // No sub subscription found, try to send UNSUB command
-            self.unsubscribeInternal(message.sid);
+            self.unsubscribeInternal(message.sid, null) catch |err| {
+                log.err("Failed to send UNSUB for unknown sid {d}: {}", .{ message.sid, err });
+            };
         }
     }
 

@@ -58,6 +58,10 @@ pub const Subscription = struct {
     pending_msgs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     pending_bytes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
+    // Autounsubscribe state
+    max_msgs: ?u64 = null,
+    delivered_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
     // Drain state
     draining: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     drain_complete: std.Thread.ResetEvent = .{},
@@ -170,12 +174,56 @@ pub const Subscription = struct {
         }
     }
 
+    pub const AutoUnsubscribeError = error{
+        MaxAlreadyReached,
+        InvalidMax,
+        SubscriptionClosed,
+        SendFailed,
+    };
+
+    pub fn autoUnsubscribe(self: *Subscription, max: u64) AutoUnsubscribeError!void {
+        if (max == 0) return AutoUnsubscribeError.InvalidMax;
+
+        const current_delivered = self.delivered_msgs.load(.acquire);
+        if (current_delivered >= max) {
+            return AutoUnsubscribeError.MaxAlreadyReached;
+        }
+
+        // Set the limit
+        self.max_msgs = max;
+
+        // Send protocol message to server
+        self.nc.unsubscribeInternal(self.sid, max) catch {
+            // Reset the limit since we couldn't send the command
+            self.max_msgs = null;
+            return AutoUnsubscribeError.SendFailed;
+        };
+    }
+
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {
+        // Check if subscription has reached autounsubscribe limit
+        if (self.max_msgs) |max| {
+            if (self.delivered_msgs.load(.acquire) >= max) {
+                return error.Timeout; // Consistent with "no more messages" semantics
+            }
+        }
+
         const msg = self.messages.pop(timeout_ms) catch |err| switch (err) {
             error.BufferFrozen => return error.Timeout,
             error.QueueEmpty => return error.Timeout,
             error.QueueClosed => return error.Timeout, // TODO: this should be mapped to ConnectionClosed
         };
+
+        // Increment delivered counter with proper memory ordering
+        const delivered = self.delivered_msgs.fetchAdd(1, .acq_rel) + 1;
+
+        // Check if we've reached the autounsubscribe limit
+        if (self.max_msgs) |max| {
+            if (delivered >= max) {
+                // Remove subscription from connection
+                self.nc.removeSubscriptionInternal(self.sid);
+            }
+        }
 
         // Decrement pending counters when message is consumed
         decrementPending(self, msg.data.len);
