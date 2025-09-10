@@ -124,6 +124,13 @@ pub const ConnectionStatus = enum {
     reconnecting,
 };
 
+pub const DrainState = enum(u8) {
+    not_draining = 0,
+    draining_subs = 1,
+    draining_pubs = 2,
+    drain_complete = 3,
+};
+
 pub const HandshakeState = enum {
     not_started,
     waiting_for_info,
@@ -245,6 +252,12 @@ pub const Connection = struct {
 
     // Response management (shared subscription for request/reply)
     response_manager: ResponseManager,
+
+    // Connection draining
+    drain_state: std.atomic.Value(DrainState) = std.atomic.Value(DrainState).init(.not_draining),
+    drain_completion: std.Thread.ResetEvent = .{},
+    subscription_drain_event: std.Thread.ResetEvent = .{},
+    drain_subscription_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     scratch: std.heap.ArenaAllocator,
 
@@ -1734,5 +1747,77 @@ pub const Connection = struct {
     // JetStream support
     pub fn jetstream(self: *Self, options: JetStreamOptions) JetStream {
         return JetStream.init(self, options);
+    }
+
+    // Connection draining
+    pub fn drain(self: *Self) !void {
+        const prev_state = self.drain_state.cmpxchgStrong(.not_draining, .draining_subs, .acq_rel, .acquire);
+        if (prev_state != null) return; // Already draining
+
+        // Count subscriptions that need draining
+        self.subs_mutex.lock();
+        var drain_count: u32 = 0;
+        var iter = self.subscriptions.valueIterator();
+        while (iter.next()) |sub_ptr| {
+            const sub = sub_ptr.*;
+            if (!sub.isDrainComplete()) {
+                drain_count += 1;
+                sub.drain(); // Drain the subscription
+            }
+        }
+        self.subs_mutex.unlock();
+
+        // Set count atomically - this is our source of truth
+        self.drain_subscription_count.store(drain_count, .release);
+
+        if (drain_count == 0) {
+            self.startPublicationDrain();
+        } else {
+            const thread = try std.Thread.spawn(.{}, waitForSubscriptionDrain, .{self});
+            thread.detach();
+        }
+    }
+
+    pub fn isDraining(self: *Self) bool {
+        return self.drain_state.load(.acquire) != .not_draining;
+    }
+
+    pub fn waitForDrainCompletion(self: *Self, timeout_ms: ?u64) !void {
+        if (!self.isDraining()) return error.NotDraining;
+
+        if (timeout_ms) |timeout| {
+            try self.drain_completion.timedWait(timeout * std.time.ns_per_ms);
+        } else {
+            self.drain_completion.wait();
+        }
+    }
+
+    pub fn notifySubscriptionDrainComplete(self: *Self, sub: *Subscription) void {
+        _ = sub; // unused
+        // Only decrement if we're in the right state
+        const state = self.drain_state.load(.acquire);
+        if (state == .draining_subs) {
+            const remaining = self.drain_subscription_count.fetchSub(1, .acq_rel);
+            if (remaining == 1) { // This was the last one
+                self.subscription_drain_event.set();
+            }
+        }
+    }
+
+    fn waitForSubscriptionDrain(self: *Self) void {
+        self.subscription_drain_event.wait();
+        self.startPublicationDrain();
+    }
+
+    fn startPublicationDrain(self: *Self) void {
+        self.drain_state.store(.draining_pubs, .release);
+        self.flush() catch {}; // Flush remaining publications
+
+        // Complete drain
+        self.drain_state.store(.drain_complete, .release);
+        self.drain_completion.set();
+
+        // Auto-close connection
+        self.close();
     }
 };

@@ -238,5 +238,7 @@ pub fn decrementPending(sub: *Subscription, msg_size: usize) void {
     if (sub.draining.load(.acquire) and remaining_msgs == 1) {
         log.debug("Subscription {d} drain completed", .{sub.sid});
         sub.drain_complete.set();
+        // Notify connection that this subscription completed draining
+        sub.nc.notifySubscriptionDrainComplete(sub);
     }
 }
