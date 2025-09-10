@@ -147,11 +147,10 @@ pub const Dispatcher = struct {
         }
 
         // Check autounsubscribe limit after successful message delivery
-        if (subscription.max_msgs) |max| {
-            if (delivered >= max) {
-                log.debug("Subscription {} reached autounsubscribe limit ({}), removing", .{ subscription.sid, max });
-                subscription.nc.removeSubscriptionInternal(subscription.sid);
-            }
+        const max = subscription.max_msgs.load(.acquire);
+        if (max > 0 and delivered >= max) {
+            log.debug("Subscription {} reached autounsubscribe limit ({}), removing", .{ subscription.sid, max });
+            subscription.nc.removeSubscriptionInternal(subscription.sid);
         }
 
         // Decrement pending counters after handler completes (success or failure)

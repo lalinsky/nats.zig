@@ -59,7 +59,7 @@ pub const Subscription = struct {
     pending_bytes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     // Autounsubscribe state
-    max_msgs: ?u64 = null,
+    max_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0), // 0 means no limit
     delivered_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     // Drain state
@@ -189,23 +189,20 @@ pub const Subscription = struct {
             return AutoUnsubscribeError.MaxAlreadyReached;
         }
 
-        // Set the limit
-        self.max_msgs = max;
-
-        // Send protocol message to server
+        // Send protocol message to server first
         self.nc.unsubscribeInternal(self.sid, max) catch {
-            // Reset the limit since we couldn't send the command
-            self.max_msgs = null;
             return AutoUnsubscribeError.SendFailed;
         };
+
+        // Only set the limit after successfully sending UNSUB
+        self.max_msgs.store(max, .release);
     }
 
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {
         // Check if subscription has reached autounsubscribe limit
-        if (self.max_msgs) |max| {
-            if (self.delivered_msgs.load(.acquire) >= max) {
-                return error.Timeout; // Consistent with "no more messages" semantics
-            }
+        const max = self.max_msgs.load(.acquire);
+        if (max > 0 and self.delivered_msgs.load(.acquire) >= max) {
+            return error.Timeout; // Consistent with "no more messages" semantics
         }
 
         const msg = self.messages.pop(timeout_ms) catch |err| switch (err) {
@@ -218,11 +215,10 @@ pub const Subscription = struct {
         const delivered = self.delivered_msgs.fetchAdd(1, .acq_rel) + 1;
 
         // Check if we've reached the autounsubscribe limit
-        if (self.max_msgs) |max| {
-            if (delivered >= max) {
-                // Remove subscription from connection
-                self.nc.removeSubscriptionInternal(self.sid);
-            }
+        const max_limit = self.max_msgs.load(.acquire);
+        if (max_limit > 0 and delivered >= max_limit) {
+            // Remove subscription from connection
+            self.nc.removeSubscriptionInternal(self.sid);
         }
 
         // Decrement pending counters when message is consumed
