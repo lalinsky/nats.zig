@@ -25,6 +25,7 @@ const Message = @import("message.zig").Message;
 const timestamp = @import("timestamp.zig");
 const newInbox = @import("inbox.zig").newInbox;
 const nuid = @import("nuid.zig");
+const validation = @import("validation.zig");
 
 const log = @import("log.zig").log;
 
@@ -33,8 +34,6 @@ const DEFAULT_CHUNK_SIZE: u32 = 128 * 1024;
 
 // Object Store-specific errors
 pub const ObjectStoreError = error{
-    InvalidStoreName,
-    InvalidObjectName,
     StoreNotFound,
     ObjectNotFound,
     ChunkMismatch,
@@ -114,42 +113,6 @@ pub const ObjectStoreConfig = struct {
     /// Chunk size
     chunk_size: u32 = DEFAULT_CHUNK_SIZE,
 };
-
-/// Validate store name according to object store rules
-pub fn validateStoreName(name: []const u8) !void {
-    if (name.len == 0) {
-        return ObjectStoreError.InvalidStoreName;
-    }
-
-    for (name) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-') {
-            return ObjectStoreError.InvalidStoreName;
-        }
-    }
-}
-
-/// Validate object name according to object store rules
-pub fn validateObjectName(name: []const u8) !void {
-    if (name.len == 0) {
-        return ObjectStoreError.InvalidObjectName;
-    }
-
-    // Check for leading or trailing slashes/dots
-    if (name[0] == '/' or name[name.len - 1] == '/' or
-        name[0] == '.' or name[name.len - 1] == '.')
-    {
-        return ObjectStoreError.InvalidObjectName;
-    }
-
-    // Validate each character
-    for (name) |c| {
-        const valid = std.ascii.isAlphanumeric(c) or
-            c == '-' or c == '/' or c == '_' or c == '=' or c == '.';
-        if (!valid) {
-            return ObjectStoreError.InvalidObjectName;
-        }
-    }
-}
 
 /// Stream reader for object chunks - provides progressive chunk reading
 pub const ObjectReader = struct {
@@ -320,7 +283,7 @@ pub const ObjectStore = struct {
 
     /// Initialize ObjectStore handle
     pub fn init(allocator: std.mem.Allocator, js: JetStream, store_name: []const u8, chunk_size: u32) !ObjectStore {
-        try validateStoreName(store_name);
+        try validation.validateOSBucketName(store_name);
 
         // Create owned copies of names
         const owned_store_name = try allocator.dupe(u8, store_name);
@@ -365,7 +328,7 @@ pub const ObjectStore = struct {
 
     /// Primary put method that accepts any reader type for efficient streaming
     pub fn put(self: *ObjectStore, meta: ObjectMeta, reader: anytype) !Result(ObjectInfo) {
-        try validateObjectName(meta.name);
+        try validation.validateOSObjectName(meta.name);
 
         // Create arena for return value
         const arena = try self.allocator.create(std.heap.ArenaAllocator);
@@ -468,7 +431,7 @@ pub const ObjectStore = struct {
 
     /// Primary get method that returns a streaming result
     pub fn get(self: *ObjectStore, object_name: []const u8) !ObjectResult {
-        try validateObjectName(object_name);
+        try validation.validateOSObjectName(object_name);
 
         // First get metadata
         const meta_subject = try self.getMetaSubject(object_name);
@@ -593,7 +556,7 @@ pub const ObjectStore = struct {
 
     /// Get object metadata
     pub fn info(self: *ObjectStore, object_name: []const u8) !Result(ObjectInfo) {
-        try validateObjectName(object_name);
+        try validation.validateOSObjectName(object_name);
 
         const meta_subject = try self.getMetaSubject(object_name);
         defer self.allocator.free(meta_subject);
@@ -777,7 +740,7 @@ pub const ObjectStoreManager = struct {
 
     /// Create a new object store
     pub fn createStore(self: *ObjectStoreManager, config: ObjectStoreConfig) !ObjectStore {
-        try validateStoreName(config.store_name);
+        try validation.validateOSBucketName(config.store_name);
 
         const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "OBJ_{s}", .{config.store_name});
         defer self.js.nc.allocator.free(stream_name);
@@ -828,7 +791,7 @@ pub const ObjectStoreManager = struct {
 
     /// Delete an object store
     pub fn deleteStore(self: *ObjectStoreManager, store_name: []const u8) !void {
-        try validateStoreName(store_name);
+        try validation.validateOSBucketName(store_name);
 
         const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "OBJ_{s}", .{store_name});
         defer self.js.nc.allocator.free(stream_name);
@@ -837,18 +800,17 @@ pub const ObjectStoreManager = struct {
     }
 };
 
-test "validateStoreName" {
-    try validateStoreName("valid-store_name123");
-    try std.testing.expectError(ObjectStoreError.InvalidStoreName, validateStoreName(""));
-    try std.testing.expectError(ObjectStoreError.InvalidStoreName, validateStoreName("foo bar"));
-    try std.testing.expectError(ObjectStoreError.InvalidStoreName, validateStoreName("foo.bar"));
-}
+test "validation delegates to validation.zig" {
+    // Test that we properly delegate to centralized validation
+    try validation.validateOSBucketName("valid-store_name123");
+    try std.testing.expectError(error.InvalidOSBucketName, validation.validateOSBucketName(""));
+    try std.testing.expectError(error.InvalidOSBucketName, validation.validateOSBucketName("foo bar"));
+    try std.testing.expectError(error.InvalidOSBucketName, validation.validateOSBucketName("foo.bar"));
 
-test "validateObjectName" {
-    try validateObjectName("valid-object/name_123.txt");
-    try std.testing.expectError(ObjectStoreError.InvalidObjectName, validateObjectName(""));
-    try std.testing.expectError(ObjectStoreError.InvalidObjectName, validateObjectName("/starts-with-slash"));
-    try std.testing.expectError(ObjectStoreError.InvalidObjectName, validateObjectName("ends-with-slash/"));
-    try std.testing.expectError(ObjectStoreError.InvalidObjectName, validateObjectName(".starts-with-dot"));
-    try std.testing.expectError(ObjectStoreError.InvalidObjectName, validateObjectName("ends-with-dot."));
+    try validation.validateOSObjectName("valid-object/name_123.txt");
+    try std.testing.expectError(error.InvalidOSObjectName, validation.validateOSObjectName(""));
+    try std.testing.expectError(error.InvalidOSObjectName, validation.validateOSObjectName("/starts-with-slash"));
+    try std.testing.expectError(error.InvalidOSObjectName, validation.validateOSObjectName("ends-with-slash/"));
+    try std.testing.expectError(error.InvalidOSObjectName, validation.validateOSObjectName(".starts-with-dot"));
+    try std.testing.expectError(error.InvalidOSObjectName, validation.validateOSObjectName("ends-with-dot."));
 }

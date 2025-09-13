@@ -245,20 +245,20 @@ test "ObjectStore validation" {
     defer utils.closeConnection(conn);
 
     // Test store name validation
-    try testing.expectError(nats.ObjectStoreError.InvalidStoreName, nats.validateStoreName(""));
-    try testing.expectError(nats.ObjectStoreError.InvalidStoreName, nats.validateStoreName("invalid space"));
-    try testing.expectError(nats.ObjectStoreError.InvalidStoreName, nats.validateStoreName("invalid.dot"));
+    try testing.expectError(error.InvalidOSBucketName, nats.validateOSBucketName(""));
+    try testing.expectError(error.InvalidOSBucketName, nats.validateOSBucketName("invalid space"));
+    try testing.expectError(error.InvalidOSBucketName, nats.validateOSBucketName("invalid.dot"));
 
     // Test object name validation
-    try testing.expectError(nats.ObjectStoreError.InvalidObjectName, nats.validateObjectName(""));
-    try testing.expectError(nats.ObjectStoreError.InvalidObjectName, nats.validateObjectName("/starts-with-slash"));
-    try testing.expectError(nats.ObjectStoreError.InvalidObjectName, nats.validateObjectName("ends-with-slash/"));
-    try testing.expectError(nats.ObjectStoreError.InvalidObjectName, nats.validateObjectName(".starts-with-dot"));
-    try testing.expectError(nats.ObjectStoreError.InvalidObjectName, nats.validateObjectName("ends-with-dot."));
+    try testing.expectError(error.InvalidOSObjectName, nats.validateOSObjectName(""));
+    try testing.expectError(error.InvalidOSObjectName, nats.validateOSObjectName("/starts-with-slash"));
+    try testing.expectError(error.InvalidOSObjectName, nats.validateOSObjectName("ends-with-slash/"));
+    try testing.expectError(error.InvalidOSObjectName, nats.validateOSObjectName(".starts-with-dot"));
+    try testing.expectError(error.InvalidOSObjectName, nats.validateOSObjectName("ends-with-dot."));
 
     // Valid names should pass
-    try nats.validateStoreName("valid-store_name123");
-    try nats.validateObjectName("valid-object/name_123.txt");
+    try nats.validateOSBucketName("valid-store_name123");
+    try nats.validateOSObjectName("valid-object/name_123.txt");
 }
 
 test "ObjectStore error handling" {
