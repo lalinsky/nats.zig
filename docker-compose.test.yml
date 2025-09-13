@@ -77,3 +77,24 @@ services:
       interval: 1s
       timeout: 3s
       retries: 5
+
+  nats-token-auth:
+    image: nats:2.10-alpine
+    network_mode: host
+    command:
+      - "--addr"
+      - "127.0.0.1"
+      - "--port"
+      - "14225"
+      - "--http_port"
+      - "18225"
+      - "--auth"
+      - "test_token_123"
+      - "-D"
+      - "--server_name"
+      - "nats-token-auth"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:18225/healthz"]
+      interval: 1s
+      timeout: 3s
+      retries: 5

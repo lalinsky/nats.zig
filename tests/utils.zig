@@ -7,7 +7,8 @@ pub const Node = enum(u16) {
     node1 = 14222,
     node2 = 14223,
     node3 = 14224,
-    unknown = 14225,
+    token_auth = 14225,
+    unknown = 14226,
 };
 
 pub fn createConnection(node: Node, opts: nats.ConnectionOptions) !*nats.Connection {
