@@ -83,7 +83,6 @@ pub const ObjectMeta = @import("jetstream_objstore.zig").ObjectMeta;
 pub const ObjectInfo = @import("jetstream_objstore.zig").ObjectInfo;
 pub const ObjectStoreConfig = @import("jetstream_objstore.zig").ObjectStoreConfig;
 pub const ObjectStoreError = @import("jetstream_objstore.zig").ObjectStoreError;
-pub const ObjectReader = @import("jetstream_objstore.zig").ObjectReader;
 pub const ObjectResult = @import("jetstream_objstore.zig").ObjectResult;
 
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
