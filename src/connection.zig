@@ -763,39 +763,59 @@ pub const Connection = struct {
         return sub;
     }
 
-    pub fn unsubscribeInternal(self: *Self, sid: u64) void {
+    pub fn unsubscribeInternal(self: *Self, sid: u64, max: ?u64) !void {
         var buffer: [256]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
         var writer = stream.writer();
 
-        writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
+        if (max) |m| {
+            writer.print("UNSUB {d} {d}\r\n", .{ sid, m }) catch unreachable; // Will always fit
+        } else {
+            writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
+        }
 
-        self.write_buffer.append(stream.getWritten()) catch |err| {
-            log.err("Failed to enqueue UNSUB message for sid {d}: {}", .{ sid, err });
-        };
+        try self.write_buffer.append(stream.getWritten());
     }
 
     pub fn unsubscribe(self: *Self, sub: *Subscription) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        // Remove from subscription table first
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-        self.subs_mutex.lock();
-        defer self.subs_mutex.unlock();
+            self.subs_mutex.lock();
+            defer self.subs_mutex.unlock();
 
-        if (!self.subscriptions.remove(sub.sid)) {
-            // Nothing to do, already unsubscribed
-            return;
+            if (!self.subscriptions.remove(sub.sid)) {
+                // Nothing to do, already unsubscribed
+                return;
+            }
         }
 
         // Try to send UNSUB command. Even if it fails internally,
         // processMsg will keep sending UNSUB commands once
         // it receives a message with unknown sid.
-        self.unsubscribeInternal(sub.sid);
+        self.unsubscribeInternal(sub.sid, null) catch |err| {
+            log.err("Failed to send UNSUB for sid {d}: {}", .{ sub.sid, err });
+        };
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
 
         // Release connection's reference to the subscription
         sub.release();
+    }
+
+    /// Remove subscription from connection's subscription table
+    /// This does not send UNSUB to server - that should be done separately
+    pub fn removeSubscriptionInternal(self: *Self, sid: u64) void {
+        self.subs_mutex.lock();
+        defer self.subs_mutex.unlock();
+
+        if (self.subscriptions.fetchRemove(sid)) |kv| {
+            log.debug("Removed subscription {d} ({s}) from connection", .{ sid, kv.value.subject });
+            // Release connection's reference to the subscription
+            kv.value.release();
+        }
     }
 
     pub fn flush(self: *Self) !void {
@@ -1169,7 +1189,9 @@ pub const Connection = struct {
             }
         } else {
             // No sub subscription found, try to send UNSUB command
-            self.unsubscribeInternal(message.sid);
+            self.unsubscribeInternal(message.sid, null) catch |err| {
+                log.err("Failed to send UNSUB for unknown sid {d}: {}", .{ message.sid, err });
+            };
         }
     }
 
@@ -1632,31 +1654,64 @@ pub const Connection = struct {
     fn resendSubscriptions(self: *Self) !void {
         log.debug("Re-establishing subscriptions", .{});
 
-        self.subs_mutex.lock();
-        defer self.subs_mutex.unlock();
+        // Track SIDs that shouldn't be re-subscribed and must be removed
+        var to_remove = ArrayList(u64).init(self.allocator);
+        defer to_remove.deinit();
 
-        const allocator = self.scratch.allocator();
-        defer self.resetScratch();
+        {
+            self.subs_mutex.lock();
+            defer self.subs_mutex.unlock();
 
-        var buffer = ArrayList(u8).init(allocator);
+            const allocator = self.scratch.allocator();
+            defer self.resetScratch();
 
-        var iter = self.subscriptions.iterator();
-        while (iter.next()) |entry| {
-            const sub = entry.value_ptr.*;
+            var buffer = ArrayList(u8).init(allocator);
 
-            // Send SUB command
-            if (sub.queue) |queue| {
-                try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, queue, sub.sid });
-            } else {
-                try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
+            var iter = self.subscriptions.iterator();
+            while (iter.next()) |entry| {
+                const sub = entry.value_ptr.*;
+
+                // Check autounsubscribe state
+                const max = sub.max_msgs.load(.acquire);
+                const delivered = sub.delivered_msgs.load(.acquire);
+
+                var adjusted_max: ?u64 = null;
+                if (max > 0) {
+                    if (delivered < max) {
+                        adjusted_max = max - delivered; // Remaining messages
+                    } else {
+                        // Already reached limit - don't re-subscribe; remove after unlock
+                        log.debug("Subscription {d} ({s}) already reached limit; will remove during reconnect", .{ sub.sid, sub.subject });
+                        try to_remove.append(sub.sid);
+                        continue;
+                    }
+                }
+
+                // Send SUB command
+                if (sub.queue) |queue| {
+                    try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, queue, sub.sid });
+                } else {
+                    try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
+                }
+
+                // Send UNSUB with remaining limit if needed
+                if (adjusted_max) |remaining| {
+                    try buffer.writer().print("UNSUB {d} {d}\r\n", .{ sub.sid, remaining });
+                    log.debug("Re-subscribed to {s} with sid {d} and autounsubscribe limit {d} (delivered: {d})", .{ sub.subject, sub.sid, remaining, delivered });
+                } else {
+                    log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
+                }
             }
 
-            log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
+            // Send all subscription commands via write buffer
+            if (buffer.items.len > 0) {
+                try self.write_buffer.append(buffer.items);
+            }
         }
 
-        // Send all subscription commands via write buffer
-        if (buffer.items.len > 0) {
-            try self.write_buffer.append(buffer.items);
+        // Now remove stale subs outside the subs_mutex
+        for (to_remove.items) |sid| {
+            self.removeSubscriptionInternal(sid);
         }
     }
 
