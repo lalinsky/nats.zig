@@ -70,9 +70,21 @@ pub const validateSubject = @import("validation.zig").validateSubject;
 pub const validateQueueName = @import("validation.zig").validateQueueName;
 pub const validateKVBucketName = @import("validation.zig").validateKVBucketName;
 pub const validateKVKeyName = @import("validation.zig").validateKVKeyName;
+pub const validateOSBucketName = @import("validation.zig").validateOSBucketName;
+pub const validateOSObjectName = @import("validation.zig").validateOSObjectName;
 
 // Utility types
 pub const Result = @import("result.zig").Result;
+
+// JetStream Object Store types
+pub const ObjectStore = @import("jetstream_objstore.zig").ObjectStore;
+pub const ObjectStoreManager = @import("jetstream_objstore.zig").ObjectStoreManager;
+pub const ObjectMeta = @import("jetstream_objstore.zig").ObjectMeta;
+pub const ObjectInfo = @import("jetstream_objstore.zig").ObjectInfo;
+pub const ObjectStoreConfig = @import("jetstream_objstore.zig").ObjectStoreConfig;
+pub const ObjectStoreError = @import("jetstream_objstore.zig").ObjectStoreError;
+pub const ObjectReader = @import("jetstream_objstore.zig").ObjectReader;
+pub const ObjectResult = @import("jetstream_objstore.zig").ObjectResult;
 
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 
@@ -81,4 +93,5 @@ test {
     _ = @import("jetstream.zig");
     _ = @import("jetstream_message.zig");
     _ = @import("jetstream_kv.zig");
+    _ = @import("jetstream_objstore.zig");
 }
