@@ -18,6 +18,7 @@ pub const Connection = @import("connection.zig").Connection;
 pub const ConnectionOptions = @import("connection.zig").ConnectionOptions;
 pub const ConnectionStatus = @import("connection.zig").ConnectionStatus;
 pub const ConnectionError = @import("connection.zig").ConnectionError;
+pub const ProtocolError = @import("connection.zig").ProtocolError;
 pub const PublishError = @import("connection.zig").PublishError;
 pub const Message = @import("message.zig").Message;
 pub const Subscription = @import("subscription.zig").Subscription;
