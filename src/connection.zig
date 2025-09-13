@@ -1675,9 +1675,8 @@ pub const Connection = struct {
                 if (delivered < max) {
                     adjusted_max = max - delivered; // Remaining messages
                 } else {
-                    // Already reached limit - send UNSUB only
-                    try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
-                    log.debug("Subscription {d} ({s}) already reached limit, sending UNSUB during reconnect", .{ sub.sid, sub.subject });
+                    // Already reached limit - don't re-subscribe at all
+                    log.debug("Subscription {d} ({s}) already reached limit, skipping during reconnect", .{ sub.sid, sub.subject });
                     continue;
                 }
             }
