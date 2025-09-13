@@ -58,6 +58,10 @@ pub const Subscription = struct {
     pending_msgs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     pending_bytes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
+    // Autounsubscribe state
+    max_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0), // 0 means no limit
+    delivered_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
     // Drain state
     draining: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     drain_complete: std.Thread.ResetEvent = .{},
@@ -142,7 +146,11 @@ pub const Subscription = struct {
         if (prev_state != null) return; // Already draining
 
         // Send UNSUB to server
-        self.nc.unsubscribeInternal(self.sid);
+        self.nc.unsubscribeInternal(self.sid, null) catch |err| {
+            // Even with this failing, once we set draining to true,
+            // messages will be dropped, so it's OK to continue
+            log.err("Failed to send UNSUB for sid {d}: {}", .{ self.sid, err });
+        };
     }
 
     pub fn isDraining(self: *Subscription) bool {
@@ -170,12 +178,54 @@ pub const Subscription = struct {
         }
     }
 
+    pub const AutoUnsubscribeError = error{
+        MaxAlreadyReached,
+        InvalidMax,
+        SubscriptionClosed,
+        SendFailed,
+    };
+
+    /// Issues an automatic unsubscribe that is processed by the server when 'max' messages have been received.
+    /// This can be useful when sending a request to an unknown number of subscribers.
+    pub fn autoUnsubscribe(self: *Subscription, max: u64) AutoUnsubscribeError!void {
+        if (max == 0) return AutoUnsubscribeError.InvalidMax;
+
+        const current_delivered = self.delivered_msgs.load(.acquire);
+        if (current_delivered >= max) {
+            return AutoUnsubscribeError.MaxAlreadyReached;
+        }
+
+        // Send protocol message to server first
+        self.nc.unsubscribeInternal(self.sid, max) catch {
+            return AutoUnsubscribeError.SendFailed;
+        };
+
+        // Only set the limit after successfully sending UNSUB
+        self.max_msgs.store(max, .release);
+    }
+
     pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {
+        // Check if subscription has reached autounsubscribe limit
+        const max = self.max_msgs.load(.acquire);
+        if (max > 0 and self.delivered_msgs.load(.acquire) >= max) {
+            return error.Timeout; // Consistent with "no more messages" semantics
+        }
+
         const msg = self.messages.pop(timeout_ms) catch |err| switch (err) {
             error.BufferFrozen => return error.Timeout,
             error.QueueEmpty => return error.Timeout,
             error.QueueClosed => return error.Timeout, // TODO: this should be mapped to ConnectionClosed
         };
+
+        // Increment delivered counter with proper memory ordering
+        const delivered = self.delivered_msgs.fetchAdd(1, .acq_rel) + 1;
+
+        // Check if we've reached the autounsubscribe limit
+        const max_limit = self.max_msgs.load(.acquire);
+        if (max_limit > 0 and delivered >= max_limit) {
+            // Remove subscription from connection
+            self.nc.removeSubscriptionInternal(self.sid);
+        }
 
         // Decrement pending counters when message is consumed
         decrementPending(self, msg.data.len);

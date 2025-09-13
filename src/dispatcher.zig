@@ -130,6 +130,9 @@ pub const Dispatcher = struct {
         // Save message data length before handler is called (handler may deinit the message)
         const message_data_len = message.data.len;
 
+        // Increment delivered counter for autounsubscribe
+        const delivered = subscription.delivered_msgs.fetchAdd(1, .acq_rel) + 1;
+
         // Call the subscription's handler in this dispatcher thread context
         // Message ownership is transferred to the handler - handler is responsible for cleanup
         if (subscription.handler) |handler| {
@@ -141,6 +144,13 @@ pub const Dispatcher = struct {
             // No handler - this shouldn't happen for async subscriptions
             log.warn("Received message for subscription {} without handler", .{subscription.sid});
             message.deinit(); // Clean up orphaned message (no handler to transfer ownership to)
+        }
+
+        // Check autounsubscribe limit after successful message delivery
+        const max = subscription.max_msgs.load(.acquire);
+        if (max > 0 and delivered >= max) {
+            log.debug("Subscription {} reached autounsubscribe limit ({}), removing", .{ subscription.sid, max });
+            subscription.nc.removeSubscriptionInternal(subscription.sid);
         }
 
         // Decrement pending counters after handler completes (success or failure)
