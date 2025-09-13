@@ -1314,8 +1314,8 @@ pub const JetStream = struct {
     }
 
     /// Create an object store manager
-    pub fn objectStoreManager(self: *JetStream) @import("jetstream_objstore.zig").ObjectStoreManager {
+    pub fn objectStoreManager(self: JetStream) @import("jetstream_objstore.zig").ObjectStoreManager {
         const jetstream_objstore = @import("jetstream_objstore.zig");
-        return jetstream_objstore.ObjectStoreManager.init(self.allocator, self);
+        return jetstream_objstore.ObjectStoreManager.init(self);
     }
 };

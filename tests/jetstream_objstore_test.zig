@@ -9,8 +9,7 @@ test "ObjectStore basic create store" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    var js = conn.jetstream(.{});
-    defer js.deinit();
+    const js = conn.jetstream(.{});
 
     // Generate unique store name
     const store_name = try utils.generateUniqueName(testing.allocator, "teststore");
@@ -36,8 +35,7 @@ test "ObjectStore put and get operations" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    var js = conn.jetstream(.{});
-    defer js.deinit();
+    const js = conn.jetstream(.{});
 
     // Generate unique store name
     const store_name = try utils.generateUniqueName(testing.allocator, "teststore");
@@ -85,8 +83,7 @@ test "ObjectStore chunked operations" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    var js = conn.jetstream(.{});
-    defer js.deinit();
+    const js = conn.jetstream(.{});
 
     // Generate unique store name
     const store_name = try utils.generateUniqueName(testing.allocator, "teststore");
@@ -134,8 +131,7 @@ test "ObjectStore delete operations" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    var js = conn.jetstream(.{});
-    defer js.deinit();
+    const js = conn.jetstream(.{});
 
     // Generate unique store name
     const store_name = try utils.generateUniqueName(testing.allocator, "teststore");
@@ -180,8 +176,7 @@ test "ObjectStore list operations" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    var js = conn.jetstream(.{});
-    defer js.deinit();
+    const js = conn.jetstream(.{});
 
     // Generate unique store name
     const store_name = try utils.generateUniqueName(testing.allocator, "teststore");
@@ -249,9 +244,6 @@ test "ObjectStore validation" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    var js = conn.jetstream(.{});
-    defer js.deinit();
-
     // Test store name validation
     try testing.expectError(nats.ObjectStoreError.InvalidStoreName, nats.validateStoreName(""));
     try testing.expectError(nats.ObjectStoreError.InvalidStoreName, nats.validateStoreName("invalid space"));
@@ -273,8 +265,7 @@ test "ObjectStore error handling" {
     const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    var js = conn.jetstream(.{});
-    defer js.deinit();
+    const js = conn.jetstream(.{});
 
     // Generate unique store name
     const store_name = try utils.generateUniqueName(testing.allocator, "teststore");

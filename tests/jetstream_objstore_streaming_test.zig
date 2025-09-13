@@ -8,8 +8,7 @@ test "ObjectStore streaming put and get" {
     defer utils.closeConnection(conn);
 
     // Create JetStream context
-    var js = conn.jetstream(.{});
-    defer js.deinit();
+    const js = conn.jetstream(.{});
 
     // Create ObjectStore manager
     var osm = js.objectStoreManager();
@@ -79,8 +78,7 @@ test "ObjectStore streaming empty object" {
     defer utils.closeConnection(conn);
 
     // Create JetStream context
-    var js = conn.jetstream(.{});
-    defer js.deinit();
+    const js = conn.jetstream(.{});
 
     // Create ObjectStore manager
     var osm = js.objectStoreManager();

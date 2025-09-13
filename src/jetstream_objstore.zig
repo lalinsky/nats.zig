@@ -153,7 +153,7 @@ pub fn validateObjectName(name: []const u8) !void {
 
 /// Stream reader for object chunks - provides progressive chunk reading
 pub const ObjectReader = struct {
-    store: *ObjectStore,
+    store: ObjectStore,
     info: ObjectInfo,
     subscription: ?*JetStreamSubscription,
     buffer: std.ArrayList(u8),
@@ -164,7 +164,7 @@ pub const ObjectReader = struct {
     verified: bool,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, store: *ObjectStore, info: ObjectInfo, subscription: ?*JetStreamSubscription) ObjectReader {
+    pub fn init(allocator: std.mem.Allocator, store: ObjectStore, info: ObjectInfo, subscription: ?*JetStreamSubscription) ObjectReader {
         return ObjectReader{
             .store = store,
             .info = info,
@@ -302,7 +302,7 @@ pub const ObjectResult = struct {
 /// Object Store implementation
 pub const ObjectStore = struct {
     /// JetStream context
-    js: *JetStream,
+    js: JetStream,
     /// Store name
     store_name: []const u8,
     /// Stream name (OBJ_<store_name>)
@@ -319,7 +319,7 @@ pub const ObjectStore = struct {
     const Self = @This();
 
     /// Initialize ObjectStore handle
-    pub fn init(allocator: std.mem.Allocator, js: *JetStream, store_name: []const u8, chunk_size: u32) !ObjectStore {
+    pub fn init(allocator: std.mem.Allocator, js: JetStream, store_name: []const u8, chunk_size: u32) !ObjectStore {
         try validateStoreName(store_name);
 
         // Create owned copies of names
@@ -515,7 +515,7 @@ pub const ObjectStore = struct {
 
         // For empty objects, return immediately without subscription
         if (obj_info.size == 0) {
-            var reader = ObjectReader.init(arena_allocator, self, obj_info, null);
+            var reader = ObjectReader.init(arena_allocator, self.*, obj_info, null);
             reader.eof = true; // Mark as EOF immediately since there's no data
 
             return ObjectResult{
@@ -544,7 +544,7 @@ pub const ObjectStore = struct {
         const sub = try self.js.subscribeSync(self.stream_name, consumer_config);
 
         // Create reader with subscription
-        const reader = ObjectReader.init(arena_allocator, self, obj_info, sub);
+        const reader = ObjectReader.init(arena_allocator, self.*, obj_info, sub);
 
         return ObjectResult{
             .info = obj_info,
@@ -765,15 +765,13 @@ pub const ObjectStore = struct {
 
 /// Object Store Manager handles store-level operations
 pub const ObjectStoreManager = struct {
-    js: *JetStream,
-    allocator: std.mem.Allocator,
+    js: JetStream,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, js: *JetStream) ObjectStoreManager {
+    pub fn init(js: JetStream) ObjectStoreManager {
         return ObjectStoreManager{
             .js = js,
-            .allocator = allocator,
         };
     }
 
@@ -781,14 +779,14 @@ pub const ObjectStoreManager = struct {
     pub fn createStore(self: *ObjectStoreManager, config: ObjectStoreConfig) !ObjectStore {
         try validateStoreName(config.store_name);
 
-        const stream_name = try std.fmt.allocPrint(self.allocator, "OBJ_{s}", .{config.store_name});
-        defer self.allocator.free(stream_name);
+        const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "OBJ_{s}", .{config.store_name});
+        defer self.js.nc.allocator.free(stream_name);
 
-        const chunk_subject = try std.fmt.allocPrint(self.allocator, "$O.{s}.C.>", .{config.store_name});
-        defer self.allocator.free(chunk_subject);
+        const chunk_subject = try std.fmt.allocPrint(self.js.nc.allocator, "$O.{s}.C.>", .{config.store_name});
+        defer self.js.nc.allocator.free(chunk_subject);
 
-        const meta_subject = try std.fmt.allocPrint(self.allocator, "$O.{s}.M.>", .{config.store_name});
-        defer self.allocator.free(meta_subject);
+        const meta_subject = try std.fmt.allocPrint(self.js.nc.allocator, "$O.{s}.M.>", .{config.store_name});
+        defer self.js.nc.allocator.free(meta_subject);
 
         const stream_config = StreamConfig{
             .name = stream_name,
@@ -811,29 +809,29 @@ pub const ObjectStoreManager = struct {
         const result = try self.js.addStream(stream_config);
         defer result.deinit();
 
-        return try ObjectStore.init(self.allocator, self.js, config.store_name, config.chunk_size);
+        return try ObjectStore.init(self.js.nc.allocator, self.js, config.store_name, config.chunk_size);
     }
 
     /// Open an existing object store
     pub fn openStore(self: *ObjectStoreManager, store_name: []const u8) !ObjectStore {
         // Verify store exists by getting stream info
-        const stream_name = try std.fmt.allocPrint(self.allocator, "OBJ_{s}", .{store_name});
-        defer self.allocator.free(stream_name);
+        const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "OBJ_{s}", .{store_name});
+        defer self.js.nc.allocator.free(stream_name);
 
         const stream_info = self.js.getStreamInfo(stream_name) catch |err| {
             return if (err == error.JetStreamError) ObjectStoreError.StoreNotFound else err;
         };
         defer stream_info.deinit();
 
-        return try ObjectStore.init(self.allocator, self.js, store_name, DEFAULT_CHUNK_SIZE);
+        return try ObjectStore.init(self.js.nc.allocator, self.js, store_name, DEFAULT_CHUNK_SIZE);
     }
 
     /// Delete an object store
     pub fn deleteStore(self: *ObjectStoreManager, store_name: []const u8) !void {
         try validateStoreName(store_name);
 
-        const stream_name = try std.fmt.allocPrint(self.allocator, "OBJ_{s}", .{store_name});
-        defer self.allocator.free(stream_name);
+        const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "OBJ_{s}", .{store_name});
+        defer self.js.nc.allocator.free(stream_name);
 
         try self.js.deleteStream(stream_name);
     }
