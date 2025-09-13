@@ -29,6 +29,7 @@ pub const ServerPool = @import("server_pool.zig").ServerPool;
 pub const Server = @import("server_pool.zig").Server;
 pub const Socket = @import("socket.zig").Socket;
 pub const inbox = @import("inbox.zig");
+pub const nuid = @import("nuid.zig");
 
 // JetStream types
 pub const JetStream = @import("jetstream.zig").JetStream;
