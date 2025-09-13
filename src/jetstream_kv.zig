@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const JetStream = @import("jetstream.zig").JetStream;
+const validation = @import("validation.zig");
 const StreamConfig = @import("jetstream.zig").StreamConfig;
 const StreamInfo = @import("jetstream.zig").StreamInfo;
 const ConsumerConfig = @import("jetstream.zig").ConsumerConfig;
@@ -198,7 +199,7 @@ pub const KVWatcher = struct {
     const Self = @This();
 
     pub fn init(kv: *KV, subjects: []const []const u8, options: WatchOptions) !Self {
-        const allocator = kv.allocator;
+        const allocator = kv.js.nc.allocator;
 
         const inbox = try newInbox(allocator);
         defer allocator.free(inbox);
@@ -283,117 +284,57 @@ pub const KVWatcher = struct {
     }
 };
 
-/// Validate bucket name according to KV rules: alphanumeric, underscore, hyphen only
-pub fn validateBucketName(name: []const u8) !void {
-    if (name.len == 0) {
-        return KVError.InvalidBucketName;
-    }
-
-    for (name) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-') {
-            return KVError.InvalidBucketName;
-        }
-    }
-}
-
-/// Validate key name according to KV rules: [-/_=\.a-zA-Z0-9]+, no leading/trailing dots
-pub fn validateKey(key: []const u8) !void {
-    if (key.len == 0) {
-        return KVError.InvalidKey;
-    }
-
-    // Check for leading or trailing dots
-    if (key[0] == '.' or key[key.len - 1] == '.') {
-        return KVError.InvalidKey;
-    }
-
-    // Check for reserved prefix
-    if (std.mem.startsWith(u8, key, "_kv")) {
-        return KVError.InvalidKey;
-    }
-
-    // Validate each character
-    for (key) |c| {
-        const valid = std.ascii.isAlphanumeric(c) or
-            c == '-' or c == '/' or c == '_' or c == '=' or c == '.';
-        if (!valid) {
-            return KVError.InvalidKey;
-        }
-    }
-}
-
-test "validateBucketName" {
-    try validateBucketName("valid-bucket_name123");
-    try std.testing.expectError(KVError.InvalidBucketName, validateBucketName(""));
-    try std.testing.expectError(KVError.InvalidBucketName, validateBucketName("foo bar"));
-    try std.testing.expectError(KVError.InvalidBucketName, validateBucketName("foo.bar"));
-    try std.testing.expectError(KVError.InvalidBucketName, validateBucketName("foo*"));
-}
-
-test "validateKey" {
-    try validateKey("valid-key/name_123.foo");
-    try std.testing.expectError(KVError.InvalidKey, validateKey(""));
-    try std.testing.expectError(KVError.InvalidKey, validateKey(".starts-with-dot"));
-    try std.testing.expectError(KVError.InvalidKey, validateKey("ends-with-dot."));
-    try std.testing.expectError(KVError.InvalidKey, validateKey("_kv_reserved"));
-    try std.testing.expectError(KVError.InvalidKey, validateKey("foo bar"));
-    try std.testing.expectError(KVError.InvalidKey, validateKey("foo*"));
-}
-
 /// KV bucket implementation
 pub const KV = struct {
     /// JetStream context
-    js: *JetStream,
+    js: JetStream,
     /// Bucket name
     bucket_name: []const u8,
     /// Stream name (KV_<bucket_name>)
     stream_name: []const u8,
     /// Subject prefix ($KV.<bucket_name>.)
     subject_prefix: []const u8,
-    /// Allocator for memory management
-    allocator: std.mem.Allocator,
 
     const Self = @This();
 
     /// Initialize KV bucket handle
-    pub fn init(allocator: std.mem.Allocator, js: *JetStream, bucket_name: []const u8) !KV {
-        try validateBucketName(bucket_name);
+    pub fn init(js: JetStream, bucket_name: []const u8) !KV {
+        try validation.validateKVBucketName(bucket_name);
 
         // Create owned copies of names
-        const owned_bucket_name = try allocator.dupe(u8, bucket_name);
-        errdefer allocator.free(owned_bucket_name);
+        const owned_bucket_name = try js.nc.allocator.dupe(u8, bucket_name);
+        errdefer js.nc.allocator.free(owned_bucket_name);
 
-        const stream_name = try std.fmt.allocPrint(allocator, "KV_{s}", .{bucket_name});
-        errdefer allocator.free(stream_name);
+        const stream_name = try std.fmt.allocPrint(js.nc.allocator, "KV_{s}", .{bucket_name});
+        errdefer js.nc.allocator.free(stream_name);
 
-        const subject_prefix = try std.fmt.allocPrint(allocator, "$KV.{s}.", .{bucket_name});
-        errdefer allocator.free(subject_prefix);
+        const subject_prefix = try std.fmt.allocPrint(js.nc.allocator, "$KV.{s}.", .{bucket_name});
+        errdefer js.nc.allocator.free(subject_prefix);
 
         return KV{
             .js = js,
             .bucket_name = owned_bucket_name,
             .stream_name = stream_name,
             .subject_prefix = subject_prefix,
-            .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *KV) void {
-        self.allocator.free(self.bucket_name);
-        self.allocator.free(self.stream_name);
-        self.allocator.free(self.subject_prefix);
+        self.js.nc.allocator.free(self.bucket_name);
+        self.js.nc.allocator.free(self.stream_name);
+        self.js.nc.allocator.free(self.subject_prefix);
     }
 
     /// Get the full subject for a key
     fn getKeySubject(self: *KV, key: []const u8) ![]u8 {
-        try validateKey(key);
-        return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.subject_prefix, key });
+        try validation.validateKVKeyName(key);
+        return std.fmt.allocPrint(self.js.nc.allocator, "{s}{s}", .{ self.subject_prefix, key });
     }
 
     /// Get the raw entry (including delete/purge markers) for internal use
     fn getRawEntry(self: *KV, key: []const u8) !KVEntry {
         const subject = try self.getKeySubject(key);
-        defer self.allocator.free(subject);
+        defer self.js.nc.allocator.free(subject);
 
         const msg = self.js.getMsg(self.stream_name, .{ .last_by_subj = subject, .direct = true }) catch |err| {
             return if (err == error.MessageNotFound) KVError.KeyNotFound else err;
@@ -442,7 +383,7 @@ pub const KV = struct {
     /// Put a value into a key
     pub fn put(self: *KV, key: []const u8, value: []const u8, options: PutOptions) !u64 {
         const subject = try self.getKeySubject(key);
-        defer self.allocator.free(subject);
+        defer self.js.nc.allocator.free(subject);
 
         var publish_opts = PublishOptions{};
         if (options.ttl) |ttl| {
@@ -458,7 +399,7 @@ pub const KV = struct {
     /// Create a key only if it doesn't exist
     pub fn create(self: *KV, key: []const u8, value: []const u8, options: PutOptions) !u64 {
         const subject = try self.getKeySubject(key);
-        defer self.allocator.free(subject);
+        defer self.js.nc.allocator.free(subject);
 
         // First try: attempt with expected_last_subject_seq = 0
         var publish_opts = PublishOptions{
@@ -497,7 +438,7 @@ pub const KV = struct {
     /// Update a key only if it has the expected revision
     pub fn update(self: *KV, key: []const u8, value: []const u8, expected_revision: u64) !u64 {
         const subject = try self.getKeySubject(key);
-        defer self.allocator.free(subject);
+        defer self.js.nc.allocator.free(subject);
 
         const publish_opts = PublishOptions{
             .expected_last_subject_seq = expected_revision,
@@ -525,7 +466,7 @@ pub const KV = struct {
     /// Delete a key (preserves history)
     pub fn delete(self: *KV, key: []const u8) !void {
         const subject = try self.getKeySubject(key);
-        defer self.allocator.free(subject);
+        defer self.js.nc.allocator.free(subject);
 
         // Create message with KV-Operation: DEL header and empty body
         const msg = try self.js.nc.newMsg();
@@ -541,7 +482,7 @@ pub const KV = struct {
     /// Purge a key (removes history)
     pub fn purge(self: *KV, key: []const u8, options: PutOptions) !void {
         const subject = try self.getKeySubject(key);
-        defer self.allocator.free(subject);
+        defer self.js.nc.allocator.free(subject);
 
         // Create message with KV-Operation: PURGE and Nats-Rollup: sub headers
         const msg = try self.js.nc.newMsg();
@@ -587,10 +528,10 @@ pub const KV = struct {
 
     /// Watch a key or key pattern for updates
     pub fn watch(self: *KV, key: []const u8, options: WatchOptions) !KVWatcher {
-        try validateKey(key);
+        try validation.validateKVKeyName(key);
 
         const subject = try self.getKeySubject(key);
-        defer self.allocator.free(subject);
+        defer self.js.nc.allocator.free(subject);
 
         return try KVWatcher.init(self, &.{subject}, options);
     }
@@ -599,14 +540,14 @@ pub const KV = struct {
     pub fn watchMulti(self: *KV, key_patterns: []const []const u8, options: WatchOptions) !KVWatcher {
         // Validate all keys first
         for (key_patterns) |key| {
-            try validateKey(key);
+            try validation.validateKVKeyName(key);
         }
 
         // Create subjects for all keys
-        var subjects = try std.ArrayList([]u8).initCapacity(self.allocator, key_patterns.len);
+        var subjects = try std.ArrayList([]u8).initCapacity(self.js.nc.allocator, key_patterns.len);
         defer {
             for (subjects.items) |subject| {
-                self.allocator.free(subject);
+                self.js.nc.allocator.free(subject);
             }
             subjects.deinit();
         }
@@ -621,8 +562,8 @@ pub const KV = struct {
 
     /// Watch all keys in the bucket
     pub fn watchAll(self: *KV, options: WatchOptions) !KVWatcher {
-        const subject = try std.fmt.allocPrint(self.allocator, "{s}>", .{self.subject_prefix});
-        defer self.allocator.free(subject);
+        const subject = try std.fmt.allocPrint(self.js.nc.allocator, "{s}>", .{self.subject_prefix});
+        defer self.js.nc.allocator.free(subject);
 
         return try KVWatcher.init(self, &.{subject}, options);
     }
@@ -690,10 +631,10 @@ pub const KV = struct {
         var watcher = try self.watch(key, .{ .include_history = true });
         defer watcher.deinit();
 
-        const arena = try self.allocator.create(std.heap.ArenaAllocator);
-        errdefer self.allocator.destroy(arena);
+        const arena = try self.js.nc.allocator.create(std.heap.ArenaAllocator);
+        errdefer self.js.nc.allocator.destroy(arena);
 
-        arena.* = std.heap.ArenaAllocator.init(self.allocator);
+        arena.* = std.heap.ArenaAllocator.init(self.js.nc.allocator);
         errdefer arena.deinit();
 
         const arena_allocator = arena.allocator();
@@ -736,13 +677,13 @@ pub const KV = struct {
         var watcher = try self.watchAll(.{ .ignore_deletes = true, .meta_only = true });
         defer watcher.deinit();
 
-        const arena = try self.allocator.create(std.heap.ArenaAllocator);
-        errdefer self.allocator.destroy(arena);
-        arena.* = std.heap.ArenaAllocator.init(self.allocator);
+        const arena = try self.js.nc.allocator.create(std.heap.ArenaAllocator);
+        errdefer self.js.nc.allocator.destroy(arena);
+        arena.* = std.heap.ArenaAllocator.init(self.js.nc.allocator);
         errdefer arena.deinit();
 
         const arena_allocator = arena.allocator();
-        var keys_set = std.StringHashMap(void).init(self.allocator);
+        var keys_set = std.StringHashMap(void).init(self.js.nc.allocator);
         defer keys_set.deinit();
 
         // Collect unique keys - use completion marker to know when done
@@ -787,17 +728,19 @@ pub const KV = struct {
     /// Get all keys in the bucket matching the provided filters
     pub fn keysWithFilters(self: *KV, filters: []const []const u8) !Result([][]const u8) {
         // Create filter subjects for watching
-        var filter_subjects = try std.ArrayList([]u8).initCapacity(self.allocator, filters.len);
+        var filter_subjects = try std.ArrayList([]u8).initCapacity(self.js.nc.allocator, filters.len);
         defer {
             for (filter_subjects.items) |subject| {
-                self.allocator.free(subject);
+                self.js.nc.allocator.free(subject);
             }
             filter_subjects.deinit();
         }
 
         // Convert filters to full subjects
         for (filters) |filter| {
-            const subject = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.subject_prefix, filter });
+            const subject = try std.fmt.allocPrint(self.js.nc.allocator, "{s}{s}", .{ self.subject_prefix, filter });
+            errdefer self.js.nc.allocator.free(subject);
+            try validation.validateSubject(subject);
             filter_subjects.appendAssumeCapacity(subject);
         }
 
@@ -805,13 +748,13 @@ pub const KV = struct {
         var watcher = try KVWatcher.init(self, filter_subjects.items, .{ .ignore_deletes = true, .meta_only = true });
         defer watcher.deinit();
 
-        const arena = try self.allocator.create(std.heap.ArenaAllocator);
-        errdefer self.allocator.destroy(arena);
-        arena.* = std.heap.ArenaAllocator.init(self.allocator);
+        const arena = try self.js.nc.allocator.create(std.heap.ArenaAllocator);
+        errdefer self.js.nc.allocator.destroy(arena);
+        arena.* = std.heap.ArenaAllocator.init(self.js.nc.allocator);
         errdefer arena.deinit();
 
         const arena_allocator = arena.allocator();
-        var keys_set = std.StringHashMap(void).init(self.allocator);
+        var keys_set = std.StringHashMap(void).init(self.js.nc.allocator);
         defer keys_set.deinit();
 
         // Collect unique keys - use completion marker to know when done
@@ -856,21 +799,17 @@ pub const KV = struct {
 
 /// KV Manager handles bucket-level operations
 pub const KVManager = struct {
-    js: *JetStream,
-    allocator: std.mem.Allocator,
+    js: JetStream,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, js: *JetStream) KVManager {
-        return KVManager{
-            .js = js,
-            .allocator = allocator,
-        };
+    pub fn init(js: JetStream) KVManager {
+        return .{ .js = js };
     }
 
     /// Create a new KV bucket
-    pub fn createBucket(self: *KVManager, config: KVConfig) !KV {
-        try validateBucketName(config.bucket);
+    pub fn createBucket(self: KVManager, config: KVConfig) !KV {
+        try validation.validateKVBucketName(config.bucket);
 
         if (config.history < 1 or config.history > 64) {
             return error.InvalidConfiguration;
@@ -880,11 +819,11 @@ pub const KVManager = struct {
             return error.InvalidConfiguration;
         }
 
-        const stream_name = try std.fmt.allocPrint(self.allocator, "KV_{s}", .{config.bucket});
-        defer self.allocator.free(stream_name);
+        const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "KV_{s}", .{config.bucket});
+        defer self.js.nc.allocator.free(stream_name);
 
-        const subject_pattern = try std.fmt.allocPrint(self.allocator, "$KV.{s}.>", .{config.bucket});
-        defer self.allocator.free(subject_pattern);
+        const subject_pattern = try std.fmt.allocPrint(self.js.nc.allocator, "$KV.{s}.>", .{config.bucket});
+        defer self.js.nc.allocator.free(subject_pattern);
 
         // Configure duplicate window based on TTL rules from ADR-8
         var duplicate_window: u64 = 0;
@@ -920,29 +859,30 @@ pub const KVManager = struct {
         const result = try self.js.addStream(stream_config);
         defer result.deinit();
 
-        return try KV.init(self.allocator, self.js, config.bucket);
+        return try KV.init(self.js, config.bucket);
     }
 
     /// Open an existing KV bucket
-    pub fn openBucket(self: *KVManager, bucket_name: []const u8) !KV {
+    pub fn openBucket(self: KVManager, bucket_name: []const u8) !KV {
+        try validation.validateKVBucketName(bucket_name);
         // Verify bucket exists by getting stream info
-        const stream_name = try std.fmt.allocPrint(self.allocator, "KV_{s}", .{bucket_name});
-        defer self.allocator.free(stream_name);
+        const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "KV_{s}", .{bucket_name});
+        defer self.js.nc.allocator.free(stream_name);
 
         const stream_info = self.js.getStreamInfo(stream_name) catch |err| {
             return if (err == error.JetStreamError) KVError.BucketNotFound else err;
         };
         defer stream_info.deinit();
 
-        return try KV.init(self.allocator, self.js, bucket_name);
+        return try KV.init(self.js, bucket_name);
     }
 
     /// Delete a KV bucket
-    pub fn deleteBucket(self: *KVManager, bucket_name: []const u8) !void {
-        try validateBucketName(bucket_name);
+    pub fn deleteBucket(self: KVManager, bucket_name: []const u8) !void {
+        try validation.validateKVBucketName(bucket_name);
 
-        const stream_name = try std.fmt.allocPrint(self.allocator, "KV_{s}", .{bucket_name});
-        defer self.allocator.free(stream_name);
+        const stream_name = try std.fmt.allocPrint(self.js.nc.allocator, "KV_{s}", .{bucket_name});
+        defer self.js.nc.allocator.free(stream_name);
 
         try self.js.deleteStream(stream_name);
     }

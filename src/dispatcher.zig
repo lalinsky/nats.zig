@@ -14,7 +14,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
-const Subscription = @import("subscription.zig").Subscription;
+const subscription_mod = @import("subscription.zig");
+const Subscription = subscription_mod.Subscription;
 const ConcurrentQueue = @import("queue.zig").ConcurrentQueue;
 
 const log = @import("log.zig").log;
@@ -57,6 +58,10 @@ pub const Dispatcher = struct {
         // Clean up any remaining messages in the queue
         while (self.queue.tryPop()) |dispatch_msg| {
             log.warn("Dropping unprocessed message for subscription {}", .{dispatch_msg.subscription.sid});
+            // Save message data length before cleanup
+            const message_data_len = dispatch_msg.message.data.len;
+            // Decrement pending counters for dropped messages
+            subscription_mod.decrementPending(dispatch_msg.subscription, message_data_len);
             dispatch_msg.message.deinit();
             dispatch_msg.deinit(); // Release subscription reference
         }
@@ -122,6 +127,12 @@ pub const Dispatcher = struct {
         const subscription = dispatch_msg.subscription;
         const message = dispatch_msg.message;
 
+        // Save message data length before handler is called (handler may deinit the message)
+        const message_data_len = message.data.len;
+
+        // Increment delivered counter for autounsubscribe
+        const delivered = subscription.delivered_msgs.fetchAdd(1, .acq_rel) + 1;
+
         // Call the subscription's handler in this dispatcher thread context
         // Message ownership is transferred to the handler - handler is responsible for cleanup
         if (subscription.handler) |handler| {
@@ -134,6 +145,16 @@ pub const Dispatcher = struct {
             log.warn("Received message for subscription {} without handler", .{subscription.sid});
             message.deinit(); // Clean up orphaned message (no handler to transfer ownership to)
         }
+
+        // Check autounsubscribe limit after successful message delivery
+        const max = subscription.max_msgs.load(.acquire);
+        if (max > 0 and delivered >= max) {
+            log.debug("Subscription {} reached autounsubscribe limit ({}), removing", .{ subscription.sid, max });
+            subscription.nc.removeSubscriptionInternal(subscription.sid);
+        }
+
+        // Decrement pending counters after handler completes (success or failure)
+        subscription_mod.decrementPending(subscription, message_data_len);
     }
 };
 

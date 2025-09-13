@@ -35,6 +35,7 @@ const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
 const ResponseManager = @import("response_manager.zig").ResponseManager;
 const MAX_CONTROL_LINE_SIZE = @import("parser.zig").MAX_CONTROL_LINE_SIZE;
 const Socket = @import("socket.zig").Socket;
+const validation = @import("validation.zig");
 
 const log = @import("log.zig").log;
 
@@ -98,6 +99,7 @@ pub const ConnectionClosedError = error{
 pub const PublishError = error{
     MaxPayload,
     InvalidSubject,
+    DrainInProgress,
 } || ConnectionClosedError || std.mem.Allocator.Error;
 
 pub const ConnectionError = error{
@@ -113,6 +115,7 @@ pub const ConnectionError = error{
     AlreadyReconnecting,
     NotConnected,
     ManualReconnect,
+    StaleConnection,
 } || PublishError || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
 
 pub const ConnectionStatus = enum {
@@ -120,6 +123,13 @@ pub const ConnectionStatus = enum {
     connecting,
     connected,
     reconnecting,
+};
+
+pub const DrainState = enum(u8) {
+    not_draining = 0,
+    draining_subs = 1,
+    draining_pubs = 2,
+    drain_complete = 3,
 };
 
 pub const HandshakeState = enum {
@@ -181,6 +191,8 @@ pub const ConnectionOptions = struct {
     trace: bool = false,
     no_responders: bool = true,
     max_scratch_size: usize = 1024 * 1024 * 10,
+    ping_interval_ms: u64 = 120000, // 2 minutes default, 0 = disabled
+    max_pings_out: u32 = 2, // max unanswered keep-alive PINGs
 };
 
 pub const Connection = struct {
@@ -224,6 +236,10 @@ pub const Connection = struct {
     incoming_pongs: u64 = 0,
     pong_condition: std.Thread.Condition = .{},
 
+    // PING/PONG keep-alive tracking
+    ping_timer: std.time.Timer, // Timer for tracking ping intervals
+    pings_out: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Outstanding keep-alive pings (atomic)
+
     // Write buffer (thread-safe, 64KB chunk size)
     write_buffer: WriteBuffer,
 
@@ -237,6 +253,12 @@ pub const Connection = struct {
 
     // Response management (shared subscription for request/reply)
     response_manager: ResponseManager,
+
+    // Connection draining
+    drain_state: std.atomic.Value(DrainState) = std.atomic.Value(DrainState).init(.not_draining),
+    drain_completion: std.Thread.ResetEvent = .{},
+    drain_subscription_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    drain_ping_id: u64 = 0,
 
     scratch: std.heap.ArenaAllocator,
 
@@ -258,6 +280,7 @@ pub const Connection = struct {
             .response_manager = ResponseManager.init(allocator),
             .parser = Parser.init(allocator),
             .scratch = std.heap.ArenaAllocator.init(allocator),
+            .ping_timer = std.time.Timer.start() catch unreachable,
         };
     }
 
@@ -531,6 +554,8 @@ pub const Connection = struct {
 
     /// Publishes data on a subject.
     pub fn publish(self: *Self, subject: []const u8, data: []const u8) !void {
+        try validation.validateSubject(subject);
+
         var msg = Message{
             .subject = subject,
             .data = data,
@@ -542,11 +567,15 @@ pub const Connection = struct {
 
     /// Publishes a message on a subject.
     pub fn publishMsg(self: *Self, msg: *Message) !void {
+        try validation.validateSubject(msg.subject);
         return self.publishMsgInternal(msg, null);
     }
 
     /// Publishes data on a subject, with a reply subject.
     pub fn publishRequest(self: *Self, subject: []const u8, reply: []const u8, data: []const u8) !void {
+        try validation.validateSubject(subject);
+        try validation.validateSubject(reply);
+
         var msg = Message{
             .subject = subject,
             .reply = reply,
@@ -559,12 +588,14 @@ pub const Connection = struct {
 
     /// Publishes a message on a subject, with a reply subject.
     pub fn publishRequestMsg(self: *Self, msg: *Message, reply: []const u8) !void {
+        try validation.validateSubject(msg.subject);
+        try validation.validateSubject(reply);
         return self.publishMsgInternal(msg, reply);
     }
 
     fn publishMsgInternal(self: *Self, msg: *Message, reply_override: ?[]const u8) !void {
-        if (msg.subject.len == 0) {
-            return error.InvalidSubject;
+        if (self.drain_state.load(.acquire) == .draining_pubs) {
+            return error.DrainInProgress;
         }
 
         self.mutex.lock();
@@ -665,6 +696,8 @@ pub const Connection = struct {
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
+        try validation.validateSubject(subject);
+
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
         errdefer handler.cleanup(self.allocator);
 
@@ -683,6 +716,8 @@ pub const Connection = struct {
 
     /// Subscribe to a subject, the code is responsible for handling the fetching
     pub fn subscribeSync(self: *Self, subject: []const u8) !*Subscription {
+        try validation.validateSubject(subject);
+
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.create(self, sid, subject, null, null);
         errdefer sub.release();
@@ -694,7 +729,8 @@ pub const Connection = struct {
     }
 
     pub fn queueSubscribe(self: *Self, subject: []const u8, queue: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
-        if (queue.len == 0) return error.EmptyQueueGroupName;
+        try validation.validateSubject(subject);
+        try validation.validateQueueName(queue);
 
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
         errdefer handler.cleanup(self.allocator);
@@ -714,7 +750,8 @@ pub const Connection = struct {
 
     /// Subscribe to a subject, the code is responsible for handling the fetching
     pub fn queueSubscribeSync(self: *Self, subject: []const u8, queue: []const u8) !*Subscription {
-        if (queue.len == 0) return error.EmptyQueueGroupName;
+        try validation.validateSubject(subject);
+        try validation.validateQueueName(queue);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.create(self, sid, subject, queue, null);
@@ -726,38 +763,59 @@ pub const Connection = struct {
         return sub;
     }
 
-    pub fn unsubscribeInternal(self: *Self, sid: u64) void {
+    pub fn unsubscribeInternal(self: *Self, sid: u64, max: ?u64) !void {
         var buffer: [256]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
         var writer = stream.writer();
 
-        writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
+        if (max) |m| {
+            writer.print("UNSUB {d} {d}\r\n", .{ sid, m }) catch unreachable; // Will always fit
+        } else {
+            writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
+        }
 
-        self.write_buffer.append(stream.getWritten()) catch |err| {
-            log.err("Failed to enqueue UNSUB message for sid {d}: {}", .{ sid, err });
-        };
+        try self.write_buffer.append(stream.getWritten());
     }
 
     pub fn unsubscribe(self: *Self, sub: *Subscription) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        // Remove from subscription table first
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-        self.subs_mutex.lock();
-        defer self.subs_mutex.unlock();
+            self.subs_mutex.lock();
+            defer self.subs_mutex.unlock();
 
-        if (!self.subscriptions.remove(sub.sid)) {
-            // Nothing to do, already unsubscribed
-            return;
+            if (!self.subscriptions.remove(sub.sid)) {
+                // Nothing to do, already unsubscribed
+                return;
+            }
         }
 
         // Try to send UNSUB command. Even if it fails internally,
         // processMsg will keep sending UNSUB commands once
         // it receives a message with unknown sid.
-        self.unsubscribeInternal(sub.sid);
+        self.unsubscribeInternal(sub.sid, null) catch |err| {
+            log.err("Failed to send UNSUB for sid {d}: {}", .{ sub.sid, err });
+        };
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
 
+        // Release connection's reference to the subscription
         sub.release();
+    }
+
+    /// Remove subscription from connection's subscription table
+    /// This does not send UNSUB to server - that should be done separately
+    pub fn removeSubscriptionInternal(self: *Self, sid: u64) void {
+        self.subs_mutex.lock();
+        defer self.subs_mutex.unlock();
+
+        if (self.subscriptions.fetchRemove(sid)) |kv| {
+            log.debug("Removed subscription {d} ({s}) from connection", .{ sid, kv.value.subject });
+            // Release connection's reference to the subscription
+            kv.value.release();
+        }
     }
 
     pub fn flush(self: *Self) !void {
@@ -768,12 +826,7 @@ pub const Connection = struct {
             return ConnectionError.ConnectionClosed;
         }
 
-        // Buffer the PING first (can fail on allocation)
-        try self.write_buffer.append("PING\r\n");
-
-        // Only increment counter after successful buffering
-        self.outgoing_pings += 1;
-        const our_ping_id = self.outgoing_pings;
+        const our_ping_id = try self.sendPing(false);
 
         log.debug("Sent PING with ping_id={}, waiting for PONG", .{our_ping_id});
 
@@ -944,6 +997,12 @@ pub const Connection = struct {
                     },
                 }
             };
+
+            // Check if we need to send a PING
+            self.checkAndSendPing() catch |err| {
+                self.markNeedsReconnect(err);
+                continue;
+            };
         }
 
         log.debug("Reader loop exited", .{});
@@ -977,7 +1036,7 @@ pub const Connection = struct {
         // Parse the received data
         self.parser.parse(self, buffer[0..bytes_read]) catch |err| {
             switch (err) {
-                error.ShouldStop => return err,
+                error.ShouldStop, error.ShouldClose => return err,
                 else => {
                     log.err("Parser error: {}", .{err});
                     return err;
@@ -1001,6 +1060,10 @@ pub const Connection = struct {
                     },
                 }
             };
+
+            if (self.drain_state.load(.acquire) == .draining_pubs) {
+                self.sendDrainPing();
+            }
         }
 
         log.debug("Flusher loop exited", .{});
@@ -1010,8 +1073,12 @@ pub const Connection = struct {
         // Try to gather data from buffer first
         var iovecs: [16]std.posix.iovec_const = undefined;
         const gather = self.write_buffer.gatherReadVectors(&iovecs, self.options.timeout_ms) catch |err| switch (err) {
-            error.QueueEmpty, error.BufferFrozen => {
-                // No data to write or buffer frozen during reconnection
+            error.QueueEmpty => {
+                // No data to write
+                return;
+            },
+            error.BufferFrozen => {
+                // Buffer frozen during reconnection
                 return;
             },
             error.QueueClosed => return error.ShouldStop,
@@ -1070,6 +1137,15 @@ pub const Connection = struct {
         if (sub) |s| {
             defer s.release(); // Release when done
 
+            // Check if subscription is draining - drop message if so
+            if (s.isDraining()) {
+                log.debug("Dropping message for draining subscription {d}", .{message.sid});
+                return;
+            }
+
+            // Increment pending message count and bytes for this subscription
+            subscription_mod.incrementPending(s, message.data.len);
+
             // Log before consuming message (to avoid use-after-free)
             log.debug("Delivering message to subscription {d}: {s}", .{ message.sid, message.data });
 
@@ -1078,11 +1154,15 @@ pub const Connection = struct {
                 if (s.dispatcher) |dispatcher| {
                     dispatcher.enqueue(s, message) catch |err| {
                         log.err("Failed to dispatch message for sid {d}: {}", .{ message.sid, err });
+                        // Undo the pending counters since we failed to enqueue
+                        subscription_mod.decrementPending(s, message.data.len);
                         return;
                     };
                     owns_message = false;
                 } else {
                     log.err("Async subscription {} has no assigned dispatcher", .{message.sid});
+                    // Undo the pending counters since we can't process
+                    subscription_mod.decrementPending(s, message.data.len);
                     return;
                 }
             } else {
@@ -1092,11 +1172,15 @@ pub const Connection = struct {
                         error.QueueClosed => {
                             // Queue is closed; drop gracefully.
                             log.debug("Queue closed for sid {d}; dropping message", .{message.sid});
+                            // Undo the pending counters since queue is closed
+                            subscription_mod.decrementPending(s, message.data.len);
                             return;
                         },
                         else => {
                             // Allocation or unexpected push failure; log and tear down the connection.
                             log.err("Failed to enqueue message for sid {d}: {}", .{ message.sid, err });
+                            // Undo the pending counters since we failed to enqueue
+                            subscription_mod.decrementPending(s, message.data.len);
                             return err;
                         },
                     }
@@ -1105,7 +1189,9 @@ pub const Connection = struct {
             }
         } else {
             // No sub subscription found, try to send UNSUB command
-            self.unsubscribeInternal(message.sid);
+            self.unsubscribeInternal(message.sid, null) catch |err| {
+                log.err("Failed to send UNSUB for unknown sid {d}: {}", .{ message.sid, err });
+            };
         }
     }
 
@@ -1251,6 +1337,32 @@ pub const Connection = struct {
         }
     }
 
+    fn sendPing(self: *Self, comptime lock: bool) !u64 {
+        try self.write_buffer.append("PING\r\n");
+
+        if (lock) self.mutex.lock();
+        defer if (lock) self.mutex.unlock();
+
+        self.outgoing_pings += 1;
+        return self.outgoing_pings;
+    }
+
+    fn checkAndSendPing(self: *Self) !void {
+        if (self.options.ping_interval_ms == 0) return;
+
+        const interval_ns = self.options.ping_interval_ms * std.time.ns_per_ms;
+        const elapsed_ns = self.ping_timer.read();
+        if (elapsed_ns >= interval_ns) {
+            _ = try self.sendPing(true);
+            const current_pings = self.pings_out.fetchAdd(1, .monotonic) + 1;
+            if (self.options.max_pings_out > 0 and current_pings > self.options.max_pings_out) {
+                log.warn("Stale connection: {} unanswered PINGs", .{current_pings});
+                return error.StaleConnection;
+            }
+            self.ping_timer.reset();
+        }
+    }
+
     pub fn processPong(self: *Self) !void {
         if (self.should_stop.load(.acquire)) {
             return error.ShouldStop;
@@ -1272,6 +1384,13 @@ pub const Connection = struct {
         self.pong_condition.broadcast();
 
         log.debug("Received PONG for ping_id={}", .{self.incoming_pongs});
+
+        // Reset keep-alive ping counter - ANY PONG proves connection is alive
+        self.pings_out.store(0, .monotonic);
+
+        if (self.drain_ping_id == self.incoming_pongs) {
+            try self.notifyPublishDrainComplete();
+        }
     }
 
     pub fn processPing(self: *Self) !void {
@@ -1345,10 +1464,14 @@ pub const Connection = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        log.info("markNeedsReconnect", .{});
-
         if (self.status != .connected) {
             log.info("Connection not in connected state", .{});
+            return;
+        }
+
+        // Handle explicit close request
+        if (err == error.ShouldClose) {
+            needs_close = true;
             return;
         }
 
@@ -1531,31 +1654,64 @@ pub const Connection = struct {
     fn resendSubscriptions(self: *Self) !void {
         log.debug("Re-establishing subscriptions", .{});
 
-        self.subs_mutex.lock();
-        defer self.subs_mutex.unlock();
+        // Track SIDs that shouldn't be re-subscribed and must be removed
+        var to_remove = ArrayList(u64).init(self.allocator);
+        defer to_remove.deinit();
 
-        const allocator = self.scratch.allocator();
-        defer self.resetScratch();
+        {
+            self.subs_mutex.lock();
+            defer self.subs_mutex.unlock();
 
-        var buffer = ArrayList(u8).init(allocator);
+            const allocator = self.scratch.allocator();
+            defer self.resetScratch();
 
-        var iter = self.subscriptions.iterator();
-        while (iter.next()) |entry| {
-            const sub = entry.value_ptr.*;
+            var buffer = ArrayList(u8).init(allocator);
 
-            // Send SUB command
-            if (sub.queue) |queue| {
-                try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, queue, sub.sid });
-            } else {
-                try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
+            var iter = self.subscriptions.iterator();
+            while (iter.next()) |entry| {
+                const sub = entry.value_ptr.*;
+
+                // Check autounsubscribe state
+                const max = sub.max_msgs.load(.acquire);
+                const delivered = sub.delivered_msgs.load(.acquire);
+
+                var adjusted_max: ?u64 = null;
+                if (max > 0) {
+                    if (delivered < max) {
+                        adjusted_max = max - delivered; // Remaining messages
+                    } else {
+                        // Already reached limit - don't re-subscribe; remove after unlock
+                        log.debug("Subscription {d} ({s}) already reached limit; will remove during reconnect", .{ sub.sid, sub.subject });
+                        try to_remove.append(sub.sid);
+                        continue;
+                    }
+                }
+
+                // Send SUB command
+                if (sub.queue) |queue| {
+                    try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, queue, sub.sid });
+                } else {
+                    try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
+                }
+
+                // Send UNSUB with remaining limit if needed
+                if (adjusted_max) |remaining| {
+                    try buffer.writer().print("UNSUB {d} {d}\r\n", .{ sub.sid, remaining });
+                    log.debug("Re-subscribed to {s} with sid {d} and autounsubscribe limit {d} (delivered: {d})", .{ sub.subject, sub.sid, remaining, delivered });
+                } else {
+                    log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
+                }
             }
 
-            log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
+            // Send all subscription commands via write buffer
+            if (buffer.items.len > 0) {
+                try self.write_buffer.append(buffer.items);
+            }
         }
 
-        // Send all subscription commands via write buffer
-        if (buffer.items.len > 0) {
-            try self.write_buffer.append(buffer.items);
+        // Now remove stale subs outside the subs_mutex
+        for (to_remove.items) |sid| {
+            self.removeSubscriptionInternal(sid);
         }
     }
 
@@ -1671,6 +1827,99 @@ pub const Connection = struct {
 
     // JetStream support
     pub fn jetstream(self: *Self, options: JetStreamOptions) JetStream {
-        return JetStream.init(self.allocator, self, options);
+        return JetStream.init(self, options);
+    }
+
+    // Connection draining
+    pub fn drain(self: *Self) !void {
+        const prev_state = self.drain_state.cmpxchgStrong(.not_draining, .draining_subs, .acq_rel, .acquire);
+        if (prev_state != null) return; // Already draining
+
+        // Add one count as a blocker, to avoid early switch to the draining_pubs phase
+        _ = self.drain_subscription_count.fetchAdd(1, .release);
+
+        // Start draining subscriptions
+        self.subs_mutex.lock();
+        var iter = self.subscriptions.valueIterator();
+        while (iter.next()) |sub_ptr| {
+            const sub = sub_ptr.*;
+            _ = self.drain_subscription_count.fetchAdd(1, .release);
+            sub.drain(); // Drain the subscription
+        }
+        self.subs_mutex.unlock();
+
+        // Release the blocker
+        self.notifySubscriptionDrainComplete();
+    }
+
+    pub fn isDraining(self: *Self) bool {
+        const state = self.drain_state.load(.acquire);
+        switch (state) {
+            .draining_subs, .draining_pubs => return true,
+            else => return false,
+        }
+    }
+
+    pub fn isDrainComplete(self: *Self) bool {
+        const state = self.drain_state.load(.acquire);
+        switch (state) {
+            .drain_complete => return true,
+            else => return false,
+        }
+    }
+
+    pub fn waitForDrainCompletion(self: *Self, timeout_ms: ?u64) !void {
+        const state = self.drain_state.load(.acquire);
+        switch (state) {
+            .not_draining => return error.NotDraining,
+            .drain_complete => return,
+            else => {},
+        }
+
+        if (timeout_ms) |timeout| {
+            try self.drain_completion.timedWait(timeout * std.time.ns_per_ms);
+        } else {
+            self.drain_completion.wait();
+        }
+    }
+
+    pub fn notifySubscriptionDrainComplete(self: *Self) void {
+        // Only decrement if we're in the right state
+        const state = self.drain_state.load(.acquire);
+        if (state == .draining_subs) {
+            const remaining = self.drain_subscription_count.fetchSub(1, .acq_rel);
+            std.debug.assert(remaining > 0); // Catch atomic underflow during development
+            if (remaining == 1) { // This was the last one
+                self.startPublicationDrain();
+            }
+        }
+    }
+
+    fn sendDrainPing(self: *Self) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.drain_ping_id > 0) return; // Already sent the last ping
+
+        self.drain_ping_id = self.sendPing(false) catch |err| {
+            log.err("Failed to send drain ping: {}", .{err});
+            return;
+        };
+    }
+
+    fn notifyPublishDrainComplete(self: *Self) !void {
+        const prev_state = self.drain_state.cmpxchgStrong(.draining_pubs, .drain_complete, .acq_rel, .acquire);
+        if (prev_state != null) return; // Already completed
+
+        self.drain_completion.set();
+
+        return error.ShouldClose;
+    }
+
+    fn startPublicationDrain(self: *Self) void {
+        const prev_state = self.drain_state.cmpxchgStrong(.draining_subs, .draining_pubs, .acq_rel, .acquire);
+        if (prev_state != null) return; // Already draining pubs
+
+        self.sendDrainPing();
     }
 };

@@ -10,7 +10,6 @@ test "basic push subscription" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create a test stream
     const stream_config = nats.StreamConfig{
@@ -70,7 +69,6 @@ test "push subscription with flow control" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Create a test stream
     const stream_config = nats.StreamConfig{
@@ -131,13 +129,13 @@ test "push subscription error handling" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
-    // Try to create push subscription without deliver_subject (should fail)
-    const invalid_config = nats.ConsumerConfig{
-        .durable_name = "invalid_consumer",
+    // Try to create push subscription without deliver_subject - should auto-generate one
+    // but fail with stream not found error
+    const config_without_deliver_subject = nats.ConsumerConfig{
+        .durable_name = "test_consumer",
         .ack_policy = .explicit,
-        // Missing deliver_subject
+        // Missing deliver_subject - should be auto-generated
     };
 
     const DummyHandler = struct {
@@ -146,7 +144,7 @@ test "push subscription error handling" {
         }
     };
 
-    // This should fail with MissingDeliverSubject error
-    const result = js.subscribe("NONEXISTENT_STREAM", invalid_config, DummyHandler.handle, .{});
-    try testing.expectError(error.MissingDeliverSubject, result);
+    // This should fail with StreamNotFound error since auto-generated deliver_subject should work
+    const result = js.subscribe("NONEXISTENT_STREAM", config_without_deliver_subject, DummyHandler.handle, .{});
+    try testing.expectError(error.StreamNotFound, result);
 }

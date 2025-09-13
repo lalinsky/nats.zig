@@ -8,7 +8,6 @@ test "KV simple put and get" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "simple");

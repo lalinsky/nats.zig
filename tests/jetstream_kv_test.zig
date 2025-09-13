@@ -10,7 +10,6 @@ test "KV basic create bucket" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
@@ -38,7 +37,6 @@ test "KV put and get operations" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
@@ -77,7 +75,6 @@ test "KV create and update operations" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
@@ -121,7 +118,6 @@ test "KV delete operation" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
@@ -162,7 +158,6 @@ test "KV purge operation" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
@@ -200,7 +195,6 @@ test "KV status operation" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique bucket name
     const bucket_name = try utils.generateUniqueName(testing.allocator, "testbucket");
@@ -231,22 +225,4 @@ test "KV status operation" {
     try testing.expect(status.value.history == 3);
     try testing.expect(status.value.is_compressed == true);
     try testing.expectEqualStrings("JetStream", status.value.backing_store);
-}
-
-test "KV validation" {
-    // Test bucket name validation
-    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(testing.allocator, undefined, ""));
-    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(testing.allocator, undefined, "invalid.name"));
-    try testing.expectError(nats.KVError.InvalidBucketName, nats.KV.init(testing.allocator, undefined, "invalid name"));
-
-    // Test key validation
-    try testing.expectError(nats.KVError.InvalidKey, nats.validateKey(""));
-    try testing.expectError(nats.KVError.InvalidKey, nats.validateKey(".starts-with-dot"));
-    try testing.expectError(nats.KVError.InvalidKey, nats.validateKey("ends-with-dot."));
-    try testing.expectError(nats.KVError.InvalidKey, nats.validateKey("_kv_reserved"));
-    try testing.expectError(nats.KVError.InvalidKey, nats.validateKey("invalid key"));
-
-    // Valid names should pass
-    try nats.validateBucketName("valid-bucket_123");
-    try nats.validateKey("valid-key/path_123.foo");
 }

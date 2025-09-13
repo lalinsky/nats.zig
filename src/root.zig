@@ -22,12 +22,14 @@ pub const PublishError = @import("connection.zig").PublishError;
 pub const Message = @import("message.zig").Message;
 pub const Subscription = @import("subscription.zig").Subscription;
 pub const MsgHandler = @import("subscription.zig").MsgHandler;
+pub const createMsgHandler = @import("subscription.zig").createMsgHandler;
 pub const Dispatcher = @import("dispatcher.zig").Dispatcher;
 pub const DispatcherPool = @import("dispatcher.zig").DispatcherPool;
 pub const ServerPool = @import("server_pool.zig").ServerPool;
 pub const Server = @import("server_pool.zig").Server;
 pub const Socket = @import("socket.zig").Socket;
 pub const inbox = @import("inbox.zig");
+pub const nuid = @import("nuid.zig");
 
 // JetStream types
 pub const JetStream = @import("jetstream.zig").JetStream;
@@ -61,8 +63,16 @@ pub const KVConfig = @import("jetstream_kv.zig").KVConfig;
 pub const PutOptions = @import("jetstream_kv.zig").PutOptions;
 pub const KVOperation = @import("jetstream_kv.zig").KVOperation;
 pub const KVError = @import("jetstream_kv.zig").KVError;
-pub const validateKey = @import("jetstream_kv.zig").validateKey;
-pub const validateBucketName = @import("jetstream_kv.zig").validateBucketName;
+// Validation functions
+pub const validateStreamName = @import("validation.zig").validateStreamName;
+pub const validateConsumerName = @import("validation.zig").validateConsumerName;
+pub const validateSubject = @import("validation.zig").validateSubject;
+pub const validateQueueName = @import("validation.zig").validateQueueName;
+pub const validateKVBucketName = @import("validation.zig").validateKVBucketName;
+pub const validateKVKeyName = @import("validation.zig").validateKVKeyName;
+
+// Utility types
+pub const Result = @import("result.zig").Result;
 
 // JetStream Object Store types
 pub const ObjectStore = @import("jetstream_objstore.zig").ObjectStore;

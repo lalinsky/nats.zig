@@ -8,7 +8,6 @@ test "get message by sequence with direct API" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -49,7 +48,6 @@ test "get last message by subject with direct API" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subjects
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -104,7 +102,6 @@ test "get next message by subject with direct API" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subjects
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -158,7 +155,6 @@ test "get message with headers using direct API" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -223,7 +219,6 @@ test "direct API without allow_direct should fail" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);
@@ -254,7 +249,6 @@ test "direct API error cases" {
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
-    defer js.deinit();
 
     // Generate unique stream name and subject
     const stream_name = try utils.generateUniqueStreamName(testing.allocator);

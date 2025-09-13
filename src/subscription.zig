@@ -54,6 +54,18 @@ pub const Subscription = struct {
     // Assigned dispatcher (for async subscriptions only)
     dispatcher: ?*Dispatcher = null,
 
+    // Track pending messages and bytes for both sync and async subscriptions
+    pending_msgs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    pending_bytes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+    // Autounsubscribe state
+    max_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0), // 0 means no limit
+    delivered_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+    // Drain state
+    draining: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    drain_complete: std.Thread.ResetEvent = .{},
+
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
     pub fn create(nc: *Connection, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
@@ -74,11 +86,21 @@ pub const Subscription = struct {
             .messages = MessageQueue.init(nc.allocator, .{}),
             .handler = handler,
         };
+
+        // Subscription starts with 1 reference (from RefCounter.init())
+        // Add an additional reference for the user - total will be 2 refs:
+        // 1. Connection reference (for hashmap storage)
+        // 2. User reference (for returned pointer)
+        sub.retain();
+
         return sub;
     }
 
+    /// Unsubscribe from the server and release the user reference.
+    /// After calling this, the subscription should not be used.
     pub fn deinit(self: *Subscription) void {
         self.nc.unsubscribe(self);
+        self.release(); // Release user reference
     }
 
     fn destroy(self: *Subscription) void {
@@ -114,12 +136,101 @@ pub const Subscription = struct {
         }
     }
 
-    pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {
-        return self.messages.pop(timeout_ms) catch |err| switch (err) {
-            error.BufferFrozen => error.Timeout,
-            error.QueueEmpty => error.Timeout,
-            error.QueueClosed => error.Timeout, // TODO: this should be mapped to ConnectionClosed
+    pub fn drain(self: *Subscription) void {
+        // Temporarily increment pending, to avoid race conditions
+        incrementPending(self, 0);
+        defer decrementPending(self, 0);
+
+        // Mark as draining
+        const prev_state = self.draining.cmpxchgStrong(false, true, .acq_rel, .acquire);
+        if (prev_state != null) return; // Already draining
+
+        // Send UNSUB to server
+        self.nc.unsubscribeInternal(self.sid, null) catch |err| {
+            // Even with this failing, once we set draining to true,
+            // messages will be dropped, so it's OK to continue
+            log.err("Failed to send UNSUB for sid {d}: {}", .{ self.sid, err });
         };
+    }
+
+    pub fn isDraining(self: *Subscription) bool {
+        return self.draining.load(.acquire);
+    }
+
+    pub fn isDrainComplete(self: *Subscription) bool {
+        return self.draining.load(.acquire) and self.drain_complete.isSet();
+    }
+
+    pub fn waitForDrainCompletion(self: *Subscription, timeout_ms: u64) !void {
+        if (!self.draining.load(.acquire)) {
+            return error.NotDraining;
+        }
+
+        if (timeout_ms == 0) {
+            // No timeout - wait indefinitely
+            self.drain_complete.wait();
+        } else {
+            // Convert timeout to nanoseconds
+            const timeout_ns = timeout_ms * std.time.ns_per_ms;
+            self.drain_complete.timedWait(timeout_ns) catch {
+                return error.Timeout;
+            };
+        }
+    }
+
+    pub const AutoUnsubscribeError = error{
+        MaxAlreadyReached,
+        InvalidMax,
+        SubscriptionClosed,
+        SendFailed,
+    };
+
+    /// Issues an automatic unsubscribe that is processed by the server when 'max' messages have been received.
+    /// This can be useful when sending a request to an unknown number of subscribers.
+    pub fn autoUnsubscribe(self: *Subscription, max: u64) AutoUnsubscribeError!void {
+        if (max == 0) return AutoUnsubscribeError.InvalidMax;
+
+        const current_delivered = self.delivered_msgs.load(.acquire);
+        if (current_delivered >= max) {
+            return AutoUnsubscribeError.MaxAlreadyReached;
+        }
+
+        // Send protocol message to server first
+        self.nc.unsubscribeInternal(self.sid, max) catch {
+            return AutoUnsubscribeError.SendFailed;
+        };
+
+        // Only set the limit after successfully sending UNSUB
+        self.max_msgs.store(max, .release);
+    }
+
+    pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {
+        // Check if subscription has reached autounsubscribe limit
+        const max = self.max_msgs.load(.acquire);
+        if (max > 0 and self.delivered_msgs.load(.acquire) >= max) {
+            return error.Timeout; // Consistent with "no more messages" semantics
+        }
+
+        const msg = self.messages.pop(timeout_ms) catch |err| switch (err) {
+            error.BufferFrozen => return error.Timeout,
+            error.QueueEmpty => return error.Timeout,
+            error.QueueClosed => return error.Timeout, // TODO: this should be mapped to ConnectionClosed
+        };
+
+        // Increment delivered counter with proper memory ordering
+        const delivered = self.delivered_msgs.fetchAdd(1, .acq_rel) + 1;
+
+        // Check if we've reached the autounsubscribe limit
+        const max_limit = self.max_msgs.load(.acquire);
+        if (max_limit > 0 and delivered >= max_limit) {
+            // Remove subscription from connection
+            self.nc.removeSubscriptionInternal(self.sid);
+        }
+
+        // Decrement pending counters when message is consumed
+        decrementPending(self, msg.data.len);
+
+        return msg;
     }
 };
 
@@ -158,4 +269,22 @@ pub fn createMsgHandler(allocator: Allocator, comptime handlerFn: anytype, args:
         .callFn = Context.call,
         .cleanupFn = Context.cleanup,
     };
+}
+
+// Internal functions for pending counter management (not part of public API)
+pub fn incrementPending(sub: *Subscription, msg_size: usize) void {
+    _ = sub.pending_msgs.fetchAdd(1, .acq_rel);
+    _ = sub.pending_bytes.fetchAdd(msg_size, .acq_rel);
+}
+
+pub fn decrementPending(sub: *Subscription, msg_size: usize) void {
+    const remaining_msgs = sub.pending_msgs.fetchSub(1, .acq_rel);
+    _ = sub.pending_bytes.fetchSub(msg_size, .acq_rel);
+
+    // Check if drain is complete (we just decremented from 1 to 0)
+    if (sub.draining.load(.acquire) and remaining_msgs == 1) {
+        log.debug("Subscription {d} drain completed", .{sub.sid});
+        sub.drain_complete.set();
+        sub.nc.notifySubscriptionDrainComplete();
+    }
 }
