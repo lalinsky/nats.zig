@@ -212,7 +212,7 @@ pub const ObjectReader = struct {
                         else => {
                             // Permanent error - propagate to caller
                             return err;
-                        }
+                        },
                     }
                 };
                 defer js_msg.deinit();
@@ -352,7 +352,6 @@ pub const ObjectStore = struct {
         self.allocator.free(self.chunk_subject_prefix);
         self.allocator.free(self.meta_subject_prefix);
     }
-
 
     /// Get the meta subject for an object name
     fn getMetaSubject(self: *ObjectStore, object_name: []const u8) ![]u8 {
@@ -757,7 +756,6 @@ pub const ObjectStore = struct {
         };
         return std.json.stringifyAlloc(self.allocator, json_info, .{});
     }
-
 };
 
 /// Object Store Manager handles store-level operations

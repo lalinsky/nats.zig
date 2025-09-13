@@ -72,7 +72,6 @@ test "ObjectStore streaming put and get" {
     defer bytes_result.deinit();
 
     try testing.expectEqualStrings(test_data, bytes_result.value);
-
 }
 
 test "ObjectStore streaming empty object" {
@@ -130,5 +129,4 @@ test "ObjectStore streaming empty object" {
 
     // Verify should succeed for empty object
     try get_result.reader.verify();
-
 }
