@@ -220,6 +220,32 @@ pub fn validateOSBucketName(name: []const u8) !void {
     }
 }
 
+/// Validate Object Store object name according to ADR-6: limited-term with dots, no leading/trailing slashes or dots
+pub fn validateOSObjectName(name: []const u8) !void {
+    if (name.len == 0) {
+        return error.InvalidOSObjectName;
+    }
+
+    if (name.len > 255) {
+        return error.InvalidOSObjectName;
+    }
+
+    // Check for leading or trailing slashes/dots
+    if (name[0] == '/' or name[name.len - 1] == '/' or
+        name[0] == '.' or name[name.len - 1] == '.')
+    {
+        return error.InvalidOSObjectName;
+    }
+
+    // Validate each character - allow limited-term chars plus dots
+    for (name) |c| {
+        const valid = isLimitedTermChar(c) or c == '.';
+        if (!valid) {
+            return error.InvalidOSObjectName;
+        }
+    }
+}
+
 // Tests
 
 test "filename-safe characters" {
@@ -375,4 +401,38 @@ test "validateKVKeyName" {
     try std.testing.expectError(error.InvalidKVKeyName, validateKVKeyName("key>withgt"));
     try std.testing.expectError(error.InvalidKVKeyName, validateKVKeyName("key\\withbackslash"));
     try std.testing.expectError(error.InvalidKVKeyName, validateKVKeyName("key with space"));
+}
+
+test "validateOSBucketName" {
+    // Valid bucket names (restricted-term)
+    try validateOSBucketName("valid_bucket-name");
+    try validateOSBucketName("Bucket123");
+    try validateOSBucketName("UPPERCASE");
+
+    // Invalid bucket names
+    try std.testing.expectError(error.InvalidOSBucketName, validateOSBucketName(""));
+    try std.testing.expectError(error.InvalidOSBucketName, validateOSBucketName("bucket.with.dots"));
+    try std.testing.expectError(error.InvalidOSBucketName, validateOSBucketName("bucket/with/slash"));
+    try std.testing.expectError(error.InvalidOSBucketName, validateOSBucketName("bucket=equals"));
+    try std.testing.expectError(error.InvalidOSBucketName, validateOSBucketName("bucket with space"));
+}
+
+test "validateOSObjectName" {
+    // Valid object names
+    try validateOSObjectName("valid-object/name_123.txt");
+    try validateOSObjectName("object_with-dashes");
+    try validateOSObjectName("object/with/slashes");
+    try validateOSObjectName("object=with=equals");
+    try validateOSObjectName("object.with.dots");
+
+    // Invalid object names
+    try std.testing.expectError(error.InvalidOSObjectName, validateOSObjectName(""));
+    try std.testing.expectError(error.InvalidOSObjectName, validateOSObjectName("/starts-with-slash"));
+    try std.testing.expectError(error.InvalidOSObjectName, validateOSObjectName("ends-with-slash/"));
+    try std.testing.expectError(error.InvalidOSObjectName, validateOSObjectName(".starts-with-dot"));
+    try std.testing.expectError(error.InvalidOSObjectName, validateOSObjectName("ends-with-dot."));
+    try std.testing.expectError(error.InvalidOSObjectName, validateOSObjectName("object*with*asterisk"));
+    try std.testing.expectError(error.InvalidOSObjectName, validateOSObjectName("object>with>gt"));
+    try std.testing.expectError(error.InvalidOSObjectName, validateOSObjectName("object\\with\\backslash"));
+    try std.testing.expectError(error.InvalidOSObjectName, validateOSObjectName("object with space"));
 }
