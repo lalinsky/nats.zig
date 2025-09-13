@@ -257,8 +257,9 @@ pub const ObjectResult = struct {
 
     pub fn deinit(self: *ObjectResult) void {
         self.reader.deinit();
+        const child_allocator = self.arena.child_allocator;
         self.arena.deinit();
-        self.arena.child_allocator.destroy(self.arena);
+        child_allocator.destroy(self.arena);
     }
 };
 
