@@ -56,7 +56,7 @@ test "ObjectStore streaming put and get" {
     var buffer: [1024]u8 = undefined;
     var total_read: usize = 0;
     while (total_read < get_result.info.size) {
-        const n = try get_result.reader.read(buffer[total_read..]);
+        const n = try get_result.read(buffer[total_read..]);
         if (n == 0) break;
         total_read += n;
     }
@@ -64,7 +64,7 @@ test "ObjectStore streaming put and get" {
     try testing.expectEqualStrings(test_data, buffer[0..total_read]);
 
     // Verify digest
-    try get_result.reader.verify();
+    try get_result.verify();
 
     // Test that getBytes still works (compatibility)
     const bytes_result = try store.getBytes("streaming-test-object");
@@ -122,9 +122,9 @@ test "ObjectStore streaming empty object" {
 
     // Read should immediately return 0 (EOF)
     var buffer: [10]u8 = undefined;
-    const n = try get_result.reader.read(&buffer);
+    const n = try get_result.read(&buffer);
     try testing.expect(n == 0);
 
     // Verify should succeed for empty object
-    try get_result.reader.verify();
+    try get_result.verify();
 }
