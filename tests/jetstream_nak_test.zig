@@ -335,3 +335,208 @@ test "JetStream message metadata parsing" {
 
     log.info("JetStream metadata parsing test completed successfully", .{});
 }
+
+test "NAK with delay redelivery timing" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    // Create a test stream
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_NAK_DELAY_STREAM",
+        .subjects = &.{"test.nak.delay.*"},
+        .max_msgs = 100,
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    // Test data structure to track deliveries and timing
+    const DelayTestData = struct {
+        delivery_times: std.ArrayList(i64),
+        delivery_count: u32 = 0,
+        first_delivery_time: i64 = 0,
+        second_delivery_time: i64 = 0,
+        mutex: std.Thread.Mutex = .{},
+        allocator: std.mem.Allocator,
+
+        fn init(allocator: std.mem.Allocator) @This() {
+            return .{
+                .delivery_times = std.ArrayList(i64).init(allocator),
+                .allocator = allocator,
+            };
+        }
+
+        fn deinit(self: *@This()) void {
+            self.delivery_times.deinit();
+        }
+    };
+
+    var test_data = DelayTestData.init(testing.allocator);
+    defer test_data.deinit();
+
+    // Message handler that NAKs with delay on first delivery
+    const DelayHandler = struct {
+        fn handle(js_msg: *nats.JetStreamMessage, data: *DelayTestData) void {
+            defer js_msg.deinit();
+
+            data.mutex.lock();
+            defer data.mutex.unlock();
+
+            const current_time = std.time.milliTimestamp();
+            data.delivery_times.append(current_time) catch return;
+
+            const delivery_count = js_msg.metadata.num_delivered;
+            data.delivery_count += 1;
+
+            log.info("Received message delivery #{} at time {}", .{ delivery_count, current_time });
+
+            if (delivery_count == 1) {
+                // First delivery - NAK with 500ms delay
+                data.first_delivery_time = current_time;
+                js_msg.nakWithDelay(500) catch |err| {
+                    log.err("Failed to NAK with delay: {}", .{err});
+                };
+                log.info("NAK'd message with 500ms delay", .{});
+            } else {
+                // Second delivery - ACK it
+                data.second_delivery_time = current_time;
+                js_msg.ack() catch |err| {
+                    log.err("Failed to ACK message: {}", .{err});
+                };
+                log.info("ACK'd message on redelivery", .{});
+            }
+        }
+    };
+
+    // Create push consumer
+    const consumer_config = nats.ConsumerConfig{
+        .durable_name = "nak_delay_consumer",
+        .deliver_subject = "push.nak.delay.test",
+        .ack_policy = .explicit,
+        .max_deliver = 3,
+    };
+
+    var push_sub = try js.subscribe("TEST_NAK_DELAY_STREAM", consumer_config, DelayHandler.handle, .{&test_data});
+    defer push_sub.deinit();
+
+    // Publish a test message
+    const test_message = "NAK delay test message";
+    try conn.publish("test.nak.delay.message", test_message);
+
+    // Wait for both deliveries (original + redelivery after delay)
+    var attempts: u32 = 0;
+    while (attempts < 100) { // Wait up to 10 seconds
+        std.time.sleep(100 * std.time.ns_per_ms);
+        attempts += 1;
+
+        test_data.mutex.lock();
+        const count = test_data.delivery_count;
+        test_data.mutex.unlock();
+
+        if (count >= 2) break; // Got both deliveries
+    }
+
+    // Verify results
+    test_data.mutex.lock();
+    defer test_data.mutex.unlock();
+
+    // Should have received the message exactly twice
+    try testing.expectEqual(@as(u32, 2), test_data.delivery_count);
+    try testing.expect(test_data.delivery_times.items.len >= 2);
+
+    // Verify the delay was respected (should be at least 400ms, allowing some tolerance)
+    const delivery_delay = test_data.second_delivery_time - test_data.first_delivery_time;
+    try testing.expect(delivery_delay >= 400); // At least 400ms (allowing for some timing variance)
+
+    log.info("NAK with delay test completed successfully:", .{});
+    log.info("- Total deliveries: {}", .{test_data.delivery_count});
+    log.info("- First delivery time: {}", .{test_data.first_delivery_time});
+    log.info("- Second delivery time: {}", .{test_data.second_delivery_time});
+    log.info("- Actual delay: {}ms", .{delivery_delay});
+}
+
+test "NAK with zero delay behaves like regular NAK" {
+    const conn = try utils.createDefaultConnection();
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    // Create a test stream
+    const stream_config = nats.StreamConfig{
+        .name = "TEST_NAK_ZERO_DELAY_STREAM",
+        .subjects = &.{"test.nak.zero.*"},
+        .max_msgs = 100,
+    };
+    var stream_info = try js.addStream(stream_config);
+    defer stream_info.deinit();
+
+    var delivery_count: u32 = 0;
+    var mutex = std.Thread.Mutex{};
+
+    // Message handler that NAKs with zero delay on first delivery
+    const ZeroDelayHandler = struct {
+        fn handle(js_msg: *nats.JetStreamMessage, count: *u32, mtx: *std.Thread.Mutex) void {
+            defer js_msg.deinit();
+
+            mtx.lock();
+            defer mtx.unlock();
+
+            const delivery_num = js_msg.metadata.num_delivered;
+            count.* += 1;
+
+            log.info("Received message delivery #{}", .{delivery_num});
+
+            if (delivery_num == 1) {
+                // First delivery - NAK with zero delay (should behave like regular NAK)
+                js_msg.nakWithDelay(0) catch |err| {
+                    log.err("Failed to NAK with zero delay: {}", .{err});
+                };
+                log.info("NAK'd message with zero delay", .{});
+            } else {
+                // Second delivery - ACK it
+                js_msg.ack() catch |err| {
+                    log.err("Failed to ACK message: {}", .{err});
+                };
+                log.info("ACK'd message on redelivery", .{});
+            }
+        }
+    };
+
+    // Create push consumer
+    const consumer_config = nats.ConsumerConfig{
+        .durable_name = "nak_zero_delay_consumer",
+        .deliver_subject = "push.nak.zero.test",
+        .ack_policy = .explicit,
+        .max_deliver = 3,
+    };
+
+    var push_sub = try js.subscribe("TEST_NAK_ZERO_DELAY_STREAM", consumer_config, ZeroDelayHandler.handle, .{ &delivery_count, &mutex });
+    defer push_sub.deinit();
+
+    // Publish a test message
+    try conn.publish("test.nak.zero.message", "Zero delay NAK test");
+
+    // Wait for both deliveries
+    var attempts: u32 = 0;
+    while (attempts < 30) { // Wait up to 3 seconds
+        std.time.sleep(100 * std.time.ns_per_ms);
+        attempts += 1;
+
+        mutex.lock();
+        const count = delivery_count;
+        mutex.unlock();
+
+        if (count >= 2) break;
+    }
+
+    // Verify results
+    mutex.lock();
+    defer mutex.unlock();
+
+    // Should have received the message exactly twice
+    try testing.expectEqual(@as(u32, 2), delivery_count);
+
+    log.info("NAK with zero delay test completed successfully", .{});
+    log.info("- Total deliveries: {}", .{delivery_count});
+}
