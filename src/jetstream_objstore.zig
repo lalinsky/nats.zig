@@ -732,6 +732,11 @@ pub const ObjectStore = struct {
 
                 try objects.append(obj_info);
             }
+
+            // Stop when there are no more pending messages
+            if (js_msg.metadata.num_pending == 0) {
+                break;
+            }
         }
 
         return Result([]ObjectInfo){
