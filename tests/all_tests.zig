@@ -25,6 +25,7 @@ test {
     _ = @import("jetstream_kv_test.zig");
     _ = @import("jetstream_kv_history_test.zig");
     _ = @import("jetstream_objstore_test.zig");
+    _ = @import("jetstream_objstore_streaming_test.zig");
 }
 
 test "tests:beforeEach" {

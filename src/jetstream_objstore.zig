@@ -18,6 +18,7 @@ const StreamInfo = @import("jetstream.zig").StreamInfo;
 const ConsumerConfig = @import("jetstream.zig").ConsumerConfig;
 const ConsumerInfo = @import("jetstream.zig").ConsumerInfo;
 const PublishOptions = @import("jetstream.zig").PublishOptions;
+const JetStreamSubscription = @import("jetstream.zig").JetStreamSubscription;
 const Result = @import("result.zig").Result;
 const StoredMessage = @import("jetstream.zig").StoredMessage;
 const Message = @import("message.zig").Message;
@@ -41,12 +42,20 @@ pub const ObjectStoreError = error{
     BadRequest,
 };
 
+/// Object metadata options
+pub const ObjectMetaOptions = struct {
+    /// Custom chunk size for this object
+    chunk_size: ?u32 = null,
+};
+
 /// Object metadata structure
 pub const ObjectMeta = struct {
     /// Object name
     name: []const u8,
     /// Optional description
     description: ?[]const u8 = null,
+    /// Optional additional options
+    opts: ?ObjectMetaOptions = null,
 };
 
 /// Object info contains metadata plus instance information (what gets stored as JSON)
@@ -55,6 +64,8 @@ pub const ObjectInfo = struct {
     name: []const u8,
     /// Optional description
     description: ?[]const u8 = null,
+    /// Optional additional options
+    opts: ?ObjectMetaOptions = null,
     /// Store/bucket name
     bucket: []const u8,
     /// Unique object identifier (NUID)
@@ -75,6 +86,7 @@ pub const ObjectInfo = struct {
 const ObjectInfoJson = struct {
     name: []const u8,
     description: ?[]const u8 = null,
+    opts: ?ObjectMetaOptions = null,
     bucket: []const u8,
     nuid: []const u8,
     size: u64,
@@ -139,6 +151,154 @@ pub fn validateObjectName(name: []const u8) !void {
     }
 }
 
+/// Stream reader for object chunks - provides progressive chunk reading
+pub const ObjectReader = struct {
+    store: *ObjectStore,
+    info: ObjectInfo,
+    subscription: ?*JetStreamSubscription,
+    buffer: std.ArrayList(u8),
+    buffer_pos: usize,
+    chunk_index: u32,
+    digest: std.crypto.hash.sha2.Sha256,
+    eof: bool,
+    verified: bool,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, store: *ObjectStore, info: ObjectInfo, subscription: ?*JetStreamSubscription) ObjectReader {
+        return ObjectReader{
+            .store = store,
+            .info = info,
+            .subscription = subscription,
+            .buffer = std.ArrayList(u8).init(allocator),
+            .buffer_pos = 0,
+            .chunk_index = 0,
+            .digest = std.crypto.hash.sha2.Sha256.init(.{}),
+            .eof = false,
+            .verified = false,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *ObjectReader) void {
+        self.buffer.deinit();
+        if (self.subscription) |sub| {
+            sub.deinit();
+        }
+    }
+
+    /// Read data from the object stream
+    pub fn read(self: *ObjectReader, dest: []u8) !usize {
+        if (self.eof) return 0;
+
+        var bytes_written: usize = 0;
+
+        while (bytes_written < dest.len) {
+            // If buffer is empty, fetch next chunk
+            if (self.buffer_pos >= self.buffer.items.len) {
+                if (self.chunk_index >= self.info.chunks) {
+                    self.eof = true;
+                    break;
+                }
+
+                // Get next chunk from subscription
+                const timeout_ms = self.store.js.nc.options.timeout_ms;
+                const js_msg = self.subscription.?.nextMsg(timeout_ms) catch |err| {
+                    // Only treat permanent errors as EOF, not temporary ones
+                    switch (err) {
+                        error.Timeout => {
+                            // Temporary error - allow retry by returning partial data
+                            break;
+                        },
+                        else => {
+                            // Permanent error - propagate to caller
+                            return err;
+                        }
+                    }
+                };
+                defer js_msg.deinit();
+
+                // Reset buffer with new chunk data
+                self.buffer.clearRetainingCapacity();
+                try self.buffer.appendSlice(js_msg.msg.data);
+                self.buffer_pos = 0;
+                self.chunk_index += 1;
+
+                // Update digest
+                self.digest.update(js_msg.msg.data);
+
+                // Validate we haven't received more chunks than expected
+                if (self.chunk_index > self.info.chunks) {
+                    return ObjectStoreError.ChunkMismatch;
+                }
+            }
+
+            // Copy from buffer to destination
+            const available = self.buffer.items.len - self.buffer_pos;
+            const to_copy = @min(available, dest.len - bytes_written);
+
+            @memcpy(
+                dest[bytes_written .. bytes_written + to_copy],
+                self.buffer.items[self.buffer_pos .. self.buffer_pos + to_copy],
+            );
+
+            self.buffer_pos += to_copy;
+            bytes_written += to_copy;
+        }
+
+        // Check if we've completed reading all expected chunks
+        if (self.chunk_index == self.info.chunks and self.buffer_pos >= self.buffer.items.len) {
+            self.eof = true;
+            // Automatically verify digest when stream is complete
+            if (!self.verified) {
+                self.autoVerify() catch {
+                    // Ignore verification error here - it can be checked later
+                    // with verify() or isVerified()
+                };
+            }
+        }
+
+        return bytes_written;
+    }
+
+    /// Internal automatic verification when stream completes
+    fn autoVerify(self: *ObjectReader) !void {
+        if (self.verified) return;
+
+        const calculated_digest = self.digest.finalResult();
+        var digest_hex: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(&digest_hex, "{s}", .{std.fmt.fmtSliceHexLower(&calculated_digest)}) catch unreachable;
+
+        if (!std.mem.eql(u8, &digest_hex, self.info.digest)) {
+            return ObjectStoreError.DigestMismatch;
+        }
+
+        self.verified = true;
+    }
+
+    /// Verify the complete object integrity (public API)
+    pub fn verify(self: *ObjectReader) !void {
+        try self.autoVerify();
+    }
+
+    /// Check if the object has been verified
+    pub fn isVerified(self: *ObjectReader) bool {
+        return self.verified;
+    }
+};
+
+/// ObjectResult provides streaming access to object data
+pub const ObjectResult = struct {
+    info: ObjectInfo,
+    reader: ObjectReader,
+    arena: *std.heap.ArenaAllocator,
+
+    pub fn deinit(self: *ObjectResult) void {
+        self.reader.deinit();
+        self.arena.deinit();
+        self.arena.child_allocator.destroy(self.arena);
+    }
+};
+
 /// Object Store implementation
 pub const ObjectStore = struct {
     /// JetStream context
@@ -159,7 +319,7 @@ pub const ObjectStore = struct {
     const Self = @This();
 
     /// Initialize ObjectStore handle
-    pub fn init(allocator: std.mem.Allocator, js: *JetStream, store_name: []const u8) !ObjectStore {
+    pub fn init(allocator: std.mem.Allocator, js: *JetStream, store_name: []const u8, chunk_size: u32) !ObjectStore {
         try validateStoreName(store_name);
 
         // Create owned copies of names
@@ -182,7 +342,7 @@ pub const ObjectStore = struct {
             .chunk_subject_prefix = chunk_subject_prefix,
             .meta_subject_prefix = meta_subject_prefix,
             .allocator = allocator,
-            .chunk_size = DEFAULT_CHUNK_SIZE,
+            .chunk_size = chunk_size,
         };
     }
 
@@ -193,16 +353,6 @@ pub const ObjectStore = struct {
         self.allocator.free(self.meta_subject_prefix);
     }
 
-    /// Calculate SHA-256 digest of data
-    fn calculateDigest(_: *ObjectStore, data: []const u8) ![64]u8 {
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(data);
-        const digest_bytes = hasher.finalResult();
-
-        var digest_hex: [64]u8 = undefined;
-        _ = std.fmt.bufPrint(&digest_hex, "{s}", .{std.fmt.fmtSliceHexLower(&digest_bytes)}) catch unreachable;
-        return digest_hex;
-    }
 
     /// Get the meta subject for an object name
     fn getMetaSubject(self: *ObjectStore, object_name: []const u8) ![]u8 {
@@ -214,71 +364,121 @@ pub const ObjectStore = struct {
         return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.chunk_subject_prefix, object_nuid });
     }
 
-    /// Put bytes as an object into the store
-    pub fn putBytes(self: *ObjectStore, object_name: []const u8, data: []const u8) !ObjectInfo {
-        try validateObjectName(object_name);
+    /// Primary put method that accepts any reader type for efficient streaming
+    pub fn put(self: *ObjectStore, meta: ObjectMeta, reader: anytype) !Result(ObjectInfo) {
+        try validateObjectName(meta.name);
 
-        // We'll create the result later when we have the ObjectInfo
+        // Create arena for return value
+        const arena = try self.allocator.create(std.heap.ArenaAllocator);
+        errdefer self.allocator.destroy(arena);
+        arena.* = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
 
-        // Generate unique identifier for this object
-        const object_nuid = try nuid.nextString(self.allocator);
-        errdefer self.allocator.free(object_nuid);
+        const arena_allocator = arena.allocator();
 
-        // Calculate digest
-        const digest_array = try self.calculateDigest(data);
-        const digest = digest_array[0..];
+        // Generate unique identifier for this object - owned by arena
+        const object_nuid = try nuid.nextString(arena_allocator);
 
-        // Determine chunk size
-        const num_chunks = (data.len + self.chunk_size - 1) / self.chunk_size; // Round up division
+        // Initialize digest calculation
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
-        // Store chunks - all chunks go to the same subject
+        // Determine chunk size (use meta.opts.chunk_size or default)
+        const chunk_size = if (meta.opts) |opts|
+            opts.chunk_size orelse DEFAULT_CHUNK_SIZE
+        else
+            DEFAULT_CHUNK_SIZE;
+
+        // Allocate chunk buffer using temporary allocator
+        const chunk_buffer = try self.allocator.alloc(u8, chunk_size);
+        defer self.allocator.free(chunk_buffer);
+
+        // Stream and publish chunks
+        var total_size: u64 = 0;
+        var chunk_count: u32 = 0;
         const chunk_subject = try self.getChunkSubject(object_nuid);
         defer self.allocator.free(chunk_subject);
 
-        var offset: usize = 0;
-        while (offset < data.len) {
-            const end = @min(offset + self.chunk_size, data.len);
-            const chunk_data = data[offset..end];
+        while (true) {
+            const bytes_read = reader.read(chunk_buffer) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            if (bytes_read == 0) break;
 
-            const chunk_ack = try self.js.publish(chunk_subject, chunk_data, .{});
-            defer chunk_ack.deinit();
+            // Update digest
+            hasher.update(chunk_buffer[0..bytes_read]);
 
-            offset += chunk_data.len;
+            // Publish chunk
+            const ack = try self.js.publish(chunk_subject, chunk_buffer[0..bytes_read], .{});
+            defer ack.deinit();
+
+            total_size += bytes_read;
+            chunk_count += 1;
         }
 
+        // Create digest string - owned by arena
+        const digest_bytes = hasher.finalResult();
+        const digest_hex = try arena_allocator.alloc(u8, 64);
+        _ = std.fmt.bufPrint(digest_hex, "{s}", .{std.fmt.fmtSliceHexLower(&digest_bytes)}) catch unreachable;
+
         const obj_info = ObjectInfo{
-            .bucket = self.store_name,
+            .name = try arena_allocator.dupe(u8, meta.name),
+            .description = if (meta.description) |desc| try arena_allocator.dupe(u8, desc) else null,
+            .opts = meta.opts,
+            .bucket = try arena_allocator.dupe(u8, self.store_name),
             .nuid = object_nuid,
-            .name = object_name,
-            .description = "",
-            .size = data.len,
-            .chunks = @intCast(num_chunks),
-            .digest = digest,
+            .size = total_size,
+            .chunks = chunk_count,
+            .digest = digest_hex,
             .deleted = false,
         };
 
+        // Store metadata
         const info_json = try self.serializeObjectInfo(obj_info);
         defer self.allocator.free(info_json);
 
-        const meta_subject = try self.getMetaSubject(object_name);
+        const meta_subject = try self.getMetaSubject(meta.name);
         defer self.allocator.free(meta_subject);
 
         const meta_ack = try self.js.publish(meta_subject, info_json, .{});
         defer meta_ack.deinit();
 
-        return obj_info;
+        return Result(ObjectInfo){
+            .arena = arena,
+            .value = obj_info,
+        };
     }
 
-    /// Get object data as bytes
-    pub fn getBytes(self: *ObjectStore, object_name: []const u8) !Result([]u8) {
-        // First get metadata
-        const info_result = try self.info(object_name);
-        defer info_result.deinit();
-        const obj_info = &info_result.value;
+    /// Put bytes as an object into the store (convenience method)
+    pub fn putBytes(self: *ObjectStore, object_name: []const u8, data: []const u8) !Result(ObjectInfo) {
+        // Create a fixed buffer stream from the data
+        var stream = std.io.fixedBufferStream(data);
 
-        if (obj_info.deleted) {
-            return ObjectStoreError.ObjectNotFound;
-        }
+        // Create ObjectMeta with store's default chunk size
+        const meta = ObjectMeta{
+            .name = object_name,
+            .description = null,
+            .opts = ObjectMetaOptions{
+                .chunk_size = self.chunk_size,
+            },
+        };
+
+        // Use the primary put() method with the stream reader
+        return self.put(meta, stream.reader());
+    }
+
+    /// Primary get method that returns a streaming result
+    pub fn get(self: *ObjectStore, object_name: []const u8) !ObjectResult {
+        try validateObjectName(object_name);
+
+        // First get metadata
+        const meta_subject = try self.getMetaSubject(object_name);
+        defer self.allocator.free(meta_subject);
+
+        const meta_msg = self.js.getMsg(self.stream_name, .{ .last_by_subj = meta_subject, .direct = true }) catch |err| {
+            return if (err == error.MessageNotFound) ObjectStoreError.ObjectNotFound else err;
+        };
+        errdefer meta_msg.deinit();
 
         // Create arena for the result
         const arena = try self.allocator.create(std.heap.ArenaAllocator);
@@ -288,15 +488,48 @@ pub const ObjectStore = struct {
 
         const arena_allocator = arena.allocator();
 
-        // Allocate buffer for complete object
-        const data = try arena_allocator.alloc(u8, obj_info.size);
-        var offset: usize = 0;
+        // Parse object info JSON using arena allocator
+        const parsed = try std.json.parseFromSlice(ObjectInfoJson, arena_allocator, meta_msg.data, .{});
 
-        // Retrieve all chunks from the single chunk subject
+        // Convert from JSON version to full ObjectInfo with proper string ownership
+        const obj_info = ObjectInfo{
+            .name = parsed.value.name,
+            .description = parsed.value.description,
+            .opts = parsed.value.opts,
+            .bucket = parsed.value.bucket,
+            .nuid = parsed.value.nuid,
+            .size = parsed.value.size,
+            .chunks = parsed.value.chunks,
+            .mtime = meta_msg.time, // Set from message timestamp
+            .digest = parsed.value.digest,
+            .deleted = parsed.value.deleted,
+        };
+
+        // We can safely deinit the message now since all strings are owned by arena
+        meta_msg.deinit();
+
+        if (obj_info.deleted) {
+            return ObjectStoreError.ObjectNotFound;
+        }
+
+        // Links are not supported in the current server implementation
+
+        // For empty objects, return immediately without subscription
+        if (obj_info.size == 0) {
+            var reader = ObjectReader.init(arena_allocator, self, obj_info, null);
+            reader.eof = true; // Mark as EOF immediately since there's no data
+
+            return ObjectResult{
+                .info = obj_info,
+                .reader = reader,
+                .arena = arena,
+            };
+        }
+
+        // Create subscription for chunks
         const chunk_subject = try self.getChunkSubject(obj_info.nuid);
         defer self.allocator.free(chunk_subject);
 
-        // Get all messages from the chunk subject using a consumer
         const inbox = try newInbox(self.allocator);
         defer self.allocator.free(inbox);
 
@@ -310,38 +543,48 @@ pub const ObjectStore = struct {
         };
 
         const sub = try self.js.subscribeSync(self.stream_name, consumer_config);
-        defer sub.deinit();
 
-        // Collect all chunk messages
-        var chunks_received: u32 = 0;
-        const timeout_ms = self.js.nc.options.timeout_ms;
+        // Create reader with subscription
+        const reader = ObjectReader.init(arena_allocator, self, obj_info, sub);
 
-        while (chunks_received < obj_info.chunks) {
-            const js_msg = sub.nextMsg(timeout_ms) catch |err| {
-                return if (err == error.Timeout or err == error.QueueEmpty) ObjectStoreError.ChunkMismatch else err;
-            };
-            defer js_msg.deinit();
+        return ObjectResult{
+            .info = obj_info,
+            .reader = reader,
+            .arena = arena,
+        };
+    }
 
-            // Copy chunk data
-            const chunk_size = js_msg.msg.data.len;
-            if (offset + chunk_size > obj_info.size) {
-                return ObjectStoreError.ChunkMismatch;
-            }
+    /// Get object data as bytes (convenience method)
+    pub fn getBytes(self: *ObjectStore, object_name: []const u8) !Result([]u8) {
+        // Get the streaming result
+        var result = try self.get(object_name);
+        defer result.deinit();
 
-            @memcpy(data[offset .. offset + chunk_size], js_msg.msg.data);
-            offset += chunk_size;
-            chunks_received += 1;
+        // Create arena for the result
+        const arena = try self.allocator.create(std.heap.ArenaAllocator);
+        errdefer self.allocator.destroy(arena);
+        arena.* = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+
+        const arena_allocator = arena.allocator();
+
+        // Allocate buffer for complete object based on size from info
+        const data = try arena_allocator.alloc(u8, result.info.size);
+
+        // Read all data from the streaming reader
+        var total_read: usize = 0;
+        while (total_read < result.info.size) {
+            const n = try result.reader.read(data[total_read..]);
+            if (n == 0) break; // EOF
+            total_read += n;
         }
 
-        if (offset != obj_info.size) {
+        if (total_read != result.info.size) {
             return ObjectStoreError.ChunkMismatch;
         }
 
-        // Verify digest
-        const calculated_digest = try self.calculateDigest(data);
-        if (!std.mem.eql(u8, &calculated_digest, obj_info.digest)) {
-            return ObjectStoreError.DigestMismatch;
-        }
+        // Verify the digest
+        try result.reader.verify();
 
         return Result([]u8){
             .arena = arena,
@@ -368,19 +611,28 @@ pub const ObjectStore = struct {
 
         const arena_allocator = arena.allocator();
 
-        // Parse object info JSON
-        const info_result = try self.parseObjectInfo(self.allocator, meta_msg.data);
-        var obj_info = info_result.value;
+        // Parse object info JSON using arena allocator
+        const parsed = try std.json.parseFromSlice(ObjectInfoJson, arena_allocator, meta_msg.data, .{});
 
-        // Populate mtime from message timestamp (never stored in JSON)
-        obj_info.mtime = meta_msg.time;
+        // Convert from JSON version to full ObjectInfo with proper string ownership
+        const obj_info = ObjectInfo{
+            .name = parsed.value.name,
+            .description = parsed.value.description,
+            .opts = parsed.value.opts,
+            .bucket = parsed.value.bucket,
+            .nuid = parsed.value.nuid,
+            .size = parsed.value.size,
+            .chunks = parsed.value.chunks,
+            .mtime = meta_msg.time, // Set from message timestamp
+            .digest = parsed.value.digest,
+            .deleted = parsed.value.deleted,
+        };
 
-        // Transfer ownership of message to arena
-        _ = arena_allocator.create(Message) catch unreachable;
-        meta_msg.* = undefined; // Prevent double-free
+        // We can safely deinit the message now since all strings are owned by arena
+        meta_msg.deinit();
 
         return Result(ObjectInfo){
-            .arena = info_result.arena,
+            .arena = arena,
             .value = obj_info,
         };
     }
@@ -459,15 +711,17 @@ pub const ObjectStore = struct {
             };
             defer js_msg.deinit();
 
-            // Parse metadata
-            const meta_result = try self.parseObjectInfo(self.allocator, js_msg.msg.data);
-            defer meta_result.deinit();
-            const meta = meta_result.value;
+            // Parse metadata using temporary allocator
+            const parsed = try std.json.parseFromSlice(ObjectInfoJson, self.allocator, js_msg.msg.data, .{});
+            defer parsed.deinit();
+            const meta = parsed.value;
 
             // Only include non-deleted objects
             if (!meta.deleted) {
                 const obj_info = ObjectInfo{
                     .name = try arena_allocator.dupe(u8, meta.name),
+                    .description = if (meta.description) |desc| try arena_allocator.dupe(u8, desc) else null,
+                    .opts = meta.opts,
                     .bucket = try arena_allocator.dupe(u8, meta.bucket),
                     .nuid = try arena_allocator.dupe(u8, meta.nuid),
                     .size = meta.size,
@@ -493,6 +747,7 @@ pub const ObjectStore = struct {
         const json_info = ObjectInfoJson{
             .name = obj_info.name,
             .description = obj_info.description,
+            .opts = obj_info.opts,
             .bucket = obj_info.bucket,
             .nuid = obj_info.nuid,
             .size = obj_info.size,
@@ -503,29 +758,6 @@ pub const ObjectStore = struct {
         return std.json.stringifyAlloc(self.allocator, json_info, .{});
     }
 
-    /// Parse ObjectInfo from JSON string
-    fn parseObjectInfo(_: *ObjectStore, allocator: std.mem.Allocator, obj_info_json: []const u8) !Result(ObjectInfo) {
-        var parsed = try std.json.parseFromSlice(ObjectInfoJson, allocator, obj_info_json, .{});
-        errdefer parsed.deinit();
-
-        // Convert from JSON version to full ObjectInfo (mtime will be set from message timestamp)
-        const obj_info = ObjectInfo{
-            .name = parsed.value.name,
-            .description = parsed.value.description,
-            .bucket = parsed.value.bucket,
-            .nuid = parsed.value.nuid,
-            .size = parsed.value.size,
-            .chunks = parsed.value.chunks,
-            .mtime = 0, // Will be populated from message timestamp
-            .digest = parsed.value.digest,
-            .deleted = parsed.value.deleted,
-        };
-
-        return Result(ObjectInfo){
-            .arena = parsed.arena,
-            .value = obj_info,
-        };
-    }
 };
 
 /// Object Store Manager handles store-level operations
@@ -576,7 +808,7 @@ pub const ObjectStoreManager = struct {
         const result = try self.js.addStream(stream_config);
         defer result.deinit();
 
-        return try ObjectStore.init(self.allocator, self.js, config.store_name);
+        return try ObjectStore.init(self.allocator, self.js, config.store_name, config.chunk_size);
     }
 
     /// Open an existing object store
@@ -590,7 +822,7 @@ pub const ObjectStoreManager = struct {
         };
         defer stream_info.deinit();
 
-        return try ObjectStore.init(self.allocator, self.js, store_name);
+        return try ObjectStore.init(self.allocator, self.js, store_name, DEFAULT_CHUNK_SIZE);
     }
 
     /// Delete an object store

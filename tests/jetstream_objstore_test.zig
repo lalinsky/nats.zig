@@ -60,11 +60,12 @@ test "ObjectStore put and get operations" {
 
     // Put object
     const put_result = try objstore.putBytes(object_name, test_data);
-    try testing.expectEqualStrings(object_name, put_result.name);
-    try testing.expectEqualStrings(store_name, put_result.bucket);
-    try testing.expect(put_result.size == test_data.len);
-    try testing.expect(put_result.chunks > 0);
-    try testing.expect(!put_result.deleted);
+    defer put_result.deinit();
+    try testing.expectEqualStrings(object_name, put_result.value.name);
+    try testing.expectEqualStrings(store_name, put_result.value.bucket);
+    try testing.expect(put_result.value.size == test_data.len);
+    try testing.expect(put_result.value.chunks > 0);
+    try testing.expect(!put_result.value.deleted);
 
     // Get object
     const get_result = try objstore.getBytes(object_name);
@@ -118,9 +119,10 @@ test "ObjectStore chunked operations" {
 
     // Put large object with custom chunk size
     const put_result = try objstore.putBytes(object_name, large_data);
-    try testing.expectEqualStrings(object_name, put_result.name);
-    try testing.expect(put_result.size == large_data.len);
-    try testing.expect(put_result.chunks == 4); // Should be 4 chunks
+    defer put_result.deinit();
+    try testing.expectEqualStrings(object_name, put_result.value.name);
+    try testing.expect(put_result.value.size == large_data.len);
+    try testing.expect(put_result.value.chunks == 4); // Should be 4 chunks
 
     // Get large object
     const get_result = try objstore.getBytes(object_name);
@@ -154,7 +156,8 @@ test "ObjectStore delete operations" {
     const object_name = "doomed-object.txt";
 
     // Put object
-    _ = try objstore.putBytes(object_name, test_data);
+    const put_result = try objstore.putBytes(object_name, test_data);
+    defer put_result.deinit();
 
     // Verify object exists
     const get_result = try objstore.getBytes(object_name);
@@ -203,7 +206,8 @@ test "ObjectStore list operations" {
     };
 
     for (objects) |obj| {
-        _ = try objstore.putBytes(obj.name, obj.data);
+        const put_result = try objstore.putBytes(obj.name, obj.data);
+        defer put_result.deinit();
     }
 
     // List all objects
