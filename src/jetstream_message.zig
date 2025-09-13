@@ -60,23 +60,28 @@ pub const JetStreamMessage = struct {
 
     /// Acknowledge successful processing
     pub fn ack(self: *JetStreamMessage) !void {
-        try self.sendAck(.ack);
+        try self.sendAck(.ack, null);
     }
 
     /// Negative acknowledge - request redelivery
     pub fn nak(self: *JetStreamMessage) !void {
-        try self.sendAck(.nak);
+        try self.sendAck(.nak, null);
+    }
+
+    /// Negative acknowledge with delay - request redelivery after specified duration (in milliseconds)
+    pub fn nakWithDelay(self: *JetStreamMessage, delay_ms: u64) !void {
+        try self.sendAck(.nak, delay_ms);
     }
 
     /// Terminate delivery - don't redeliver this message
     pub fn term(self: *JetStreamMessage) !void {
-        try self.sendAck(.term);
+        try self.sendAck(.term, null);
     }
 
     /// Indicate work in progress - extend ack wait timer
     /// Note: inProgress can be called multiple times per NATS specification
     pub fn inProgress(self: *JetStreamMessage) !void {
-        try self.sendAck(.progress);
+        try self.sendAck(.progress, null);
     }
 
     /// Check if message has been acknowledged
@@ -85,7 +90,7 @@ pub const JetStreamMessage = struct {
     }
 
     /// Send acknowledgment to JetStream
-    fn sendAck(self: *JetStreamMessage, ack_type: AckType) !void {
+    fn sendAck(self: *JetStreamMessage, ack_type: AckType, delay_ms: ?u64) !void {
         if (self.msg.reply) |reply_subject| {
             if (ack_type.isFinal()) {
                 // Check if already acknowledged using atomic compare-and-swap
@@ -98,8 +103,21 @@ pub const JetStreamMessage = struct {
             // If publish fails, revert the acknowledged flag to allow retry
             errdefer if (ack_type.isFinal()) self.acked.store(false, .release);
 
+            // Format the acknowledgment message with optional delay
+            var ack_message: [256]u8 = undefined;
+            const ack_body = if (delay_ms) |delay| blk: {
+                if (delay > 0) {
+                    // Convert milliseconds to nanoseconds for the protocol message
+                    const delay_ns = delay * std.time.ns_per_ms;
+                    const formatted = try std.fmt.bufPrint(&ack_message, "{s} {{\"delay\": {}}}", .{ ack_type.toString(), delay_ns });
+                    break :blk formatted;
+                } else {
+                    break :blk ack_type.toString();
+                }
+            } else ack_type.toString();
+
             // Send the acknowledgment message
-            try self.nc.publish(reply_subject, ack_type.toString());
+            try self.nc.publish(reply_subject, ack_body);
         }
     }
 };
