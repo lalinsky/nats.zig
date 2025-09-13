@@ -63,11 +63,23 @@ pub const ObjectInfo = struct {
     size: u64,
     /// Number of chunks
     chunks: u32,
-    /// Last modified time
-    mtime: ?u64 = null,
+    /// Last modified time (from message timestamp, not stored in JSON)
+    mtime: u64 = 0,
     /// SHA-256 digest hex string
     digest: []const u8,
     /// True if object is deleted
+    deleted: bool = false,
+};
+
+/// ObjectInfo for JSON serialization (excludes mtime)
+const ObjectInfoJson = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+    bucket: []const u8,
+    nuid: []const u8,
+    size: u64,
+    chunks: u32,
+    digest: []const u8,
     deleted: bool = false,
 };
 
@@ -206,8 +218,7 @@ pub const ObjectStore = struct {
     pub fn putBytes(self: *ObjectStore, object_name: []const u8, data: []const u8) !ObjectInfo {
         try validateObjectName(object_name);
 
-        var result = Result(ObjectInfo).init(self.allocator, undefined);
-        errdefer result.deinit();
+        // We'll create the result later when we have the ObjectInfo
 
         // Generate unique identifier for this object
         const object_nuid = try nuid.nextString(self.allocator);
@@ -235,17 +246,16 @@ pub const ObjectStore = struct {
             offset += chunk_data.len;
         }
 
-        result.value.* = .{
+        const obj_info = ObjectInfo{
             .bucket = self.store_name,
             .nuid = object_nuid,
             .name = object_name,
             .description = "",
             .size = data.len,
-            .chunks = num_chunks,
+            .chunks = @intCast(num_chunks),
             .digest = digest,
             .deleted = false,
         };
-        const obj_info = &result.value;
 
         const info_json = try self.serializeObjectInfo(obj_info);
         defer self.allocator.free(info_json);
@@ -256,7 +266,7 @@ pub const ObjectStore = struct {
         const meta_ack = try self.js.publish(meta_subject, info_json, .{});
         defer meta_ack.deinit();
 
-        return result;
+        return obj_info;
     }
 
     /// Get object data as bytes
@@ -450,7 +460,7 @@ pub const ObjectStore = struct {
             defer js_msg.deinit();
 
             // Parse metadata
-            const meta_result = try self.parseObjectMeta(self.allocator, js_msg.msg.data);
+            const meta_result = try self.parseObjectInfo(self.allocator, js_msg.msg.data);
             defer meta_result.deinit();
             const meta = meta_result.value;
 
@@ -462,8 +472,8 @@ pub const ObjectStore = struct {
                     .nuid = try arena_allocator.dupe(u8, meta.nuid),
                     .size = meta.size,
                     .chunks = meta.chunks,
+                    .mtime = js_msg.msg.time,
                     .digest = try arena_allocator.dupe(u8, meta.digest),
-                    .modified = meta.modified,
                     .deleted = meta.deleted,
                 };
 
@@ -479,17 +489,41 @@ pub const ObjectStore = struct {
 
     /// Serialize ObjectInfo to JSON string
     fn serializeObjectInfo(self: *ObjectStore, obj_info: ObjectInfo) ![]u8 {
-        return std.json.stringifyAlloc(self.allocator, obj_info, .{});
+        // Convert to JSON-only version (excludes mtime)
+        const json_info = ObjectInfoJson{
+            .name = obj_info.name,
+            .description = obj_info.description,
+            .bucket = obj_info.bucket,
+            .nuid = obj_info.nuid,
+            .size = obj_info.size,
+            .chunks = obj_info.chunks,
+            .digest = obj_info.digest,
+            .deleted = obj_info.deleted,
+        };
+        return std.json.stringifyAlloc(self.allocator, json_info, .{});
     }
 
     /// Parse ObjectInfo from JSON string
     fn parseObjectInfo(_: *ObjectStore, allocator: std.mem.Allocator, obj_info_json: []const u8) !Result(ObjectInfo) {
-        var parsed = try std.json.parseFromSlice(ObjectInfo, allocator, obj_info_json, .{});
+        var parsed = try std.json.parseFromSlice(ObjectInfoJson, allocator, obj_info_json, .{});
         errdefer parsed.deinit();
+
+        // Convert from JSON version to full ObjectInfo (mtime will be set from message timestamp)
+        const obj_info = ObjectInfo{
+            .name = parsed.value.name,
+            .description = parsed.value.description,
+            .bucket = parsed.value.bucket,
+            .nuid = parsed.value.nuid,
+            .size = parsed.value.size,
+            .chunks = parsed.value.chunks,
+            .mtime = 0, // Will be populated from message timestamp
+            .digest = parsed.value.digest,
+            .deleted = parsed.value.deleted,
+        };
 
         return Result(ObjectInfo){
             .arena = parsed.arena,
-            .value = parsed.value,
+            .value = obj_info,
         };
     }
 };

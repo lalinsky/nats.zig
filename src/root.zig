@@ -70,7 +70,6 @@ pub const ObjectStoreManager = @import("jetstream_objstore.zig").ObjectStoreMana
 pub const ObjectMeta = @import("jetstream_objstore.zig").ObjectMeta;
 pub const ObjectInfo = @import("jetstream_objstore.zig").ObjectInfo;
 pub const ObjectStoreConfig = @import("jetstream_objstore.zig").ObjectStoreConfig;
-pub const PutObjectOptions = @import("jetstream_objstore.zig").PutObjectOptions;
 pub const ObjectStoreError = @import("jetstream_objstore.zig").ObjectStoreError;
 pub const validateStoreName = @import("jetstream_objstore.zig").validateStoreName;
 pub const validateObjectName = @import("jetstream_objstore.zig").validateObjectName;

@@ -154,7 +154,7 @@ test "ObjectStore delete operations" {
     const object_name = "doomed-object.txt";
 
     // Put object
-    _ = try objstore.putBytes(object_name, test_data, .{});
+    _ = try objstore.putBytes(object_name, test_data);
 
     // Verify object exists
     const get_result = try objstore.getBytes(object_name);
@@ -203,7 +203,7 @@ test "ObjectStore list operations" {
     };
 
     for (objects) |obj| {
-        _ = try objstore.putBytes(obj.name, obj.data, .{});
+        _ = try objstore.putBytes(obj.name, obj.data);
     }
 
     // List all objects
