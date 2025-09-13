@@ -345,11 +345,11 @@ pub const ObjectStore = struct {
         // Initialize digest calculation
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
-        // Determine chunk size (use meta.opts.chunk_size or default)
+        // Determine chunk size (use meta.opts.chunk_size or store default)
         const chunk_size = if (meta.opts) |opts|
-            opts.chunk_size orelse DEFAULT_CHUNK_SIZE
+            opts.chunk_size orelse self.chunk_size
         else
-            DEFAULT_CHUNK_SIZE;
+            self.chunk_size;
 
         // Allocate chunk buffer using temporary allocator
         const chunk_buffer = try self.allocator.alloc(u8, chunk_size);
@@ -667,7 +667,7 @@ pub const ObjectStore = struct {
         const timeout_ms = self.js.nc.options.timeout_ms;
         while (true) {
             const js_msg = sub.nextMsg(timeout_ms) catch |err| {
-                if (err == error.Timeout or err == error.QueueEmpty) {
+                if (err == error.Timeout) {
                     break;
                 }
                 return err;
