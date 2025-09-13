@@ -193,6 +193,10 @@ pub const ConnectionOptions = struct {
     max_scratch_size: usize = 1024 * 1024 * 10,
     ping_interval_ms: u64 = 120000, // 2 minutes default, 0 = disabled
     max_pings_out: u32 = 2, // max unanswered keep-alive PINGs
+
+    // Authentication
+    token: ?[]const u8 = null,
+    token_handler: ?*const fn () []const u8 = null,
 };
 
 pub const Connection = struct {
@@ -371,6 +375,8 @@ pub const Connection = struct {
     }
 
     fn connectToServer(self: *Self) !void {
+        errdefer self.close();
+
         // This is called from initial connect() - needs to manage its own mutex
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -379,7 +385,6 @@ pub const Connection = struct {
 
         // Get server using C library's GetNextServer algorithm
         const selected_server = try self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) orelse {
-            self.status = .closed;
             return ConnectionError.ConnectionFailed;
         };
 
@@ -388,11 +393,7 @@ pub const Connection = struct {
         selected_server.reconnects += 1;
 
         // Establish connection (under mutex for consistent state management)
-        self.establishConnection(selected_server) catch |err| {
-            self.status = .closed;
-            self.cleanupFailedConnection(err, true);
-            return err;
-        };
+        try self.establishConnection(selected_server);
 
         // Socket is now established and connection state is set up
         self.should_stop.store(false, .monotonic);
@@ -404,12 +405,7 @@ pub const Connection = struct {
         self.flusher_thread = try std.Thread.spawn(.{}, flusherLoop, .{self});
 
         // Wait for handshake completion
-        self.waitForHandshakeCompletion() catch |err| {
-            // Clean up failed handshake state and close socket
-            self.status = .closed;
-            self.cleanupFailedConnection(err, true);
-            return err;
-        };
+        try self.waitForHandshakeCompletion();
 
         // Handshake completed successfully
         self.status = .connected;
@@ -1209,6 +1205,12 @@ pub const Connection = struct {
         // Get client name from options or use default
         const client_name = self.options.name orelse build_options.name;
 
+        // Get authentication token (dynamic handler takes precedence)
+        const auth_token = if (self.options.token_handler) |handler|
+            handler()
+        else
+            self.options.token;
+
         // Create CONNECT JSON object
         const connect_obj = .{
             .verbose = self.options.verbose,
@@ -1219,6 +1221,7 @@ pub const Connection = struct {
             .lang = build_options.lang,
             .version = build_options.version,
             .protocol = 1,
+            .auth_token = auth_token,
         };
 
         try buffer.writer().writeAll("CONNECT ");
@@ -1324,7 +1327,15 @@ pub const Connection = struct {
 
         // Handle handshake failure
         if (self.handshake_state.isWaiting()) {
-            self.handshake_error = ConnectionError.AuthFailed;
+            // Check if this is an authentication error
+            if (std.mem.containsAtLeast(u8, err_msg, 1, "Authorization Violation") or
+                std.mem.containsAtLeast(u8, err_msg, 1, "authorization violation") or
+                std.mem.containsAtLeast(u8, err_msg, 1, "authentication"))
+            {
+                self.handshake_error = ConnectionError.AuthFailed;
+            } else {
+                self.handshake_error = ConnectionError.ConnectionFailed;
+            }
             self.handshake_state = .failed;
             self.handshake_cond.broadcast(); // Signal handshake failure
             log.debug("Handshake failed due to server error: {s}", .{err_msg});
