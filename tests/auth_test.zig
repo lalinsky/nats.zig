@@ -78,8 +78,8 @@ test "token authentication failure" {
         try std.testing.expect(false);
     } else |err| {
         std.log.info("Got error: {}", .{err});
-        // Accept either AuthFailed or ConnectionFailed for now
-        try std.testing.expect(err == nats.ConnectionError.AuthFailed or err == nats.ConnectionError.ConnectionFailed);
+        // Now we get specific protocol errors
+        try std.testing.expect(err == nats.ProtocolError.AuthorizationViolation);
     }
 }
 
@@ -94,6 +94,6 @@ test "no authentication options against auth server" {
         // Should not reach here
         try std.testing.expect(false);
     } else |err| {
-        try std.testing.expect(err == nats.ConnectionError.AuthFailed);
+        try std.testing.expect(err == nats.ProtocolError.AuthorizationViolation);
     }
 }

@@ -116,7 +116,36 @@ pub const ConnectionError = error{
     NotConnected,
     ManualReconnect,
     StaleConnection,
-} || PublishError || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
+} || PublishError || ProtocolError || std.Thread.SpawnError || std.posix.WriteError || std.posix.ReadError;
+
+// Protocol-specific errors from server -ERR messages (matching nats.go approach)
+pub const ProtocolError = error{
+    // Authentication/Authorization errors
+    AuthorizationViolation, // "Authorization Violation"
+    AuthExpired, // "User Authentication Expired"
+    AuthRevoked, // "User Authentication Revoked"
+    AccountAuthExpired, // "Account Authentication Expired"
+    PermissionViolation, // "Permissions Violation"
+
+    // Connection/Limit errors
+    MaxConnectionsExceeded, // "maximum connections exceeded"
+    ConnectionThrottling, // "Connection throttling is active"
+    MaxPayloadViolation, // "Maximum Payload Violation"
+    MaxSubscriptionsExceeded, // "maximum subscriptions exceeded"
+
+    // Protocol errors
+    SecureConnectionRequired, // "Secure Connection - TLS Required"
+    InvalidClientProtocol, // "invalid client protocol"
+    UnknownProtocolOperation, // "Unknown Protocol Operation"
+    InvalidPublishSubject, // "Invalid Publish Subject"
+    NoRespondersRequiresHeaders, // "no responders requires headers support"
+
+    // Account errors
+    FailedAccountRegistration, // "Failed Account Registration"
+
+    // Generic fallback
+    UnknownServerError, // For unrecognized -ERR messages
+};
 
 pub const ConnectionStatus = enum {
     closed,
@@ -1311,6 +1340,53 @@ pub const Connection = struct {
         // No action needed for now
     }
 
+    /// Maps -ERR message to specific ProtocolError (similar to nats.go approach)
+    fn parseProtocolError(err_msg: []const u8, allocator: std.mem.Allocator) ProtocolError {
+        const lower_err = std.ascii.allocLowerString(allocator, err_msg) catch return ProtocolError.UnknownServerError;
+        defer allocator.free(lower_err);
+
+        // Authentication/Authorization errors
+        if (std.mem.containsAtLeast(u8, lower_err, 1, "authorization violation")) {
+            return ProtocolError.AuthorizationViolation;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "user authentication expired")) {
+            return ProtocolError.AuthExpired;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "user authentication revoked")) {
+            return ProtocolError.AuthRevoked;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "account authentication expired")) {
+            return ProtocolError.AccountAuthExpired;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "permissions violation")) {
+            return ProtocolError.PermissionViolation;
+        }
+        // Connection/Limit errors
+        else if (std.mem.containsAtLeast(u8, lower_err, 1, "maximum connections exceeded")) {
+            return ProtocolError.MaxConnectionsExceeded;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "connection throttling")) {
+            return ProtocolError.ConnectionThrottling;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "maximum payload violation")) {
+            return ProtocolError.MaxPayloadViolation;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "maximum subscriptions exceeded")) {
+            return ProtocolError.MaxSubscriptionsExceeded;
+        }
+        // Protocol errors
+        else if (std.mem.containsAtLeast(u8, lower_err, 1, "secure connection") and
+            std.mem.containsAtLeast(u8, lower_err, 1, "tls required"))
+        {
+            return ProtocolError.SecureConnectionRequired;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "invalid client protocol")) {
+            return ProtocolError.InvalidClientProtocol;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "unknown protocol operation")) {
+            return ProtocolError.UnknownProtocolOperation;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "invalid publish subject")) {
+            return ProtocolError.InvalidPublishSubject;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "no responders requires headers")) {
+            return ProtocolError.NoRespondersRequiresHeaders;
+        } else if (std.mem.containsAtLeast(u8, lower_err, 1, "failed account registration")) {
+            return ProtocolError.FailedAccountRegistration;
+        }
+
+        return ProtocolError.UnknownServerError; // Unrecognized error
+    }
+
     pub fn processErr(self: *Self, err_msg: []const u8) !void {
         if (self.should_stop.load(.acquire)) {
             return error.ShouldStop;
@@ -1323,22 +1399,18 @@ pub const Connection = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        log.err("Received -ERR: {s}", .{err_msg});
+        // Parse the protocol error once
+        const protocol_err = parseProtocolError(err_msg, self.allocator);
+
+        log.err("Server protocol error: {} - {s}", .{ protocol_err, err_msg });
 
         // Handle handshake failure
         if (self.handshake_state.isWaiting()) {
-            // Check if this is an authentication error
-            if (std.mem.containsAtLeast(u8, err_msg, 1, "Authorization Violation") or
-                std.mem.containsAtLeast(u8, err_msg, 1, "authorization violation") or
-                std.mem.containsAtLeast(u8, err_msg, 1, "authentication"))
-            {
-                self.handshake_error = ConnectionError.AuthFailed;
-            } else {
-                self.handshake_error = ConnectionError.ConnectionFailed;
-            }
+            // Propagate specific protocol errors to client
+            self.handshake_error = protocol_err;
             self.handshake_state = .failed;
             self.handshake_cond.broadcast(); // Signal handshake failure
-            log.debug("Handshake failed due to server error: {s}", .{err_msg});
+            log.debug("Handshake failed: {}", .{protocol_err});
             return;
         }
 
