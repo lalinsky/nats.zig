@@ -144,3 +144,94 @@ test "autounsubscribe delivered message counter" {
     try conn.flush();
     try std.testing.expectError(error.Timeout, sub.nextMsg(100));
 }
+
+const ReconnectTracker = struct {
+    var reconnected_called: u32 = 0;
+    var mutex: std.Thread.Mutex = .{};
+
+    fn reset() void {
+        mutex.lock();
+        defer mutex.unlock();
+        reconnected_called = 0;
+    }
+
+    fn reconnectedCallback(conn: *nats.Connection) void {
+        mutex.lock();
+        defer mutex.unlock();
+        reconnected_called += 1;
+        _ = conn;
+    }
+};
+
+test "autounsubscribe with reconnection" {
+    ReconnectTracker.reset();
+
+    const conn = try utils.createConnection(.node1, .{
+        .reconnect = .{
+            .allow_reconnect = true,
+            .reconnect_wait_ms = 100,
+        },
+        .callbacks = .{
+            .reconnected_cb = ReconnectTracker.reconnectedCallback,
+        },
+    });
+    defer utils.closeConnection(conn);
+
+    const sub = try conn.subscribeSync("reconnect.test");
+    defer sub.deinit();
+
+    // Set autounsubscribe limit to 5 messages
+    try sub.autoUnsubscribe(5);
+    try conn.flush();
+
+    // Publish and receive 3 messages before reconnection
+    for (0..3) |i| {
+        var buf: [32]u8 = undefined;
+        const msg_data = try std.fmt.bufPrint(&buf, "pre_reconnect_{d}", .{i});
+        try conn.publish("reconnect.test", msg_data);
+    }
+    try conn.flush();
+
+    // Receive the 3 messages
+    for (0..3) |_| {
+        const msg = try sub.nextMsg(1000);
+        defer msg.deinit();
+    }
+
+    // Verify delivered count before reconnection
+    try std.testing.expectEqual(@as(u64, 3), sub.delivered_msgs.load(.acquire));
+
+    // Trigger manual reconnection
+    try conn.reconnect();
+
+    // Wait for reconnection to complete
+    var timer = try std.time.Timer.start();
+    while (ReconnectTracker.reconnected_called == 0) {
+        if (timer.read() >= 5000 * std.time.ns_per_ms) {
+            return error.ReconnectionTimeout;
+        }
+        std.time.sleep(10 * std.time.ns_per_ms);
+    }
+
+    // Publish more messages after reconnection (should only receive 2 more to reach limit of 5)
+    for (0..10) |i| {
+        var buf: [32]u8 = undefined;
+        const msg_data = try std.fmt.bufPrint(&buf, "post_reconnect_{d}", .{i});
+        try conn.publish("reconnect.test", msg_data);
+    }
+    try conn.flush();
+
+    // Should receive exactly 2 more messages (5 total - 3 already received = 2 remaining)
+    var received_after_reconnect: u32 = 0;
+    for (0..2) |_| {
+        const msg = try sub.nextMsg(1000);
+        defer msg.deinit();
+        received_after_reconnect += 1;
+    }
+
+    try std.testing.expectEqual(@as(u32, 2), received_after_reconnect);
+    try std.testing.expectEqual(@as(u64, 5), sub.delivered_msgs.load(.acquire));
+
+    // Next message should timeout (autounsubscribe limit reached)
+    try std.testing.expectError(error.Timeout, sub.nextMsg(500));
+}

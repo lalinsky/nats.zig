@@ -1666,6 +1666,22 @@ pub const Connection = struct {
         while (iter.next()) |entry| {
             const sub = entry.value_ptr.*;
 
+            // Check autounsubscribe state
+            const max = sub.max_msgs.load(.acquire);
+            const delivered = sub.delivered_msgs.load(.acquire);
+
+            var adjusted_max: ?u64 = null;
+            if (max > 0) {
+                if (delivered < max) {
+                    adjusted_max = max - delivered; // Remaining messages
+                } else {
+                    // Already reached limit - send UNSUB only
+                    try buffer.writer().print("UNSUB {d}\r\n", .{sub.sid});
+                    log.debug("Subscription {d} ({s}) already reached limit, sending UNSUB during reconnect", .{ sub.sid, sub.subject });
+                    continue;
+                }
+            }
+
             // Send SUB command
             if (sub.queue) |queue| {
                 try buffer.writer().print("SUB {s} {s} {d}\r\n", .{ sub.subject, queue, sub.sid });
@@ -1673,7 +1689,13 @@ pub const Connection = struct {
                 try buffer.writer().print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
             }
 
-            log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
+            // Send UNSUB with remaining limit if needed
+            if (adjusted_max) |remaining| {
+                try buffer.writer().print("UNSUB {d} {d}\r\n", .{ sub.sid, remaining });
+                log.debug("Re-subscribed to {s} with sid {d} and autounsubscribe limit {d} (delivered: {d})", .{ sub.subject, sub.sid, remaining, delivered });
+            } else {
+                log.debug("Re-subscribed to {s} with sid {d}", .{ sub.subject, sub.sid });
+            }
         }
 
         // Send all subscription commands via write buffer
