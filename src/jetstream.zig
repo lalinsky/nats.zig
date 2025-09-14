@@ -1206,16 +1206,20 @@ pub const JetStream = struct {
             null;
         errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
 
+        // Validate user-provided deliver_subject (not generated ones)
+        if (config.deliver_subject != null) {
+            try validation.validateSubject(config.deliver_subject.?);
+        }
+
         if (generated_deliver_subject) |ds| {
             config.deliver_subject = ds;
         }
 
-        const deliver_subject = config.deliver_subject.?;
-        try validation.validateSubject(deliver_subject);
-
         // Create or get consumer with complete config
         var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, null);
         defer consumer_info.deinit();
+
+        const deliver_subject = consumer_info.value.config.deliver_subject.?;
 
         // Define the handler inline to avoid the two-level context issue
         const JSHandler = struct {
@@ -1299,15 +1303,21 @@ pub const JetStream = struct {
 
         defer if (options.stream == null and subject != null) self.nc.allocator.free(stream_name);
 
-        // Generate deliver_subject if not provided in the config
-        const generated_deliver_subject = if (options.config) |cfg|
-            if (cfg.deliver_subject == null) try inbox.newInbox(self.nc.allocator) else null
-        else
-            try inbox.newInbox(self.nc.allocator);
-        errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
-
         // Prepare config with deliver_subject if needed
         var config = options.config orelse ConsumerConfig{};
+
+        // Validate user-provided deliver_subject (not generated ones)
+        if (config.deliver_subject != null) {
+            try validation.validateSubject(config.deliver_subject.?);
+        }
+
+        // Generate deliver_subject if not provided in the config
+        const generated_deliver_subject = if (config.deliver_subject == null)
+            try inbox.newInbox(self.nc.allocator)
+        else
+            null;
+        errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
+
         if (generated_deliver_subject) |ds| {
             config.deliver_subject = ds;
         }
@@ -1317,7 +1327,6 @@ pub const JetStream = struct {
         defer consumer_info.deinit();
 
         const deliver_subject = consumer_info.value.config.deliver_subject.?;
-        try validation.validateSubject(deliver_subject);
 
         // Create synchronous subscription (no callback handler)
         const subscription = try self.nc.subscribeSync(deliver_subject);
@@ -1346,35 +1355,30 @@ pub const JetStream = struct {
 
         defer if (options.stream == null and subject != null) self.nc.allocator.free(stream_name);
 
-        // Create or get consumer with queue group
-        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, options.config, false, queue);
-        errdefer consumer_info.deinit();
+        // Prepare config with deliver_subject if needed
+        var config = options.config orelse ConsumerConfig{};
 
-        // Generate deliver_subject if not provided in the consumer config
-        const generated_deliver_subject = if (consumer_info.value.config.deliver_subject == null)
+        // Validate user-provided deliver_subject (not generated ones)
+        if (config.deliver_subject != null) {
+            try validation.validateSubject(config.deliver_subject.?);
+        }
+
+        // Generate deliver_subject if not provided in the config
+        const generated_deliver_subject = if (config.deliver_subject == null)
             try inbox.newInbox(self.nc.allocator)
         else
             null;
         errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
 
-        const deliver_subject = consumer_info.value.config.deliver_subject orelse generated_deliver_subject.?;
-        try validation.validateSubject(deliver_subject);
-
-        // Update consumer config with delivery subject if we generated one
-        if (generated_deliver_subject != null) {
-            var updated_config = consumer_info.value.config;
-            updated_config.deliver_subject = deliver_subject;
-
-            // Ensure push consumer fields are properly set
-            updated_config.max_waiting = null; // Don't send max_waiting for push consumers
-            updated_config.max_batch = null;
-            updated_config.max_expires = null;
-
-            // Update the consumer with the delivery subject
-            consumer_info.deinit();
-            consumer_info = try self.addConsumer(stream_name, updated_config);
+        if (generated_deliver_subject) |ds| {
+            config.deliver_subject = ds;
         }
-        defer consumer_info.deinit(); // Cleanup the final consumer_info
+
+        // Create or get consumer with queue group
+        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, queue);
+        defer consumer_info.deinit();
+
+        const deliver_subject = consumer_info.value.config.deliver_subject.?;
 
         // Define the handler inline similar to subscribe()
         const JSHandler = struct {
