@@ -459,10 +459,9 @@ pub const ObjectStore = struct {
             .deliver_policy = .all,
             .ack_policy = .none,
             .max_ack_pending = 0,
-            .filter_subjects = &.{chunk_subject},
         };
 
-        const sub = try self.js.subscribeSync(null, .{
+        const sub = try self.js.subscribeSync(chunk_subject, .{
             .stream = self.stream_name,
             .config = consumer_config,
         });
@@ -603,10 +602,9 @@ pub const ObjectStore = struct {
             .deliver_policy = .last_per_subject,
             .ack_policy = .none,
             .max_ack_pending = 0,
-            .filter_subjects = &.{meta_filter},
         };
 
-        const sub = try self.js.subscribeSync(null, .{
+        const sub = try self.js.subscribeSync(meta_filter, .{
             .stream = self.stream_name,
             .config = consumer_config,
         });

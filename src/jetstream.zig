@@ -561,15 +561,6 @@ pub const SubscribeOptions = struct {
 
     /// Manual acknowledgment mode (default: false = auto-ack like nats.c)
     manual_ack: bool = false,
-
-    /// Enable ordered consumer mode
-    ordered_consumer: bool = false,
-
-    /// Idle heartbeat interval in nanoseconds
-    idle_heartbeat: ?u64 = null,
-
-    /// Enable flow control
-    flow_control: bool = false,
 };
 
 /// Options for pull subscriptions
@@ -579,15 +570,6 @@ pub const PullSubscribeOptions = struct {
 
     /// Full consumer configuration
     config: ?ConsumerConfig = null,
-
-    /// Maximum waiting pull requests (default: 512)
-    max_waiting: ?i64 = null,
-
-    /// Maximum batch size for fetch operations
-    max_batch: ?i64 = null,
-
-    /// Maximum expiry time for pull requests
-    max_expires: ?u64 = null,
 };
 
 pub const JetStreamOptions = struct {
@@ -919,7 +901,9 @@ pub const JetStream = struct {
             config: ConsumerConfig,
         }{ .stream_name = stream_name, .config = config };
 
-        const config_json = try std.json.stringifyAlloc(self.nc.allocator, request_payload, .{});
+        const config_json = try std.json.stringifyAlloc(self.nc.allocator, request_payload, .{
+            .emit_null_optional_fields = false,
+        });
         defer self.nc.allocator.free(config_json);
 
         const msg = try self.sendRequest(subject, config_json);
@@ -1315,30 +1299,25 @@ pub const JetStream = struct {
 
         defer if (options.stream == null and subject != null) self.nc.allocator.free(stream_name);
 
-        // Create or get consumer
-        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, options.config, false, null);
-        defer consumer_info.deinit();
-
-        // Generate deliver_subject if not provided in the consumer config
-        const generated_deliver_subject = if (consumer_info.value.config.deliver_subject == null)
-            try inbox.newInbox(self.nc.allocator)
+        // Generate deliver_subject if not provided in the config
+        const generated_deliver_subject = if (options.config) |cfg|
+            if (cfg.deliver_subject == null) try inbox.newInbox(self.nc.allocator) else null
         else
-            null;
+            try inbox.newInbox(self.nc.allocator);
         errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
 
-        const deliver_subject = consumer_info.value.config.deliver_subject orelse generated_deliver_subject.?;
-        try validation.validateSubject(deliver_subject);
-
-        // Update consumer config with delivery subject if we generated one
-        if (generated_deliver_subject != null) {
-            var updated_config = consumer_info.value.config;
-            updated_config.deliver_subject = deliver_subject;
-
-            // Update the consumer with the delivery subject
-            consumer_info.deinit();
-            consumer_info = try self.addConsumer(stream_name, updated_config);
+        // Prepare config with deliver_subject if needed
+        var config = options.config orelse ConsumerConfig{};
+        if (generated_deliver_subject) |ds| {
+            config.deliver_subject = ds;
         }
-        defer consumer_info.deinit(); // Cleanup the final consumer_info
+
+        // Create or get consumer with proper config
+        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, null);
+        defer consumer_info.deinit();
+
+        const deliver_subject = consumer_info.value.config.deliver_subject.?;
+        try validation.validateSubject(deliver_subject);
 
         // Create synchronous subscription (no callback handler)
         const subscription = try self.nc.subscribeSync(deliver_subject);
@@ -1385,6 +1364,11 @@ pub const JetStream = struct {
         if (generated_deliver_subject != null) {
             var updated_config = consumer_info.value.config;
             updated_config.deliver_subject = deliver_subject;
+
+            // Ensure push consumer fields are properly set
+            updated_config.max_waiting = null; // Don't send max_waiting for push consumers
+            updated_config.max_batch = null;
+            updated_config.max_expires = null;
 
             // Update the consumer with the delivery subject
             consumer_info.deinit();
