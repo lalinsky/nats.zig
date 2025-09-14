@@ -31,14 +31,10 @@ test "JetStream pull consumer basic fetch" {
     var stream_info = try js.addStream(stream_config);
     defer stream_info.deinit();
 
-    // Create a pull consumer
-    const consumer_config = ConsumerConfig{
-        .durable_name = consumer_name,
-        .ack_policy = .explicit,
-        .filter_subject = "test.pull.*",
-    };
-
-    var subscription = try js.pullSubscribe(stream_name, consumer_config);
+    // Create a pull consumer (ack_policy defaults to .explicit)
+    var subscription = try js.pullSubscribe("test.pull.*", consumer_name, .{
+        .stream = stream_name,
+    });
     defer subscription.deinit();
 
     // Publish some test messages

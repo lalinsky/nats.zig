@@ -459,10 +459,12 @@ pub const ObjectStore = struct {
             .deliver_policy = .all,
             .ack_policy = .none,
             .max_ack_pending = 0,
-            .filter_subjects = &.{chunk_subject},
         };
 
-        const sub = try self.js.subscribeSync(self.stream_name, consumer_config);
+        const sub = try self.js.subscribeSync(chunk_subject, .{
+            .stream = self.stream_name,
+            .config = consumer_config,
+        });
 
         // Create result with subscription
         return ObjectResult.init(arena_allocator, obj_info, sub, arena);
@@ -600,10 +602,12 @@ pub const ObjectStore = struct {
             .deliver_policy = .last_per_subject,
             .ack_policy = .none,
             .max_ack_pending = 0,
-            .filter_subjects = &.{meta_filter},
         };
 
-        const sub = try self.js.subscribeSync(self.stream_name, consumer_config);
+        const sub = try self.js.subscribeSync(meta_filter, .{
+            .stream = self.stream_name,
+            .config = consumer_config,
+        });
         defer sub.deinit();
 
         const arena = try self.allocator.create(std.heap.ArenaAllocator);

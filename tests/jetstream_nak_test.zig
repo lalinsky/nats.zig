@@ -88,15 +88,14 @@ test "NAK redelivery with delivery count verification" {
         }
     };
 
-    // Create push consumer with limited redeliveries
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "nak_test_consumer",
-        .deliver_subject = "push.nak.test",
-        .ack_policy = .explicit,
-        .max_deliver = 3, // Allow up to 3 delivery attempts
-    };
-
-    var push_sub = try js.subscribe("TEST_NAK_STREAM", consumer_config, NakHandler.handle, .{&test_data});
+    // Create push consumer with limited redeliveries (deliver_subject auto-generated, ack_policy defaults to .explicit)
+    var push_sub = try js.subscribe("test.nak.*", NakHandler.handle, .{&test_data}, .{
+        .stream = "TEST_NAK_STREAM",
+        .durable = "nak_test_consumer",
+        .config = .{
+            .max_deliver = 3, // Allow up to 3 delivery attempts
+        },
+    });
     defer push_sub.deinit();
 
     // Publish a test message
@@ -194,15 +193,14 @@ test "NAK with max delivery limit" {
         }
     };
 
-    // Consumer with max_deliver = 2 (original + 1 redelivery)
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "nak_limit_consumer",
-        .deliver_subject = "push.nak.limit",
-        .ack_policy = .explicit,
-        .max_deliver = 2,
-    };
-
-    var push_sub = try js.subscribe("TEST_NAK_LIMIT_STREAM", consumer_config, AlwaysNakHandler.handle, .{&test_data});
+    var push_sub = try js.subscribe("test.nak.limit.*", AlwaysNakHandler.handle, .{&test_data}, .{
+        .stream = "TEST_NAK_LIMIT_STREAM",
+        .durable = "nak_limit_consumer",
+        .config = .{
+            .deliver_policy = .all,
+            .max_deliver = 2,
+        },
+    });
     defer push_sub.deinit();
 
     // Publish test message
@@ -300,14 +298,13 @@ test "JetStream message metadata parsing" {
         }
     };
 
-    // Create consumer
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "metadata_consumer",
-        .deliver_subject = "push.metadata.test",
-        .ack_policy = .explicit,
-    };
-
-    var push_sub = try js.subscribe("TEST_METADATA_STREAM", consumer_config, MetadataHandler.handle, .{ &received_message, &metadata_verified, &mutex });
+    var push_sub = try js.subscribe("test.metadata.*", MetadataHandler.handle, .{ &received_message, &metadata_verified, &mutex }, .{
+        .stream = "TEST_METADATA_STREAM",
+        .durable = "metadata_consumer",
+        .config = .{
+            .deliver_policy = .all,
+        },
+    });
     defer push_sub.deinit();
 
     // Publish a test message
@@ -409,15 +406,14 @@ test "NAK with delay redelivery timing" {
         }
     };
 
-    // Create push consumer
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "nak_delay_consumer",
-        .deliver_subject = "push.nak.delay.test",
-        .ack_policy = .explicit,
-        .max_deliver = 3,
-    };
-
-    var push_sub = try js.subscribe("TEST_NAK_DELAY_STREAM", consumer_config, DelayHandler.handle, .{&test_data});
+    var push_sub = try js.subscribe("test.nak.delay.*", DelayHandler.handle, .{&test_data}, .{
+        .stream = "TEST_NAK_DELAY_STREAM",
+        .durable = "nak_delay_consumer",
+        .config = .{
+            .deliver_policy = .all,
+            .max_deliver = 3,
+        },
+    });
     defer push_sub.deinit();
 
     // Publish a test message
@@ -503,15 +499,14 @@ test "NAK with zero delay behaves like regular NAK" {
         }
     };
 
-    // Create push consumer
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "nak_zero_delay_consumer",
-        .deliver_subject = "push.nak.zero.test",
-        .ack_policy = .explicit,
-        .max_deliver = 3,
-    };
-
-    var push_sub = try js.subscribe("TEST_NAK_ZERO_DELAY_STREAM", consumer_config, ZeroDelayHandler.handle, .{ &delivery_count, &mutex });
+    var push_sub = try js.subscribe("test.nak.zero.*", ZeroDelayHandler.handle, .{ &delivery_count, &mutex }, .{
+        .stream = "TEST_NAK_ZERO_DELAY_STREAM",
+        .durable = "nak_zero_delay_consumer",
+        .config = .{
+            .deliver_policy = .all,
+            .max_deliver = 3,
+        },
+    });
     defer push_sub.deinit();
 
     // Publish a test message
