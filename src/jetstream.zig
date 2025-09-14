@@ -1450,6 +1450,59 @@ pub const JetStream = struct {
         return js_sub;
     }
 
+    /// Create a synchronous queue subscription for load balancing across multiple consumers
+    pub fn queueSubscribeSync(self: JetStream, subject: ?[]const u8, queue: []const u8, options: SubscribeOptions) !*JetStreamSubscription {
+        // Resolve stream name
+        const stream_name = if (options.stream) |s|
+            s
+        else if (subject) |s|
+            try self.lookupStreamBySubject(s)
+        else
+            return error.StreamOrSubjectRequired;
+
+        defer if (options.stream == null and subject != null) self.nc.allocator.free(stream_name);
+
+        // Prepare config with deliver_subject if needed
+        var config = options.config orelse ConsumerConfig{};
+
+        // Validate user-provided deliver_subject (not generated ones)
+        if (config.deliver_subject != null) {
+            try validation.validateSubject(config.deliver_subject.?);
+        }
+
+        // Generate deliver_subject if not provided in the config
+        const generated_deliver_subject = if (config.deliver_subject == null)
+            try inbox.newInbox(self.nc.allocator)
+        else
+            null;
+        errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
+
+        if (generated_deliver_subject) |ds| {
+            config.deliver_subject = ds;
+        }
+
+        // Create or get consumer with queue group
+        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, queue);
+        defer consumer_info.deinit();
+
+        const deliver_subject = consumer_info.value.config.deliver_subject.?;
+
+        // Create synchronous subscription with queue group
+        const subscription = try self.nc.queueSubscribeSync(deliver_subject, queue);
+        errdefer self.nc.unsubscribe(subscription);
+
+        // Create JetStream subscription wrapper
+        const js_sub = try self.nc.allocator.create(JetStreamSubscription);
+        js_sub.* = JetStreamSubscription{
+            .subscription = subscription,
+            .js = self,
+            .consumer_info = consumer_info,
+            .deliver_subject_owned = generated_deliver_subject,
+        };
+
+        return js_sub;
+    }
+
     /// Create a pull subscription for the specified stream
     pub fn pullSubscribe(self: JetStream, subject: ?[]const u8, durable: []const u8, options: PullSubscribeOptions) !*PullSubscription {
         // Resolve stream name
