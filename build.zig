@@ -120,9 +120,11 @@ pub fn build(b: *std.Build) void {
     for (example_files) |example_info| {
         const exe = b.addExecutable(.{
             .name = example_info.name,
-            .root_source_file = b.path(example_info.file),
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(example_info.file),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
         exe.root_module.addImport("nats", lib_mod);
 
@@ -144,9 +146,11 @@ pub fn build(b: *std.Build) void {
     for (benchmark_files) |benchmark_info| {
         const exe = b.addExecutable(.{
             .name = benchmark_info.name,
-            .root_source_file = b.path(benchmark_info.file),
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(benchmark_info.file),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
         exe.root_module.addImport("nats", lib_mod);
 
@@ -158,9 +162,11 @@ pub fn build(b: *std.Build) void {
     // C benchmarks (require libnats)
     const c_echo_server = b.addExecutable(.{
         .name = "echo_server_c",
-        .root_source_file = null,
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     c_echo_server.addCSourceFile(.{ .file = b.path("benchmarks/echo_server.c"), .flags = &.{} });
     c_echo_server.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
@@ -169,9 +175,11 @@ pub fn build(b: *std.Build) void {
 
     const c_echo_client = b.addExecutable(.{
         .name = "echo_client_c",
-        .root_source_file = null,
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     c_echo_client.addCSourceFile(.{ .file = b.path("benchmarks/echo_client.c"), .flags = &.{} });
     c_echo_client.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
@@ -180,9 +188,11 @@ pub fn build(b: *std.Build) void {
 
     const c_publisher = b.addExecutable(.{
         .name = "publisher_c",
-        .root_source_file = null,
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     c_publisher.addCSourceFile(.{ .file = b.path("benchmarks/publisher.c"), .flags = &.{} });
     c_publisher.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
@@ -191,9 +201,11 @@ pub fn build(b: *std.Build) void {
 
     const c_subscriber = b.addExecutable(.{
         .name = "subscriber_c",
-        .root_source_file = null,
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     c_subscriber.addCSourceFile(.{ .file = b.path("benchmarks/subscriber.c"), .flags = &.{} });
     c_subscriber.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
