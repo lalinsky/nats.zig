@@ -49,14 +49,13 @@ test "ack should succeed on first call" {
         }
     };
 
-    // Create consumer
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "dup_ack_consumer",
-        .deliver_subject = "push.dup.ack",
-        .ack_policy = .explicit,
-    };
-
-    var push_sub = try js.subscribe("TEST_DUP_ACK_STREAM", consumer_config, AckHandler.handle, .{&test_data});
+    var push_sub = try js.subscribe("test.dup.ack.*", AckHandler.handle, .{&test_data}, .{
+        .stream = "TEST_DUP_ACK_STREAM",
+        .durable = "dup_ack_consumer",
+        .config = .{
+            .deliver_policy = .all,
+        },
+    });
     defer push_sub.deinit();
 
     // Publish test message
@@ -135,14 +134,13 @@ test "ack should fail on second call" {
         }
     };
 
-    // Create consumer
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "dup_ack2_consumer",
-        .deliver_subject = "push.dup.ack2",
-        .ack_policy = .explicit,
-    };
-
-    var push_sub = try js.subscribe("TEST_DUP_ACK2_STREAM", consumer_config, DoubleAckHandler.handle, .{&test_data});
+    var push_sub = try js.subscribe("test.dup.ack2.*", DoubleAckHandler.handle, .{&test_data}, .{
+        .stream = "TEST_DUP_ACK2_STREAM",
+        .durable = "dup_ack2_consumer",
+        .config = .{
+            .deliver_policy = .all,
+        },
+    });
     defer push_sub.deinit();
 
     // Publish test message
@@ -222,14 +220,13 @@ test "nak should fail after ack" {
         }
     };
 
-    // Create consumer
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "ack_nak_consumer",
-        .deliver_subject = "push.ack.nak",
-        .ack_policy = .explicit,
-    };
-
-    var push_sub = try js.subscribe("TEST_ACK_NAK_STREAM", consumer_config, AckNakHandler.handle, .{&test_data});
+    var push_sub = try js.subscribe("test.ack.nak.*", AckNakHandler.handle, .{&test_data}, .{
+        .stream = "TEST_ACK_NAK_STREAM",
+        .durable = "ack_nak_consumer",
+        .config = .{
+            .deliver_policy = .all,
+        },
+    });
     defer push_sub.deinit();
 
     // Publish test message
@@ -316,14 +313,13 @@ test "inProgress can be called multiple times" {
         }
     };
 
-    // Create consumer
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "progress_consumer",
-        .deliver_subject = "push.progress",
-        .ack_policy = .explicit,
-    };
-
-    var push_sub = try js.subscribe("TEST_PROGRESS_STREAM", consumer_config, ProgressHandler.handle, .{&test_data});
+    var push_sub = try js.subscribe("test.progress.*", ProgressHandler.handle, .{&test_data}, .{
+        .stream = "TEST_PROGRESS_STREAM",
+        .durable = "progress_consumer",
+        .config = .{
+            .deliver_policy = .all,
+        },
+    });
     defer push_sub.deinit();
 
     // Publish test message

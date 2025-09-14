@@ -38,17 +38,14 @@ test "basic push subscription" {
         }
     };
 
-    // Create push consumer configuration
-    // Note: deliver_subject must not overlap with stream subjects to avoid cycles
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "test_push_consumer",
-        .deliver_subject = "push.orders.processed", // Key for push consumer - different from stream subjects
-        .ack_policy = .explicit,
-        .deliver_policy = .all,
-    };
-
-    // Subscribe to push consumer
-    var push_sub = try js.subscribe("TEST_PUSH_STREAM", consumer_config, MessageHandler.handle, .{&message_count});
+    // Subscribe to push consumer (deliver_subject auto-generated, ack_policy defaults to .explicit)
+    var push_sub = try js.subscribe("orders.*", MessageHandler.handle, .{&message_count}, .{
+        .stream = "TEST_PUSH_STREAM",
+        .durable = "test_push_consumer",
+        .config = .{
+            .deliver_policy = .all,
+        },
+    });
     defer push_sub.deinit();
 
     // Publish some test messages
@@ -96,18 +93,17 @@ test "push subscription with flow control" {
         }
     };
 
-    // Create push consumer with flow control enabled
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "task_processor",
-        .deliver_subject = "push.tasks.process", // Different from stream subjects
-        .ack_policy = .explicit,
-        .deliver_policy = .all,
-        .flow_control = true, // Enable flow control
-        .idle_heartbeat = 30_000_000_000, // 30s - required when flow_control=true
-        .max_ack_pending = 10, // Limit pending acknowledgments
-    };
-
-    var push_sub = try js.subscribe("TEST_PUSH_FC_STREAM", consumer_config, TaskHandler.handle, .{&processed_count});
+    // Subscribe with flow control enabled (deliver_subject auto-generated)
+    var push_sub = try js.subscribe("tasks.*", TaskHandler.handle, .{&processed_count}, .{
+        .stream = "TEST_PUSH_FC_STREAM",
+        .durable = "task_processor",
+        .config = .{
+            .deliver_policy = .all,
+            .flow_control = true, // Enable flow control
+            .idle_heartbeat = 30_000_000_000, // 30s - required when flow_control=true
+            .max_ack_pending = 10, // Limit pending acknowledgments
+        },
+    });
     defer push_sub.deinit();
 
     // Publish several tasks
@@ -130,21 +126,16 @@ test "push subscription error handling" {
 
     var js = conn.jetstream(.{});
 
-    // Try to create push subscription without deliver_subject - should auto-generate one
-    // but fail with stream not found error
-    const config_without_deliver_subject = nats.ConsumerConfig{
-        .durable_name = "test_consumer",
-        .ack_policy = .explicit,
-        // Missing deliver_subject - should be auto-generated
-    };
-
     const DummyHandler = struct {
         fn handle(js_msg: *nats.JetStreamMessage) void {
             defer js_msg.deinit();
         }
     };
 
-    // This should fail with StreamNotFound error since auto-generated deliver_subject should work
-    const result = js.subscribe("NONEXISTENT_STREAM", config_without_deliver_subject, DummyHandler.handle, .{});
+    // This should fail with StreamNotFound error since stream doesn't exist
+    const result = js.subscribe("nonexistent.*", DummyHandler.handle, .{}, .{
+        .stream = "NONEXISTENT_STREAM",
+        .durable = "test_consumer",
+    });
     try testing.expectError(error.StreamNotFound, result);
 }

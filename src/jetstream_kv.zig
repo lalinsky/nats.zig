@@ -214,7 +214,10 @@ pub const KVWatcher = struct {
             .filter_subjects = subjects,
         };
 
-        var sub = try kv.js.subscribeSync(kv.stream_name, consumer_config);
+        var sub = try kv.js.subscribeSync(null, .{
+            .stream = kv.stream_name,
+            .config = consumer_config,
+        });
         errdefer sub.deinit();
 
         // Match C logic: only use num_pending to detect empty streams
