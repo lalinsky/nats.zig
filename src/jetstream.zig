@@ -1217,7 +1217,7 @@ pub const JetStream = struct {
 
         // Create or get consumer with complete config
         var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, null);
-        defer consumer_info.deinit();
+        errdefer consumer_info.deinit();
 
         const deliver_subject = consumer_info.value.config.deliver_subject.?;
 
@@ -1324,7 +1324,7 @@ pub const JetStream = struct {
 
         // Create or get consumer with proper config
         var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, null);
-        defer consumer_info.deinit();
+        errdefer consumer_info.deinit();
 
         const deliver_subject = consumer_info.value.config.deliver_subject.?;
 
@@ -1376,7 +1376,7 @@ pub const JetStream = struct {
 
         // Create or get consumer with queue group
         var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, queue);
-        defer consumer_info.deinit();
+        errdefer consumer_info.deinit();
 
         const deliver_subject = consumer_info.value.config.deliver_subject.?;
 
@@ -1483,7 +1483,7 @@ pub const JetStream = struct {
 
         // Create or get consumer with queue group
         var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, queue);
-        defer consumer_info.deinit();
+        errdefer consumer_info.deinit();
 
         const deliver_subject = consumer_info.value.config.deliver_subject.?;
 
