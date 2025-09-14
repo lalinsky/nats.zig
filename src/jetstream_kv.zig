@@ -736,7 +736,7 @@ pub const KV = struct {
             for (filter_subjects.items) |subject| {
                 self.js.nc.allocator.free(subject);
             }
-            filter_subjects.deinit();
+            filter_subjects.deinit(self.js.nc.allocator);
         }
 
         // Convert filters to full subjects

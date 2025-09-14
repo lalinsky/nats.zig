@@ -132,8 +132,9 @@ fn ChunkPool(comptime T: type, comptime chunk_size: usize) type {
         const Self = @This();
 
         fn init(allocator: Allocator, max_size: usize) Self {
+            _ = allocator;
             return .{
-                .chunks = std.ArrayList(*Chunk).init(allocator),
+                .chunks = std.ArrayList(*Chunk){},
                 .max_size = max_size,
             };
         }
@@ -1149,7 +1150,7 @@ test "buffer moveToBuffer with multiple chunks" {
     try std.testing.expectEqual(total_bytes, dest.getBytesAvailable());
 
     // Read and verify the moved data by consuming all chunks
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.ArrayList(u8){};
     defer result.deinit(allocator);
 
     while (dest.getBytesAvailable() > 0) {

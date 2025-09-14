@@ -79,13 +79,13 @@ pub const Parser = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .arg_buf_rec = std.ArrayList(u8).init(allocator),
+            .arg_buf_rec = std.ArrayList(u8){},
             .msg_pool = MessagePool.init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.arg_buf_rec.deinit();
+        self.arg_buf_rec.deinit(self.allocator);
         if (self.ma.msg) |msg| {
             msg.deinit();
         }
@@ -486,7 +486,7 @@ pub const Parser = struct {
             // Set up arg_buf for next parse() call
             try self.setupArgBuf();
             const remaining_args = buf[self.after_space .. i - self.drop];
-            try self.arg_buf.?.appendSlice(remaining_args);
+            try self.arg_buf.?.appendSlice(self.allocator, remaining_args);
         }
     }
 

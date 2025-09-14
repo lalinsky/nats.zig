@@ -109,7 +109,7 @@ pub const JetStreamMessage = struct {
                 if (delay > 0) {
                     // Convert milliseconds to nanoseconds for the protocol message
                     const delay_ns = delay * std.time.ns_per_ms;
-                    const formatted = try std.fmt.bufPrint(&ack_message, "{s} {{\"delay\": {}}}", .{ ack_type.toString(), delay_ns });
+                    const formatted = try std.fmt.bufPrint(&ack_message, "{s} {{\"delay\": {d}}}", .{ ack_type.toString(), delay_ns });
                     break :blk formatted;
                 } else {
                     break :blk ack_type.toString();

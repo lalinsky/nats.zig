@@ -24,7 +24,7 @@ test "pending_msgs counter sync subscription" {
     while (waited_ms < 1000) : (waited_ms += 10) {
         if (sub.pending_msgs.load(.acquire) == 1 and
             sub.pending_bytes.load(.acquire) == msg1_data.len) break;
-        std.time.sleep(10 * std.time.ns_per_ms);
+        std.Thread.sleep(10 * std.time.ns_per_ms);
     }
 
     // Should have 1 pending message and correct bytes
@@ -40,7 +40,7 @@ test "pending_msgs counter sync subscription" {
     while (waited_ms < 1000) : (waited_ms += 10) {
         if (sub.pending_msgs.load(.acquire) == 2 and
             sub.pending_bytes.load(.acquire) == msg1_data.len + msg2_data.len) break;
-        std.time.sleep(10 * std.time.ns_per_ms);
+        std.Thread.sleep(10 * std.time.ns_per_ms);
     }
 
     // Should have 2 pending messages and correct total bytes
@@ -84,7 +84,7 @@ test "pending_msgs counter async subscription" {
             _ = ctx.message_count_ptr.fetchAdd(1, .acq_rel);
             _ = ctx.total_bytes_ptr.fetchAdd(@intCast(msg.data.len), .acq_rel);
             // Add a small delay to simulate processing
-            std.time.sleep(5 * std.time.ns_per_ms);
+            std.Thread.sleep(5 * std.time.ns_per_ms);
             _ = ctx.processed_count_ptr.fetchAdd(1, .acq_rel);
         }
     }.handle;
@@ -111,7 +111,7 @@ test "pending_msgs counter async subscription" {
     try conn.flush();
 
     // Give a moment for messages to arrive but not fully process
-    std.time.sleep(20 * std.time.ns_per_ms);
+    std.Thread.sleep(20 * std.time.ns_per_ms);
 
     // Should have some pending messages (might be processing)
     // Note: We can't assert an exact number here since processing might start immediately
@@ -119,7 +119,7 @@ test "pending_msgs counter async subscription" {
     // Wait for all messages to be processed
     var attempts: u32 = 0;
     while (processed_count.load(.acquire) < 3 and attempts < 200) {
-        std.time.sleep(10 * std.time.ns_per_ms);
+        std.Thread.sleep(10 * std.time.ns_per_ms);
         attempts += 1;
     }
 
