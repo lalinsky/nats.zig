@@ -87,9 +87,11 @@ pub fn build(b: *std.Build) void {
 
     // Integration tests (require Docker and NATS server)
     const integration_tests = b.addTest(.{
-        .root_source_file = b.path("tests/all_tests.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/all_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
     integration_tests.root_module.addImport("nats", lib_mod);
