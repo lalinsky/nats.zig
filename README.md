@@ -4,7 +4,11 @@ A Zig client library for NATS, the cloud-native messaging system.
 
 ## Development Status
 
-This project is under active development and is not yet complete. The goal is to be as feature complete as the official NATS client libraries. It is based on the NATS C and Go libraries.
+This library is mostly feature-complete but lacks production testing. The API is functional and covers the core NATS and JetStream features, but may still undergo changes based on feedback.
+
+**Testers are welcome!** If you're interested in testing the library in your projects, please report any issues or feedback. The goal is to be as feature complete as the official NATS client libraries. It is based on the NATS C and Go libraries.
+
+⚠️ **Note:** While the library is mostly finished, the API may still change before the 1.0 release. Use at your own discretion in production environments.
 
 ## Installation
 
