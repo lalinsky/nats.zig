@@ -142,7 +142,7 @@ fn ChunkPool(comptime T: type, comptime chunk_size: usize) type {
             for (self.chunks.items) |chunk| {
                 allocator.destroy(chunk);
             }
-            self.chunks.deinit();
+            self.chunks.deinit(allocator);
         }
 
         fn get(self: *Self) ?*Chunk {
@@ -150,12 +150,12 @@ fn ChunkPool(comptime T: type, comptime chunk_size: usize) type {
             return self.chunks.pop();
         }
 
-        fn put(self: *Self, chunk: *Chunk) bool {
+        fn put(self: *Self, allocator: Allocator, chunk: *Chunk) bool {
             if (self.chunks.items.len >= self.max_size) {
                 return false;
             }
             chunk.reset();
-            self.chunks.append(chunk) catch return false;
+            self.chunks.append(allocator, chunk) catch return false;
             return true;
         }
     };
@@ -570,7 +570,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         }
 
         fn recycleChunk(self: *Self, chunk: *Chunk) void {
-            if (!self.chunk_pool.put(chunk)) {
+            if (!self.chunk_pool.put(self.allocator, chunk)) {
                 self.allocator.destroy(chunk);
                 self.total_chunks -= 1;
             }
@@ -1021,7 +1021,7 @@ test "blocking pop handles queue closure" {
     // Start a thread that will close the queue after a delay
     const Closer = struct {
         fn run(q: *Queue) !void {
-            std.time.sleep(10 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
             q.close();
         }
     };
@@ -1045,7 +1045,7 @@ test "getSlice handles queue closure with indefinite wait" {
     // Start a thread that will close the queue after a delay
     const Closer = struct {
         fn run(q: *Queue) !void {
-            std.time.sleep(10 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
             q.close();
         }
     };
@@ -1150,12 +1150,12 @@ test "buffer moveToBuffer with multiple chunks" {
 
     // Read and verify the moved data by consuming all chunks
     var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    defer result.deinit(allocator);
 
     while (dest.getBytesAvailable() > 0) {
         var view_opt = dest.tryGetSlice();
         if (view_opt) |*view| {
-            try result.appendSlice(view.data);
+            try result.appendSlice(allocator, view.data);
             view.consume(view.data.len);
         } else {
             break;
@@ -1286,7 +1286,7 @@ test "blocking operations during freeze" {
     // Start a thread that will resume after a delay
     const Resumer = struct {
         fn run(q: *Queue) !void {
-            std.time.sleep(10 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
             q.unfreeze();
             try q.push(99);
         }

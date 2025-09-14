@@ -108,7 +108,7 @@ pub fn main() !void {
 
     // Initialize log buffer for capturing test output
     var log_buffer = std.ArrayList(u8).init(allocator);
-    defer log_buffer.deinit();
+    defer log_buffer.deinit(allocator);
 
     for (builtin.test_functions) |t| {
         if (isSetup(t)) {

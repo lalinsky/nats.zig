@@ -196,7 +196,7 @@ pub const Parser = struct {
                         else => {
                             // Only accumulate if we're in split buffer mode
                             if (self.arg_buf) |arg_buf| {
-                                try arg_buf.append(b);
+                                try arg_buf.append(self.allocator, b);
                             }
                         },
                     }
@@ -393,7 +393,7 @@ pub const Parser = struct {
                         else => {
                             // Only accumulate if we're in split buffer mode
                             if (self.arg_buf) |arg_buf| {
-                                try arg_buf.append(b);
+                                try arg_buf.append(self.allocator, b);
                             }
                         },
                     }
@@ -466,7 +466,7 @@ pub const Parser = struct {
                         else => {
                             // Only accumulate if we're in split buffer mode
                             if (self.arg_buf) |arg_buf| {
-                                try arg_buf.append(b);
+                                try arg_buf.append(self.allocator, b);
                             }
                         },
                     }
