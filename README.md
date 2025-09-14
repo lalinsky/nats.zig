@@ -154,6 +154,41 @@ var consumer_info = try js.addConsumer("ORDERS", consumer_config);
 defer consumer_info.deinit();
 ```
 
+### JetStream Push Subscriptions
+
+```zig
+// Push subscription with callback handler
+fn orderHandler(js_msg: *nats.JetStreamMessage, count: *u32) !void {
+    defer js_msg.deinit();
+    count.* += 1;
+    try js_msg.ack(); // Acknowledge message
+    std.debug.print("Order: {s}\n", .{js_msg.data});
+}
+
+var processed: u32 = 0;
+var push_sub = try js.subscribe("orders.*", orderHandler, .{&processed}, .{
+    .stream = "ORDERS",
+    .durable = "order_processor",
+});
+defer push_sub.deinit();
+```
+
+### JetStream Pull Subscriptions
+
+```zig
+// Pull subscription (fetch messages manually)
+var pull_sub = try js.pullSubscribe("orders.*", "batch_processor", .{
+    .stream = "ORDERS",
+});
+defer pull_sub.deinit();
+
+var batch = try pull_sub.fetch(10, 5000); // Fetch up to 10 msgs, 5s timeout
+defer batch.deinit();
+for (batch.messages) |js_msg| {
+    try js_msg.ack();
+}
+```
+
 ## Building
 
 ```bash

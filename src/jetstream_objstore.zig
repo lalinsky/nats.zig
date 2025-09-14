@@ -462,7 +462,10 @@ pub const ObjectStore = struct {
             .filter_subjects = &.{chunk_subject},
         };
 
-        const sub = try self.js.subscribeSync(self.stream_name, consumer_config);
+        const sub = try self.js.subscribeSync(null, .{
+            .stream = self.stream_name,
+            .config = consumer_config,
+        });
 
         // Create result with subscription
         return ObjectResult.init(arena_allocator, obj_info, sub, arena);
@@ -603,7 +606,10 @@ pub const ObjectStore = struct {
             .filter_subjects = &.{meta_filter},
         };
 
-        const sub = try self.js.subscribeSync(self.stream_name, consumer_config);
+        const sub = try self.js.subscribeSync(null, .{
+            .stream = self.stream_name,
+            .config = consumer_config,
+        });
         defer sub.deinit();
 
         const arena = try self.allocator.create(std.heap.ArenaAllocator);

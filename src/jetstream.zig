@@ -198,7 +198,7 @@ pub const ConsumerConfig = struct {
     /// For push consumers this will regularly send an empty mess with Status header 100 and a reply subject
     /// (This field was moved to the end to avoid duplication)
     /// The number of pulls that can be outstanding on a pull consumer
-    max_waiting: i64 = 512,
+    max_waiting: ?i64 = null,
     /// Delivers only the headers of messages in the stream and not the bodies
     headers_only: ?bool = null,
     /// The largest batch property that may be specified when doing a pull on a Pull Consumer
@@ -548,6 +548,48 @@ pub const JetStreamSubscription = struct {
     }
 };
 
+/// Options for push subscriptions (subscribe, subscribeSync, queueSubscribe)
+pub const SubscribeOptions = struct {
+    /// Stream name - auto-discovered from subject if null
+    stream: ?[]const u8 = null,
+
+    /// Durable consumer name - creates durable consumer if provided
+    durable: ?[]const u8 = null,
+
+    /// Full consumer configuration - merged with other options
+    config: ?ConsumerConfig = null,
+
+    /// Manual acknowledgment mode (default: false = auto-ack like nats.c)
+    manual_ack: bool = false,
+
+    /// Enable ordered consumer mode
+    ordered_consumer: bool = false,
+
+    /// Idle heartbeat interval in nanoseconds
+    idle_heartbeat: ?u64 = null,
+
+    /// Enable flow control
+    flow_control: bool = false,
+};
+
+/// Options for pull subscriptions
+pub const PullSubscribeOptions = struct {
+    /// Stream name - auto-discovered from subject if null
+    stream: ?[]const u8 = null,
+
+    /// Full consumer configuration
+    config: ?ConsumerConfig = null,
+
+    /// Maximum waiting pull requests (default: 512)
+    max_waiting: ?i64 = null,
+
+    /// Maximum batch size for fetch operations
+    max_batch: ?i64 = null,
+
+    /// Maximum expiry time for pull requests
+    max_expires: ?u64 = null,
+};
+
 pub const JetStreamOptions = struct {
     request_timeout_ms: u64 = default_request_timeout_ms,
     // Add options here
@@ -587,6 +629,89 @@ pub const JetStream = struct {
 
         // Map specific JetStream error codes to proper error types
         return jetstream_errors.mapErrorCode(info.err_code);
+    }
+
+    /// Lookup stream name by subject pattern
+    fn lookupStreamBySubject(self: JetStream, subject: []const u8) ![]const u8 {
+        try validation.validateSubject(subject);
+
+        // Build the subject filter request
+        const request_payload = struct {
+            subject: []const u8,
+        }{ .subject = subject };
+
+        const request_json = try std.json.stringifyAlloc(self.nc.allocator, request_payload, .{
+            .emit_null_optional_fields = false,
+        });
+        defer self.nc.allocator.free(request_json);
+
+        const msg = try self.sendRequest("STREAM.NAMES", request_json);
+        defer msg.deinit();
+
+        const names_result = try self.parseResponse(StreamNamesResponse, msg);
+        defer names_result.deinit();
+
+        const streams = names_result.value.streams orelse return error.NoStreamMatches;
+
+        if (streams.len == 0) {
+            return error.NoStreamMatches;
+        } else if (streams.len > 1) {
+            return error.MultipleStreamMatches;
+        }
+
+        // Return a copy of the stream name that we own
+        return try self.nc.allocator.dupe(u8, streams[0]);
+    }
+
+    /// Get existing consumer or create new one based on configuration
+    fn getOrCreateConsumer(self: JetStream, stream_name: []const u8, subject: ?[]const u8, durable: ?[]const u8, base_config: ?ConsumerConfig, is_pull: bool, queue: ?[]const u8) !Result(ConsumerInfo) {
+        // Start with base config or empty config
+        var config = base_config orelse ConsumerConfig{};
+
+        // Set consumer name from durable parameter if provided
+        if (durable) |d| {
+            config.name = d;
+            config.durable_name = d; // For backward compatibility
+        }
+
+        // Set subject filter if provided
+        if (subject) |s| {
+            config.filter_subject = s;
+        }
+
+        // Set queue group for push consumers
+        if (queue) |q| {
+            config.deliver_group = q;
+        }
+
+        // Configure for pull vs push consumer
+        if (is_pull) {
+            config.deliver_subject = null;
+            if (config.max_waiting == null) config.max_waiting = 512;
+        } else {
+            // Push consumer - remove pull-only fields
+            config.max_waiting = null; // Don't send max_waiting for push consumers
+            config.max_batch = null;
+            config.max_expires = null;
+        }
+
+        // If durable is provided, try to get existing consumer first
+        if (durable) |consumer_name| {
+            // Try to get existing consumer info
+            if (self.getConsumerInfo(stream_name, consumer_name)) |existing_info| {
+                log.debug("Found existing consumer: {s}", .{consumer_name});
+                return existing_info;
+            } else |err| switch (err) {
+                error.ConsumerNotFound => {
+                    // Consumer doesn't exist, we'll create it below
+                    log.debug("Consumer {s} not found, creating new one", .{consumer_name});
+                },
+                else => return err, // Other errors should be propagated
+            }
+        }
+
+        // Create the consumer
+        return try self.addConsumer(stream_name, config);
     }
 
     /// Parse a response from the server, handling errors if present.
@@ -1077,31 +1202,40 @@ pub const JetStream = struct {
         }
     }
 
-    pub fn subscribe(self: JetStream, stream_name: []const u8, consumer_config: ConsumerConfig, comptime handlerFn: anytype, args: anytype) !*JetStreamSubscription {
-        // Generate deliver_subject if not provided and create push consumer config
-        var push_config = consumer_config;
-        const generated_deliver_subject = if (consumer_config.deliver_subject == null)
+    /// Subscribe to a JetStream push consumer with callback handler
+    pub fn subscribe(self: JetStream, subject: ?[]const u8, comptime handlerFn: anytype, handler_args: anytype, options: SubscribeOptions) !*JetStreamSubscription {
+        // Resolve stream name
+        const stream_name = if (options.stream) |s|
+            s
+        else if (subject) |s|
+            try self.lookupStreamBySubject(s)
+        else
+            return error.StreamOrSubjectRequired;
+
+        defer if (options.stream == null and subject != null) self.nc.allocator.free(stream_name);
+
+        // Prepare consumer config, generating deliver_subject if needed
+        var config = options.config orelse ConsumerConfig{};
+        const generated_deliver_subject = if (config.deliver_subject == null)
             try inbox.newInbox(self.nc.allocator)
         else
             null;
         errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
 
-        const deliver_subject = consumer_config.deliver_subject orelse generated_deliver_subject.?;
+        if (generated_deliver_subject) |ds| {
+            config.deliver_subject = ds;
+        }
+
+        const deliver_subject = config.deliver_subject.?;
         try validation.validateSubject(deliver_subject);
-        push_config.deliver_subject = deliver_subject;
 
-        // Remove pull-only fields from push consumer config
-        push_config.max_waiting = 0; // Push consumers don't support max_waiting
-        push_config.max_batch = null; // Push consumers don't support max_batch
-        push_config.max_expires = null; // Push consumers don't support max_expires
-
-        // Create the push consumer first
-        var consumer_info = try self.addConsumer(stream_name, push_config);
-        errdefer consumer_info.deinit();
+        // Create or get consumer with complete config
+        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, null);
+        defer consumer_info.deinit();
 
         // Define the handler inline to avoid the two-level context issue
         const JSHandler = struct {
-            fn wrappedHandler(msg: *Message, nc: *Connection, user_args: @TypeOf(args)) anyerror!void {
+            fn wrappedHandler(msg: *Message, nc: *Connection, user_args: @TypeOf(handler_args), manual_ack: bool) anyerror!void {
                 // Check for status messages (heartbeats and flow control)
                 if (msg.status_code == STATUS_CONTROL) {
                     // Handle status message internally, don't pass to user callback
@@ -1121,17 +1255,40 @@ pub const JetStream = struct {
 
                 // Call user handler with JetStream message - handler owns cleanup responsibility
                 // Support both void and fallible handlers
+                comptime {
+                    const HandlerType = @TypeOf(handlerFn);
+                    const type_info = @typeInfo(HandlerType);
+                    if (type_info != .@"fn") {
+                        @compileError("Handler must be a function, got: " ++ @typeName(HandlerType));
+                    }
+                }
                 const ReturnType = @typeInfo(@TypeOf(handlerFn)).@"fn".return_type.?;
+
+                // Only auto-ack if callback succeeds (like nats-py)
+                var callback_success = false;
                 if (ReturnType == void) {
                     @call(.auto, handlerFn, .{js_msg} ++ user_args);
+                    callback_success = true;
                 } else {
-                    try @call(.auto, handlerFn, .{js_msg} ++ user_args);
+                    @call(.auto, handlerFn, .{js_msg} ++ user_args) catch |err| {
+                        log.err("User handler failed: {}", .{err});
+                        return; // Don't auto-ack on callback error
+                    };
+                    callback_success = true;
+                }
+
+                // Auto-acknowledge after successful user callback if not manual_ack
+                if (!manual_ack and callback_success) {
+                    js_msg.ack() catch |err| switch (err) {
+                        jetstream_message.AckError.AlreadyAcked => {}, // Ignore already acked (like nats-py)
+                        else => log.err("Auto-ack failed: {}", .{err}),
+                    };
                 }
             }
         };
 
-        // Subscribe to the delivery subject with simple arguments
-        const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self.nc, args });
+        // Subscribe to the delivery subject
+        const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
         errdefer self.nc.unsubscribe(subscription);
 
         // Create JetStream subscription wrapper
@@ -1147,27 +1304,41 @@ pub const JetStream = struct {
     }
 
     /// Create a synchronous push subscription for manual message consumption
-    pub fn subscribeSync(self: JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*JetStreamSubscription {
-        // Generate deliver_subject if not provided and create push consumer config
-        var push_config = consumer_config;
-        const generated_deliver_subject = if (consumer_config.deliver_subject == null)
+    pub fn subscribeSync(self: JetStream, subject: ?[]const u8, options: SubscribeOptions) !*JetStreamSubscription {
+        // Resolve stream name
+        const stream_name = if (options.stream) |s|
+            s
+        else if (subject) |s|
+            try self.lookupStreamBySubject(s)
+        else
+            return error.StreamOrSubjectRequired;
+
+        defer if (options.stream == null and subject != null) self.nc.allocator.free(stream_name);
+
+        // Create or get consumer
+        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, options.config, false, null);
+        defer consumer_info.deinit();
+
+        // Generate deliver_subject if not provided in the consumer config
+        const generated_deliver_subject = if (consumer_info.value.config.deliver_subject == null)
             try inbox.newInbox(self.nc.allocator)
         else
             null;
         errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
 
-        const deliver_subject = consumer_config.deliver_subject orelse generated_deliver_subject.?;
+        const deliver_subject = consumer_info.value.config.deliver_subject orelse generated_deliver_subject.?;
         try validation.validateSubject(deliver_subject);
-        push_config.deliver_subject = deliver_subject;
 
-        // Remove pull-only fields from push consumer config
-        push_config.max_waiting = 0; // Push consumers don't support max_waiting
-        push_config.max_batch = null; // Push consumers don't support max_batch
-        push_config.max_expires = null; // Push consumers don't support max_expires
+        // Update consumer config with delivery subject if we generated one
+        if (generated_deliver_subject != null) {
+            var updated_config = consumer_info.value.config;
+            updated_config.deliver_subject = deliver_subject;
 
-        // Create the push consumer
-        var consumer_info = try self.addConsumer(stream_name, push_config);
-        errdefer consumer_info.deinit();
+            // Update the consumer with the delivery subject
+            consumer_info.deinit();
+            consumer_info = try self.addConsumer(stream_name, updated_config);
+        }
+        defer consumer_info.deinit(); // Cleanup the final consumer_info
 
         // Create synchronous subscription (no callback handler)
         const subscription = try self.nc.subscribeSync(deliver_subject);
@@ -1184,21 +1355,133 @@ pub const JetStream = struct {
         return js_sub;
     }
 
-    /// Create a pull subscription for the specified stream
-    pub fn pullSubscribe(self: JetStream, stream_name: []const u8, consumer_config: ConsumerConfig) !*PullSubscription {
-        // Create pull consumer config with appropriate defaults
-        var pull_config = consumer_config;
-        pull_config.deliver_subject = null; // Force null for pull consumers
-        if (pull_config.max_waiting == 0) pull_config.max_waiting = 512; // Default max waiting pulls
+    /// Create a queue subscription for load balancing across multiple consumers
+    pub fn queueSubscribe(self: JetStream, subject: ?[]const u8, queue: []const u8, comptime handlerFn: anytype, handler_args: anytype, options: SubscribeOptions) !*JetStreamSubscription {
+        // Resolve stream name
+        const stream_name = if (options.stream) |s|
+            s
+        else if (subject) |s|
+            try self.lookupStreamBySubject(s)
+        else
+            return error.StreamOrSubjectRequired;
 
-        // Create the consumer
-        var consumer_info = try self.addConsumer(stream_name, pull_config);
+        defer if (options.stream == null and subject != null) self.nc.allocator.free(stream_name);
+
+        // Create or get consumer with queue group
+        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, options.config, false, queue);
         errdefer consumer_info.deinit();
 
-        // Get the consumer name (use name first, then durable_name)
+        // Generate deliver_subject if not provided in the consumer config
+        const generated_deliver_subject = if (consumer_info.value.config.deliver_subject == null)
+            try inbox.newInbox(self.nc.allocator)
+        else
+            null;
+        errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
+
+        const deliver_subject = consumer_info.value.config.deliver_subject orelse generated_deliver_subject.?;
+        try validation.validateSubject(deliver_subject);
+
+        // Update consumer config with delivery subject if we generated one
+        if (generated_deliver_subject != null) {
+            var updated_config = consumer_info.value.config;
+            updated_config.deliver_subject = deliver_subject;
+
+            // Update the consumer with the delivery subject
+            consumer_info.deinit();
+            consumer_info = try self.addConsumer(stream_name, updated_config);
+        }
+        defer consumer_info.deinit(); // Cleanup the final consumer_info
+
+        // Define the handler inline similar to subscribe()
+        const JSHandler = struct {
+            fn wrappedHandler(msg: *Message, nc: *Connection, user_args: @TypeOf(handler_args), manual_ack: bool) anyerror!void {
+                // Check for status messages (heartbeats and flow control)
+                if (msg.status_code == STATUS_CONTROL) {
+                    // Handle status message internally, don't pass to user callback
+                    handleStatusMessage(msg, nc) catch |err| {
+                        log.err("Failed to handle status message: {}", .{err});
+                    };
+                    msg.deinit(); // Clean up status message
+                    return;
+                }
+
+                // Create JetStream message wrapper for regular messages
+                const js_msg = jetstream_message.createJetStreamMessage(nc, msg) catch |err| {
+                    log.err("Failed to wrap JetStream message: {}", .{err});
+                    msg.deinit(); // Clean up on error
+                    return;
+                };
+
+                // Call user handler with JetStream message - handler owns cleanup responsibility
+                // Support both void and fallible handlers
+                comptime {
+                    const HandlerType = @TypeOf(handlerFn);
+                    const type_info = @typeInfo(HandlerType);
+                    if (type_info != .@"fn") {
+                        @compileError("Handler must be a function, got: " ++ @typeName(HandlerType));
+                    }
+                }
+                const ReturnType = @typeInfo(@TypeOf(handlerFn)).@"fn".return_type.?;
+
+                // Only auto-ack if callback succeeds (like nats-py)
+                var callback_success = false;
+                if (ReturnType == void) {
+                    @call(.auto, handlerFn, .{js_msg} ++ user_args);
+                    callback_success = true;
+                } else {
+                    @call(.auto, handlerFn, .{js_msg} ++ user_args) catch |err| {
+                        log.err("User handler failed: {}", .{err});
+                        return; // Don't auto-ack on callback error
+                    };
+                    callback_success = true;
+                }
+
+                // Auto-acknowledge after successful user callback if not manual_ack
+                if (!manual_ack and callback_success) {
+                    js_msg.ack() catch |err| switch (err) {
+                        jetstream_message.AckError.AlreadyAcked => {}, // Ignore already acked (like nats-py)
+                        else => log.err("Auto-ack failed: {}", .{err}),
+                    };
+                }
+            }
+        };
+
+        // Subscribe to the delivery subject with queue group
+        const subscription = try self.nc.queueSubscribe(deliver_subject, queue, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
+        errdefer self.nc.unsubscribe(subscription);
+
+        // Create JetStream subscription wrapper
+        const js_sub = try self.nc.allocator.create(JetStreamSubscription);
+        js_sub.* = JetStreamSubscription{
+            .subscription = subscription,
+            .js = self,
+            .consumer_info = consumer_info,
+            .deliver_subject_owned = generated_deliver_subject,
+        };
+
+        return js_sub;
+    }
+
+    /// Create a pull subscription for the specified stream
+    pub fn pullSubscribe(self: JetStream, subject: ?[]const u8, durable: []const u8, options: PullSubscribeOptions) !*PullSubscription {
+        // Resolve stream name
+        const stream_name = if (options.stream) |s|
+            s
+        else if (subject) |s|
+            try self.lookupStreamBySubject(s)
+        else
+            return error.StreamOrSubjectRequired;
+
+        defer if (options.stream == null and subject != null) self.nc.allocator.free(stream_name);
+
+        // Create or get consumer (pull consumers require a name)
+        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, durable, options.config, true, null);
+        errdefer consumer_info.deinit();
+
+        // Get the consumer name (should be set from durable parameter)
         const consumer_name = consumer_info.value.config.name orelse
             consumer_info.value.config.durable_name orelse
-            return error.MissingConsumerName;
+            durable;
 
         // Generate unique inbox prefix for this pull subscription
         const inbox_base = try inbox.newInbox(self.nc.allocator);

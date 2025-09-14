@@ -21,13 +21,14 @@ test "JetStream synchronous subscription basic functionality" {
     defer stream_info.deinit();
 
     // Create synchronous subscription
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "sync_test_consumer",
-        .deliver_subject = "push.sync.test",
-        .ack_policy = .explicit,
-    };
-
-    var sync_sub = try js.subscribeSync("TEST_SYNC_STREAM", consumer_config);
+    var sync_sub = try js.subscribeSync("test.sync.*", .{
+        .stream = "TEST_SYNC_STREAM",
+        .durable = "sync_test_consumer",
+        .config = .{
+            .deliver_subject = "push.sync.test",
+            .ack_policy = .explicit,
+        },
+    });
     defer sync_sub.deinit();
 
     // Publish a test message
@@ -63,13 +64,14 @@ test "JetStream synchronous subscription timeout" {
     defer stream_info.deinit();
 
     // Create synchronous subscription
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "sync_timeout_consumer",
-        .deliver_subject = "push.sync.timeout",
-        .ack_policy = .explicit,
-    };
-
-    var sync_sub = try js.subscribeSync("TEST_SYNC_TIMEOUT_STREAM", consumer_config);
+    var sync_sub = try js.subscribeSync("test.sync.timeout.*", .{
+        .stream = "TEST_SYNC_TIMEOUT_STREAM",
+        .durable = "sync_timeout_consumer",
+        .config = .{
+            .deliver_subject = "push.sync.timeout",
+            .ack_policy = .explicit,
+        },
+    });
     defer sync_sub.deinit();
 
     // Test timeout (should return error.Timeout after timeout)
@@ -99,13 +101,14 @@ test "JetStream synchronous subscription multiple messages" {
     defer stream_info.deinit();
 
     // Create synchronous subscription
-    const consumer_config = nats.ConsumerConfig{
-        .durable_name = "sync_multi_consumer",
-        .deliver_subject = "push.sync.multi",
-        .ack_policy = .explicit,
-    };
-
-    var sync_sub = try js.subscribeSync("TEST_SYNC_MULTI_STREAM", consumer_config);
+    var sync_sub = try js.subscribeSync("test.sync.multi.*", .{
+        .stream = "TEST_SYNC_MULTI_STREAM",
+        .durable = "sync_multi_consumer",
+        .config = .{
+            .deliver_subject = "push.sync.multi",
+            .ack_policy = .explicit,
+        },
+    });
     defer sync_sub.deinit();
 
     // Publish multiple test messages
