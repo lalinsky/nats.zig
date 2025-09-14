@@ -1186,44 +1186,10 @@ pub const JetStream = struct {
         }
     }
 
-    /// Subscribe to a JetStream push consumer with callback handler
-    pub fn subscribe(self: JetStream, subject: ?[]const u8, comptime handlerFn: anytype, handler_args: anytype, options: SubscribeOptions) !*JetStreamSubscription {
-        // Resolve stream name
-        const stream_name = if (options.stream) |s|
-            s
-        else if (subject) |s|
-            try self.lookupStreamBySubject(s)
-        else
-            return error.StreamOrSubjectRequired;
-
-        defer if (options.stream == null and subject != null) self.nc.allocator.free(stream_name);
-
-        // Prepare consumer config, generating deliver_subject if needed
-        var config = options.config orelse ConsumerConfig{};
-        const generated_deliver_subject = if (config.deliver_subject == null)
-            try inbox.newInbox(self.nc.allocator)
-        else
-            null;
-        errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
-
-        // Validate user-provided deliver_subject (not generated ones)
-        if (config.deliver_subject != null) {
-            try validation.validateSubject(config.deliver_subject.?);
-        }
-
-        if (generated_deliver_subject) |ds| {
-            config.deliver_subject = ds;
-        }
-
-        // Create or get consumer with complete config
-        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, null);
-        errdefer consumer_info.deinit();
-
-        const deliver_subject = consumer_info.value.config.deliver_subject.?;
-
-        // Define the handler inline to avoid the two-level context issue
-        const JSHandler = struct {
-            fn wrappedHandler(msg: *Message, nc: *Connection, user_args: @TypeOf(handler_args), manual_ack: bool) anyerror!void {
+    /// Helper to generate a JetStream message handler wrapper
+    fn JetStreamHandler(comptime handlerFn: anytype) type {
+        return struct {
+            fn wrappedHandler(msg: *Message, nc: *Connection, user_args: anytype, manual_ack: bool) anyerror!void {
                 // Check for status messages (heartbeats and flow control)
                 if (msg.status_code == STATUS_CONTROL) {
                     // Handle status message internally, don't pass to user callback
@@ -1274,6 +1240,45 @@ pub const JetStream = struct {
                 }
             }
         };
+    }
+
+    /// Subscribe to a JetStream push consumer with callback handler
+    pub fn subscribe(self: JetStream, subject: ?[]const u8, comptime handlerFn: anytype, handler_args: anytype, options: SubscribeOptions) !*JetStreamSubscription {
+        // Resolve stream name
+        const stream_name = if (options.stream) |s|
+            s
+        else if (subject) |s|
+            try self.lookupStreamBySubject(s)
+        else
+            return error.StreamOrSubjectRequired;
+
+        defer if (options.stream == null and subject != null) self.nc.allocator.free(stream_name);
+
+        // Prepare consumer config, generating deliver_subject if needed
+        var config = options.config orelse ConsumerConfig{};
+        const generated_deliver_subject = if (config.deliver_subject == null)
+            try inbox.newInbox(self.nc.allocator)
+        else
+            null;
+        errdefer if (generated_deliver_subject) |ds| self.nc.allocator.free(ds);
+
+        // Validate user-provided deliver_subject (not generated ones)
+        if (config.deliver_subject != null) {
+            try validation.validateSubject(config.deliver_subject.?);
+        }
+
+        if (generated_deliver_subject) |ds| {
+            config.deliver_subject = ds;
+        }
+
+        // Create or get consumer with complete config
+        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, null);
+        errdefer consumer_info.deinit();
+
+        const deliver_subject = consumer_info.value.config.deliver_subject.?;
+
+        // Use the reusable JetStream handler wrapper
+        const JSHandler = JetStreamHandler(handlerFn);
 
         // Subscribe to the delivery subject
         const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
@@ -1380,59 +1385,8 @@ pub const JetStream = struct {
 
         const deliver_subject = consumer_info.value.config.deliver_subject.?;
 
-        // Define the handler inline similar to subscribe()
-        const JSHandler = struct {
-            fn wrappedHandler(msg: *Message, nc: *Connection, user_args: @TypeOf(handler_args), manual_ack: bool) anyerror!void {
-                // Check for status messages (heartbeats and flow control)
-                if (msg.status_code == STATUS_CONTROL) {
-                    // Handle status message internally, don't pass to user callback
-                    handleStatusMessage(msg, nc) catch |err| {
-                        log.err("Failed to handle status message: {}", .{err});
-                    };
-                    msg.deinit(); // Clean up status message
-                    return;
-                }
-
-                // Create JetStream message wrapper for regular messages
-                const js_msg = jetstream_message.createJetStreamMessage(nc, msg) catch |err| {
-                    log.err("Failed to wrap JetStream message: {}", .{err});
-                    msg.deinit(); // Clean up on error
-                    return;
-                };
-
-                // Call user handler with JetStream message - handler owns cleanup responsibility
-                // Support both void and fallible handlers
-                comptime {
-                    const HandlerType = @TypeOf(handlerFn);
-                    const type_info = @typeInfo(HandlerType);
-                    if (type_info != .@"fn") {
-                        @compileError("Handler must be a function, got: " ++ @typeName(HandlerType));
-                    }
-                }
-                const ReturnType = @typeInfo(@TypeOf(handlerFn)).@"fn".return_type.?;
-
-                // Only auto-ack if callback succeeds (like nats-py)
-                var callback_success = false;
-                if (ReturnType == void) {
-                    @call(.auto, handlerFn, .{js_msg} ++ user_args);
-                    callback_success = true;
-                } else {
-                    @call(.auto, handlerFn, .{js_msg} ++ user_args) catch |err| {
-                        log.err("User handler failed: {}", .{err});
-                        return; // Don't auto-ack on callback error
-                    };
-                    callback_success = true;
-                }
-
-                // Auto-acknowledge after successful user callback if not manual_ack
-                if (!manual_ack and callback_success) {
-                    js_msg.ack() catch |err| switch (err) {
-                        jetstream_message.AckError.AlreadyAcked => {}, // Ignore already acked (like nats-py)
-                        else => log.err("Auto-ack failed: {}", .{err}),
-                    };
-                }
-            }
-        };
+        // Use the reusable JetStream handler wrapper
+        const JSHandler = JetStreamHandler(handlerFn);
 
         // Subscribe to the delivery subject with queue group
         const subscription = try self.nc.queueSubscribe(deliver_subject, queue, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
