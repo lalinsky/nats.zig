@@ -659,7 +659,7 @@ pub const ObjectStore = struct {
                     .deleted = meta.deleted,
                 };
 
-                try objects.append(self.allocator, obj_info);
+                try objects.append(arena_allocator, obj_info);
             }
 
             // Stop when there are no more pending messages
@@ -670,7 +670,7 @@ pub const ObjectStore = struct {
 
         return Result([]ObjectInfo){
             .arena = arena,
-            .value = try objects.toOwnedSlice(self.allocator),
+            .value = try objects.toOwnedSlice(arena_allocator),
         };
     }
 
