@@ -29,6 +29,15 @@ const Result = @import("result.zig").Result;
 
 const log = @import("log.zig").log;
 
+// Helper function to replace jsonStringifyAlloc
+fn jsonStringifyAlloc(allocator: std.mem.Allocator, value: anytype, options: std.json.Stringify.Options) ![]u8 {
+    var buffer = std.ArrayList(u8){};
+    defer buffer.deinit(allocator);
+
+    try std.fmt.format(buffer.writer(allocator), "{f}", .{std.json.fmt(value, options)});
+    return buffer.toOwnedSlice(allocator);
+}
+
 // Re-export JetStream message types
 pub const JetStreamMessage = jetstream_message.JetStreamMessage;
 pub const MsgMetadata = jetstream_message.MsgMetadata;
@@ -438,7 +447,7 @@ pub const PullSubscription = struct {
         };
 
         // Serialize the fetch request to JSON
-        const request_json = try std.json.stringifyAlloc(self.js.nc.allocator, request, .{
+        const request_json = try jsonStringifyAlloc(self.js.nc.allocator, request, .{
             .emit_null_optional_fields = false,
         });
         defer self.js.nc.allocator.free(request_json);
@@ -451,8 +460,8 @@ pub const PullSubscription = struct {
         try self.js.nc.publishRequest(api_subject, reply_subject, request_json);
 
         // Collect messages
-        var messages = std.ArrayList(*JetStreamMessage).init(self.js.nc.allocator);
-        defer messages.deinit();
+        var messages = std.ArrayList(*JetStreamMessage){};
+        defer messages.deinit(self.js.nc.allocator);
 
         var batch_complete = false;
         var fetch_error: ?anyerror = null;
@@ -496,7 +505,7 @@ pub const PullSubscription = struct {
                     const js_msg_ptr = try jetstream_message.createJetStreamMessage(self.js.nc, raw_msg);
                     errdefer js_msg_ptr.deinit();
 
-                    try messages.append(js_msg_ptr);
+                    try messages.append(self.js.nc.allocator, js_msg_ptr);
                 }
             } else |err| switch (err) {
                 error.Timeout => {
@@ -507,7 +516,7 @@ pub const PullSubscription = struct {
         }
 
         // Convert ArrayList to owned slice
-        const messages_slice = try messages.toOwnedSlice();
+        const messages_slice = try messages.toOwnedSlice(self.js.nc.allocator);
 
         return MessageBatch{
             .messages = messages_slice,
@@ -622,7 +631,7 @@ pub const JetStream = struct {
             subject: []const u8,
         }{ .subject = subject };
 
-        const request_json = try std.json.stringifyAlloc(self.nc.allocator, request_payload, .{
+        const request_json = try jsonStringifyAlloc(self.nc.allocator, request_payload, .{
             .emit_null_optional_fields = false,
         });
         defer self.nc.allocator.free(request_json);
@@ -774,7 +783,7 @@ pub const JetStream = struct {
         defer self.nc.allocator.free(subject);
 
         // Serialize the config to JSON
-        const config_json = try std.json.stringifyAlloc(self.nc.allocator, config, .{});
+        const config_json = try jsonStringifyAlloc(self.nc.allocator, config, .{});
         defer self.nc.allocator.free(config_json);
 
         const msg = try self.sendRequest(subject, config_json);
@@ -795,7 +804,7 @@ pub const JetStream = struct {
         defer self.nc.allocator.free(subject);
 
         // Serialize the config to JSON
-        const config_json = try std.json.stringifyAlloc(self.nc.allocator, config, .{});
+        const config_json = try jsonStringifyAlloc(self.nc.allocator, config, .{});
         defer self.nc.allocator.free(config_json);
 
         const msg = try self.sendRequest(subject, config_json);
@@ -901,7 +910,7 @@ pub const JetStream = struct {
             config: ConsumerConfig,
         }{ .stream_name = stream_name, .config = config };
 
-        const config_json = try std.json.stringifyAlloc(self.nc.allocator, request_payload, .{
+        const config_json = try jsonStringifyAlloc(self.nc.allocator, request_payload, .{
             .emit_null_optional_fields = false,
         });
         defer self.nc.allocator.free(config_json);
@@ -949,7 +958,7 @@ pub const JetStream = struct {
         const subject = try std.fmt.allocPrint(self.nc.allocator, "STREAM.PURGE.{s}", .{stream_name});
         defer self.nc.allocator.free(subject);
 
-        const request_json = try std.json.stringifyAlloc(self.nc.allocator, request, .{});
+        const request_json = try jsonStringifyAlloc(self.nc.allocator, request, .{});
         defer self.nc.allocator.free(request_json);
 
         const msg = try self.sendRequest(subject, request_json);
@@ -976,7 +985,7 @@ pub const JetStream = struct {
         };
 
         // Serialize the request to JSON, omitting null fields
-        const request_json = try std.json.stringifyAlloc(self.nc.allocator, request, .{
+        const request_json = try jsonStringifyAlloc(self.nc.allocator, request, .{
             .emit_null_optional_fields = false,
         });
         defer self.nc.allocator.free(request_json);
@@ -1080,7 +1089,7 @@ pub const JetStream = struct {
         };
 
         // Serialize the request to JSON, omitting null fields
-        const request_json = try std.json.stringifyAlloc(self.nc.allocator, request, .{
+        const request_json = try jsonStringifyAlloc(self.nc.allocator, request, .{
             .emit_null_optional_fields = false,
         });
         defer self.nc.allocator.free(request_json);
@@ -1118,7 +1127,7 @@ pub const JetStream = struct {
         defer self.nc.allocator.free(subject);
 
         // Serialize the request to JSON
-        const request_json = try std.json.stringifyAlloc(self.nc.allocator, request, .{});
+        const request_json = try jsonStringifyAlloc(self.nc.allocator, request, .{});
         defer self.nc.allocator.free(request_json);
 
         const msg = try self.sendRequest(subject, request_json);

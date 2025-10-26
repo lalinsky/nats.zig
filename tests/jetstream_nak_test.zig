@@ -31,8 +31,8 @@ test "NAK redelivery with delivery count verification" {
 
         fn init(allocator: std.mem.Allocator) @This() {
             return .{
-                .messages = std.ArrayList([]const u8).init(allocator),
-                .delivery_counts = std.ArrayList(u64).init(allocator),
+                .messages = std.ArrayList([]const u8){},
+                .delivery_counts = std.ArrayList(u64){},
                 .allocator = allocator,
             };
         }
@@ -41,8 +41,8 @@ test "NAK redelivery with delivery count verification" {
             for (self.messages.items) |msg| {
                 self.allocator.free(msg);
             }
-            self.messages.deinit();
-            self.delivery_counts.deinit();
+            self.messages.deinit(self.allocator);
+            self.delivery_counts.deinit(self.allocator);
             if (self.first_delivery_data) |data| {
                 self.allocator.free(data);
             }
@@ -62,11 +62,11 @@ test "NAK redelivery with delivery count verification" {
 
             // Store message data copy for comparison
             const msg_copy = data.allocator.dupe(u8, js_msg.msg.data) catch return;
-            data.messages.append(msg_copy) catch return;
+            data.messages.append(data.allocator, msg_copy) catch return;
 
             // Get delivery count from JetStream message metadata
             const delivery_count = js_msg.metadata.num_delivered;
-            data.delivery_counts.append(delivery_count) catch return;
+            data.delivery_counts.append(data.allocator, delivery_count) catch return;
 
             log.info("Received message (delivery #{}): {s}", .{ delivery_count, js_msg.msg.data });
 
@@ -105,7 +105,7 @@ test "NAK redelivery with delivery count verification" {
     // Wait for message processing (should get delivered, NAK'd, then redelivered)
     var attempts: u32 = 0;
     while (attempts < 50) { // Wait up to 5 seconds
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
 
         test_data.mutex.lock();
@@ -209,7 +209,7 @@ test "NAK with max delivery limit" {
     // Wait for all deliveries (should stop at max_deliver = 2)
     var wait_attempts: u32 = 0;
     while (wait_attempts < 30) { // Wait up to 3 seconds
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
         wait_attempts += 1;
 
         test_data.mutex.lock();
@@ -219,7 +219,7 @@ test "NAK with max delivery limit" {
         // Should stop at max_deliver limit
         if (count >= 2) {
             // Give a bit more time to ensure no additional deliveries
-            std.time.sleep(200 * std.time.ns_per_ms);
+            std.Thread.sleep(200 * std.time.ns_per_ms);
             break;
         }
     }
@@ -273,10 +273,10 @@ test "JetStream message metadata parsing" {
             log.info("JetStream message metadata:", .{});
             log.info("- Stream: {s}", .{js_msg.metadata.stream});
             log.info("- Consumer: {s}", .{js_msg.metadata.consumer});
-            log.info("- Consumer sequence: {?}", .{js_msg.metadata.sequence.consumer});
-            log.info("- Stream sequence: {?}", .{js_msg.metadata.sequence.stream});
-            log.info("- Delivered count: {}", .{js_msg.metadata.num_delivered});
-            log.info("- Pending count: {?}", .{js_msg.metadata.num_pending});
+            log.info("- Consumer sequence: {d}", .{js_msg.metadata.sequence.consumer});
+            log.info("- Stream sequence: {d}", .{js_msg.metadata.sequence.stream});
+            log.info("- Delivered count: {d}", .{js_msg.metadata.num_delivered});
+            log.info("- Pending count: {d}", .{js_msg.metadata.num_pending});
 
             // Verify metadata is populated correctly
             const stream_name = js_msg.metadata.stream;
@@ -313,7 +313,7 @@ test "JetStream message metadata parsing" {
     // Wait for message processing
     var attempts: u32 = 0;
     while (attempts < 30) {
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
 
         mutex.lock();
@@ -359,13 +359,13 @@ test "NAK with delay redelivery timing" {
 
         fn init(allocator: std.mem.Allocator) @This() {
             return .{
-                .delivery_times = std.ArrayList(i64).init(allocator),
+                .delivery_times = std.ArrayList(i64){},
                 .allocator = allocator,
             };
         }
 
         fn deinit(self: *@This()) void {
-            self.delivery_times.deinit();
+            self.delivery_times.deinit(self.allocator);
         }
     };
 
@@ -381,7 +381,7 @@ test "NAK with delay redelivery timing" {
             defer data.mutex.unlock();
 
             const current_time = std.time.milliTimestamp();
-            data.delivery_times.append(current_time) catch return;
+            data.delivery_times.append(data.allocator, current_time) catch return;
 
             const delivery_count = js_msg.metadata.num_delivered;
             data.delivery_count += 1;
@@ -423,7 +423,7 @@ test "NAK with delay redelivery timing" {
     // Wait for both deliveries (original + redelivery after delay)
     var attempts: u32 = 0;
     while (attempts < 100) { // Wait up to 10 seconds
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
 
         test_data.mutex.lock();
@@ -515,7 +515,7 @@ test "NAK with zero delay behaves like regular NAK" {
     // Wait for both deliveries
     var attempts: u32 = 0;
     while (attempts < 30) { // Wait up to 3 seconds
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
 
         mutex.lock();

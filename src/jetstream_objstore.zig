@@ -30,6 +30,15 @@ const validation = @import("validation.zig");
 
 const log = @import("log.zig").log;
 
+// Helper function to replace std.json.stringifyAlloc
+fn jsonStringifyAlloc(allocator: std.mem.Allocator, value: anytype, options: std.json.Stringify.Options) ![]u8 {
+    var buffer = std.ArrayList(u8){};
+    defer buffer.deinit(allocator);
+
+    try std.fmt.format(buffer.writer(allocator), "{f}", .{std.json.fmt(value, options)});
+    return buffer.toOwnedSlice(allocator);
+}
+
 // Default chunk size (128KB)
 const DEFAULT_CHUNK_SIZE: u32 = 128 * 1024;
 
@@ -217,7 +226,8 @@ pub const ObjectResult = struct {
     pub fn verify(self: *ObjectResult) !void {
         const calculated_digest = self.digest.finalResult();
         var digest_hex: [64]u8 = undefined;
-        _ = std.fmt.bufPrint(&digest_hex, "{s}", .{std.fmt.fmtSliceHexLower(&calculated_digest)}) catch unreachable;
+        const hex_digest = std.fmt.bytesToHex(calculated_digest, .lower);
+        @memcpy(&digest_hex, &hex_digest);
 
         if (!std.mem.eql(u8, &digest_hex, self.info.digest)) {
             return ObjectStoreError.DigestMismatch;
@@ -343,8 +353,8 @@ pub const ObjectStore = struct {
 
         // Create digest string - owned by arena
         const digest_bytes = hasher.finalResult();
-        const digest_hex = try arena_allocator.alloc(u8, 64);
-        _ = std.fmt.bufPrint(digest_hex, "{s}", .{std.fmt.fmtSliceHexLower(&digest_bytes)}) catch unreachable;
+        const hex_digest = std.fmt.bytesToHex(digest_bytes, .lower);
+        const digest_hex = try arena_allocator.dupe(u8, &hex_digest);
 
         const obj_info = ObjectInfo{
             .name = try arena_allocator.dupe(u8, meta.name),
@@ -649,7 +659,7 @@ pub const ObjectStore = struct {
                     .deleted = meta.deleted,
                 };
 
-                try objects.append(obj_info);
+                try objects.append(arena_allocator, obj_info);
             }
 
             // Stop when there are no more pending messages
@@ -660,7 +670,7 @@ pub const ObjectStore = struct {
 
         return Result([]ObjectInfo){
             .arena = arena,
-            .value = try objects.toOwnedSlice(),
+            .value = try objects.toOwnedSlice(arena_allocator),
         };
     }
 
@@ -678,7 +688,7 @@ pub const ObjectStore = struct {
             .digest = obj_info.digest,
             .deleted = obj_info.deleted,
         };
-        return std.json.stringifyAlloc(self.allocator, json_info, .{});
+        return jsonStringifyAlloc(self.allocator, json_info, .{});
     }
 };
 

@@ -98,7 +98,7 @@ test "basic reconnection when server stops" {
             return error.StillNotConnected;
         }
 
-        std.time.sleep(10 * std.time.ns_per_ms);
+        std.Thread.sleep(10 * std.time.ns_per_ms);
     }
 
     // Verify connection works after reconnection

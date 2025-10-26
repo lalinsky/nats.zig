@@ -64,7 +64,7 @@ test "ack should succeed on first call" {
     // Wait for message processing
     var attempts: u32 = 0;
     while (attempts < 30) {
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
 
         test_data.mutex.lock();
@@ -149,7 +149,7 @@ test "ack should fail on second call" {
     // Wait for message processing
     var attempts: u32 = 0;
     while (attempts < 30) {
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
 
         test_data.mutex.lock();
@@ -235,7 +235,7 @@ test "nak should fail after ack" {
     // Wait for message processing
     var attempts: u32 = 0;
     while (attempts < 30) {
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
 
         test_data.mutex.lock();
@@ -328,7 +328,7 @@ test "inProgress can be called multiple times" {
     // Wait for message processing
     var attempts: u32 = 0;
     while (attempts < 30) {
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
         attempts += 1;
 
         test_data.mutex.lock();

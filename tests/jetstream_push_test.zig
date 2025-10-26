@@ -54,7 +54,7 @@ test "basic push subscription" {
     try conn.publish("orders.update", "Order Update");
 
     // Wait a bit for messages to be processed
-    std.time.sleep(100 * std.time.ns_per_ms);
+    std.Thread.sleep(100 * std.time.ns_per_ms);
 
     // Verify messages were received
     try testing.expect(message_count > 0);
@@ -84,7 +84,7 @@ test "push subscription with flow control" {
             counter.* += 1;
 
             // Simulate some processing time
-            std.time.sleep(10 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
 
             // Acknowledge successful processing
             js_msg.ack() catch |err| {
@@ -114,7 +114,7 @@ test "push subscription with flow control" {
     }
 
     // Allow time for processing
-    std.time.sleep(200 * std.time.ns_per_ms);
+    std.Thread.sleep(200 * std.time.ns_per_ms);
 
     try testing.expect(processed_count > 0);
     log.info("Processed {d} tasks with flow control", .{processed_count});

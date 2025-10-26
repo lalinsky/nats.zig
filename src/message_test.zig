@@ -147,10 +147,10 @@ test "Message header encoding" {
     try msg.headerSet("Content-Type", "application/json");
     try msg.headerSet("X-Custom", "value");
 
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(allocator);
 
-    try msg.encodeHeaders(buf.writer());
+    try msg.encodeHeaders(buf.writer(allocator));
 
     // Should start with NATS/1.0
     try testing.expect(std.mem.startsWith(u8, buf.items, "NATS/1.0\r\n"));
@@ -196,10 +196,10 @@ test "Message status field and header parsing" {
     try testing.expectEqualStrings("test", custom_header.?);
 
     // Test encoding - Status header should be first line
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(allocator);
 
-    try msg.encodeHeaders(buf.writer());
+    try msg.encodeHeaders(buf.writer(allocator));
 
     // Should start with the full status line
     try testing.expect(std.mem.startsWith(u8, buf.items, "NATS/1.0 503 No Responders\r\n"));

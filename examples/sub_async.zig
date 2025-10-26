@@ -33,7 +33,7 @@ pub fn main() !void {
     std.log.info("Subscribed with callback handler. Waiting for messages (10 seconds)...", .{});
 
     // Keep the program running to receive messages
-    std.time.sleep(10 * std.time.ns_per_s);
+    std.Thread.sleep(10 * std.time.ns_per_s);
 
     std.log.info("Shutting down after receiving {} messages", .{counter});
 }

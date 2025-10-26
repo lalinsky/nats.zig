@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 // Log capture context
 const LogCapture = struct {
     captured_log_buffer: ?*std.ArrayList(u8) = null,
+    allocator: ?Allocator = null,
     mutex: std.Thread.Mutex = .{},
 
     pub fn logFn(
@@ -38,21 +39,23 @@ const LogCapture = struct {
 
         if (self.captured_log_buffer) |buf| {
             // Capture to buffer during test execution
-            buf.writer().print(scope_prefix ++ format ++ "\n", args) catch unreachable;
+            if (self.allocator) |alloc| {
+                buf.writer(alloc).print(scope_prefix ++ format ++ "\n", args) catch unreachable;
+            }
         } else {
             // Normal logging to stderr when not capturing
             std.debug.lockStdErr();
             defer std.debug.unlockStdErr();
-            const stderr = std.io.getStdErr().writer();
-            stderr.print(scope_prefix ++ format ++ "\n", args) catch unreachable;
+            std.debug.print(scope_prefix ++ format ++ "\n", args);
         }
     }
 
-    pub fn startCapture(self: *@This(), buffer: *std.ArrayList(u8)) void {
+    pub fn startCapture(self: *@This(), buffer: *std.ArrayList(u8), allocator: Allocator) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         self.captured_log_buffer = buffer;
+        self.allocator = allocator;
     }
 
     pub fn stopCapture(self: *@This()) void {
@@ -60,6 +63,7 @@ const LogCapture = struct {
         defer self.mutex.unlock();
 
         self.captured_log_buffer = null;
+        self.allocator = null;
     }
 };
 
@@ -107,8 +111,8 @@ pub fn main() !void {
     printer.fmt("\r\x1b[0K", .{}); // beginning of line and clear to end of line
 
     // Initialize log buffer for capturing test output
-    var log_buffer = std.ArrayList(u8).init(allocator);
-    defer log_buffer.deinit();
+    var log_buffer = std.ArrayList(u8){};
+    defer log_buffer.deinit(allocator);
 
     for (builtin.test_functions) |t| {
         if (isSetup(t)) {
@@ -142,7 +146,7 @@ pub fn main() !void {
         if (env.do_log_capture) {
             // Clear log buffer and start capturing logs for this test
             log_buffer.clearRetainingCapacity();
-            log_capture.startCapture(&log_buffer);
+            log_capture.startCapture(&log_buffer, allocator);
         }
 
         // Run per-test setup functions
@@ -231,29 +235,25 @@ pub fn main() !void {
 }
 
 const Printer = struct {
-    out: std.fs.File.Writer,
-
     fn init() Printer {
-        return .{
-            .out = std.io.getStdErr().writer(),
-        };
+        return .{};
     }
 
     fn fmt(self: Printer, comptime format: []const u8, args: anytype) void {
-        std.fmt.format(self.out, format, args) catch unreachable;
+        _ = self;
+        std.debug.print(format, args);
     }
 
     fn status(self: Printer, s: Status, comptime format: []const u8, args: anytype) void {
-        const color = switch (s) {
-            .pass => "\x1b[32m",
-            .fail => "\x1b[31m",
-            .skip => "\x1b[33m",
-            else => "",
-        };
-        const out = self.out;
-        out.writeAll(color) catch @panic("writeAll failed?!");
-        std.fmt.format(out, format, args) catch @panic("std.fmt.format failed?!");
-        self.fmt("\x1b[0m", .{});
+        _ = self;
+        switch (s) {
+            .pass => std.debug.print("\x1b[32m", .{}),
+            .fail => std.debug.print("\x1b[31m", .{}),
+            .skip => std.debug.print("\x1b[33m", .{}),
+            else => {},
+        }
+        std.debug.print(format, args);
+        std.debug.print("\x1b[0m", .{});
     }
 };
 
