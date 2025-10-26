@@ -85,7 +85,7 @@ pub fn waitForHealthyServices(allocator: std.mem.Allocator, timeout_ms: i64) !vo
             return;
         }
 
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 }
 

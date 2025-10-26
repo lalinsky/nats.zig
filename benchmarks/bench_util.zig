@@ -72,7 +72,7 @@ pub const BenchStats = struct {
     }
 };
 
-fn benchSignalHandler(sig_num: c_int) callconv(.C) void {
+fn benchSignalHandler(sig_num: i32) callconv(.c) void {
     _ = sig_num;
     keep_running = false;
 }
@@ -81,7 +81,7 @@ fn benchSignalHandler(sig_num: c_int) callconv(.C) void {
 pub fn setupSignals() !void {
     const sa = std.posix.Sigaction{
         .handler = .{ .handler = benchSignalHandler },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
     std.posix.sigaction(std.posix.SIG.INT, &sa, null);

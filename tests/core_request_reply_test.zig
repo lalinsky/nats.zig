@@ -28,7 +28,7 @@ fn slowEchoHandler(msg: *nats.Message, connection: *nats.Connection) void {
     defer msg.deinit();
 
     // Sleep for 200ms to simulate slow processing
-    std.time.sleep(200_000_000); // 200ms
+    std.Thread.sleep(200_000_000); // 200ms
 
     if (msg.reply) |reply_subject| {
         const response = std.fmt.allocPrint(std.testing.allocator, "slow: {s}", .{msg.data}) catch return;
@@ -46,7 +46,7 @@ test "basic request reply" {
     defer replier_sub.deinit();
 
     // Give the subscription time to register
-    std.time.sleep(10_000_000); // 10ms
+    std.Thread.sleep(10_000_000); // 10ms
 
     // Send a request
     var msg = try conn.request("test.echo", "hello world", 1000);
@@ -65,7 +65,7 @@ test "simple request reply functionality" {
     defer replier_sub.deinit();
 
     // Give the subscription time to register
-    std.time.sleep(10_000_000); // 10ms
+    std.Thread.sleep(10_000_000); // 10ms
 
     // Send a request
     var msg = try conn.request("test.simple.echo", "hello world", 1000);
@@ -82,7 +82,7 @@ test "concurrent request reply" {
     const replier_sub = try conn.subscribe("test.concurrent", echoHandler, .{conn});
     defer replier_sub.deinit();
 
-    std.time.sleep(10_000_000); // 10ms
+    std.Thread.sleep(10_000_000); // 10ms
 
     // Send multiple requests concurrently
     var requests: [5]*nats.Message = undefined;
@@ -123,7 +123,7 @@ test "request timeout with slow responder" {
     const slow_sub = try conn.subscribe("test.slow", slowEchoHandler, .{conn});
     defer slow_sub.deinit();
 
-    std.time.sleep(10_000_000); // 10ms
+    std.Thread.sleep(10_000_000); // 10ms
 
     // Send request with 100ms timeout (less than the 200ms handler delay)
     const response = conn.request("test.slow", "timeout test", 100);
@@ -143,7 +143,7 @@ test "request with different subjects" {
     const replier2 = try conn.subscribe("test.subject2", echoHandler, .{conn});
     defer replier2.deinit();
 
-    std.time.sleep(10_000_000); // 10ms
+    std.Thread.sleep(10_000_000); // 10ms
 
     // Test requests to different subjects
     const response1 = try conn.request("test.subject1", "message1", 1000);
@@ -163,7 +163,7 @@ test "requestMsg basic functionality" {
     const replier_sub = try conn.subscribe("test.requestmsg", simpleEchoHandler, .{conn});
     defer replier_sub.deinit();
 
-    std.time.sleep(10_000_000); // 10ms
+    std.Thread.sleep(10_000_000); // 10ms
 
     var request_msg = try conn.newMsg();
     defer request_msg.deinit();
@@ -187,7 +187,7 @@ test "requestMsg with headers" {
     const replier_sub = try conn.subscribe("test.requestmsg.headers", echoHandler, .{conn});
     defer replier_sub.deinit();
 
-    std.time.sleep(10_000_000); // 10ms
+    std.Thread.sleep(10_000_000); // 10ms
 
     var request_msg = try conn.newMsg();
     defer request_msg.deinit();
@@ -301,7 +301,7 @@ test "requestMany with sentinel function" {
     const replier_sub = try conn.subscribe("test.sentinel", sentinelResponder, .{conn});
     defer replier_sub.deinit();
 
-    std.time.sleep(10_000_000); // 10ms
+    std.Thread.sleep(10_000_000); // 10ms
 
     // Sentinel function that stops when it sees "END" message (ADR-47: false = stop)
     const sentinel = struct {
@@ -355,11 +355,11 @@ test "requestMany with stall timeout" {
             connection.publish(reply_subject, "response-1") catch return;
 
             // Send second response after 10ms (within stall timeout)
-            std.time.sleep(10_000_000); // 10ms
+            std.Thread.sleep(10_000_000); // 10ms
             connection.publish(reply_subject, "response-2") catch return;
 
             // Wait 150ms (longer than 100ms stall timeout) then try to send third response
-            std.time.sleep(150_000_000); // 150ms
+            std.Thread.sleep(150_000_000); // 150ms
             connection.publish(reply_subject, "response-3") catch return;
         }
     };
@@ -368,7 +368,7 @@ test "requestMany with stall timeout" {
     const responder_thread = try std.Thread.spawn(.{}, ResponderThread.run, .{ conn, replier_sub });
     defer responder_thread.join();
 
-    std.time.sleep(10_000_000); // 10ms to ensure subscription is ready
+    std.Thread.sleep(10_000_000); // 10ms to ensure subscription is ready
 
     // Request with 100ms stall timeout - should get only first 2 responses
     var messages = try conn.requestMany("test.stall", "get with stall", 1000, .{ .stall_ms = 100 });

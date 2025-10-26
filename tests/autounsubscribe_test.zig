@@ -40,26 +40,27 @@ test "autounsubscribe async basic functionality" {
     var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
-    var messages_received = std.ArrayList(*Message).init(std.testing.allocator);
+    var messages_received = std.ArrayList(*Message){};
     defer {
         for (messages_received.items) |msg| {
             msg.deinit();
         }
-        messages_received.deinit();
+        messages_received.deinit(std.testing.allocator);
     }
 
     const TestContext = struct {
         messages: *std.ArrayList(*Message),
+        allocator: std.mem.Allocator,
         mutex: std.Thread.Mutex = .{},
 
         pub fn handleMessage(msg: *Message, self: *@This()) !void {
             self.mutex.lock();
             defer self.mutex.unlock();
-            try self.messages.append(msg);
+            try self.messages.append(self.allocator, msg);
         }
     };
 
-    var ctx = TestContext{ .messages = &messages_received };
+    var ctx = TestContext{ .messages = &messages_received, .allocator = std.testing.allocator };
 
     const sub = try conn.subscribe("auto.async.test", TestContext.handleMessage, .{&ctx});
     defer sub.deinit();
@@ -84,7 +85,7 @@ test "autounsubscribe async basic functionality" {
         count = messages_received.items.len;
         ctx.mutex.unlock();
         if (count >= 2) break;
-        std.time.sleep(10 * std.time.ns_per_ms);
+        std.Thread.sleep(10 * std.time.ns_per_ms);
     }
 
     try std.testing.expectEqual(@as(usize, 2), count);
@@ -210,7 +211,7 @@ test "autounsubscribe with reconnection" {
         if (timer.read() >= 5000 * std.time.ns_per_ms) {
             return error.ReconnectionTimeout;
         }
-        std.time.sleep(10 * std.time.ns_per_ms);
+        std.Thread.sleep(10 * std.time.ns_per_ms);
     }
 
     // Publish more messages after reconnection (should only receive 2 more to reach limit of 5)
