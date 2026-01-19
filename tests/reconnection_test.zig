@@ -56,10 +56,30 @@ const CallbackTracker = struct {
         _ = msg;
     }
 
-    fn timedWait(self: *@This(), rt: *zio.Runtime, timeout_ms: u32) !void {
+    fn waitForDisconnected(self: *@This(), rt: *zio.Runtime, timeout_ms: u64) !void {
         try self.mutex.lock(rt);
         defer self.mutex.unlock(rt);
-        return self.cond.timedWait(rt, &self.mutex, .fromMilliseconds(timeout_ms));
+
+        var timer = try std.time.Timer.start();
+        while (self.disconnected_called == 0) {
+            if (timer.read() >= timeout_ms * std.time.ns_per_ms) {
+                return error.DisconnectTimeout;
+            }
+            self.cond.timedWait(rt, &self.mutex, .fromMilliseconds(100)) catch {};
+        }
+    }
+
+    fn waitForReconnected(self: *@This(), rt: *zio.Runtime, timeout_ms: u64) !void {
+        try self.mutex.lock(rt);
+        defer self.mutex.unlock(rt);
+
+        var timer = try std.time.Timer.start();
+        while (self.reconnected_called == 0) {
+            if (timer.read() >= timeout_ms * std.time.ns_per_ms) {
+                return error.ReconnectionTimeout;
+            }
+            self.cond.timedWait(rt, &self.mutex, .fromMilliseconds(100)) catch {};
+        }
     }
 };
 
@@ -90,16 +110,9 @@ test "basic reconnection when server stops" {
     log.debug("Restarting nats-1", .{});
     try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
 
-    // Wait for reconnection before publishing
-    var timer = try std.time.Timer.start();
-    while (!nc.isConnected()) {
-        const elapsed = timer.read();
-        if (elapsed >= 10000 * std.time.ns_per_ms) {
-            return error.StillNotConnected;
-        }
-
-        try rt.sleep(.fromMilliseconds(10));
-    }
+    // Wait for disconnect and reconnection callbacks
+    try tracker.waitForDisconnected(rt, 10000);
+    try tracker.waitForReconnected(rt, 10000);
 
     // Verify connection works after reconnection
     log.debug("Publishing after reconnection", .{});
@@ -154,14 +167,7 @@ test "manual reconnection with nc.reconnect()" {
     try nc.reconnect();
 
     // Wait for reconnection to complete
-    var timer = try std.time.Timer.start();
-    while (tracker.reconnected_called == 0) {
-        if (timer.read() >= 5000 * std.time.ns_per_ms) {
-            return error.ReconnectionTimeout;
-        }
-        try tracker.timedWait(rt, 100);
-    }
-
+    try tracker.waitForReconnected(rt, 5000);
     log.debug("Manual reconnection completed", .{});
 
     // Verify callbacks were called
