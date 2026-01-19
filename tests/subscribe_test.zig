@@ -1,12 +1,16 @@
 const std = @import("std");
 const nats = @import("nats");
+const zio = @import("zio");
 const utils = @import("utils.zig");
 const Message = nats.Message;
 
 const log = std.log.default;
 
 test "subscribeSync smoke test" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("test");
@@ -23,7 +27,10 @@ test "subscribeSync smoke test" {
 }
 
 test "queueSubscribeSync smoke test" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const sub = try conn.queueSubscribeSync("test", "workers");
@@ -74,7 +81,10 @@ const MessageCollector = struct {
 };
 
 test "subscribe smoke test" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var collector: MessageCollector = .{};
@@ -92,7 +102,10 @@ test "subscribe smoke test" {
 }
 
 test "queueSubscribe smoke test" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var collector: MessageCollector = .{};

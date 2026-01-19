@@ -407,10 +407,10 @@ pub const Connection = struct {
         self.should_stop.store(false, .monotonic);
 
         // Start reader fiber - it will handle the handshake
-        self.reader_task = try self.rt.spawn(readerLoop, .{self}, .{});
+        self.reader_task = try self.rt.spawn(readerLoop, .{self});
 
         // Start flusher fiber
-        self.flusher_task = try self.rt.spawn(flusherLoop, .{self}, .{});
+        self.flusher_task = try self.rt.spawn(flusherLoop, .{self});
 
         // Wait for handshake completion
         try self.waitForHandshakeCompletion();
@@ -454,8 +454,8 @@ pub const Connection = struct {
         }
 
         // Close write buffer - this wakes up the flusher fiber
-        self.pending_buffer.close();
-        self.write_buffer.close();
+        self.pending_buffer.close(self.rt);
+        self.write_buffer.close(self.rt);
 
         // Wait for both fibers to release the stream with timeout
         self.waitForStreamUnused(self.options.timeout_ms * 2) catch {
@@ -542,7 +542,7 @@ pub const Connection = struct {
 
         // Spawn reconnect fiber if not already running
         if (self.reconnect_task == null) {
-            self.reconnect_task = self.rt.spawn(doReconnectLoop, .{self}, .{}) catch |spawn_err| {
+            self.reconnect_task = self.rt.spawn(doReconnectLoop, .{self}) catch |spawn_err| {
                 log.err("Failed to spawn reconnect fiber: {}", .{spawn_err});
                 // Fall back to closing connection
                 needs_close = true;
@@ -660,9 +660,9 @@ pub const Connection = struct {
 
         // Published messages go to pending_buffer during reconnection, otherwise write_buffer
         if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
-            try self.pending_buffer.append(buffer.items);
+            try self.pending_buffer.append(self.rt, buffer.items);
         } else {
-            try self.write_buffer.append(self.rt,buffer.items);
+            try self.write_buffer.append(self.rt, buffer.items);
         }
 
         if (reply_to_use) |reply| {
@@ -972,7 +972,7 @@ pub const Connection = struct {
         self.handshake_error = null;
 
         // Unfreeze write buffer now that we have a working socket
-        self.write_buffer.unfreeze();
+        self.write_buffer.unfreeze(self.rt);
     }
 
     fn readerLoop(self: *Self) void {
@@ -1059,7 +1059,7 @@ pub const Connection = struct {
     fn flusherIteration(self: *Self) !void {
         // Try to gather data from buffer first
         var slices: [16][]const u8 = undefined;
-        const gather = self.write_buffer.gatherReadSlices(&slices, self.options.timeout_ms) catch |err| switch (err) {
+        const gather = self.write_buffer.gatherReadSlices(self.rt, &slices, self.options.timeout_ms) catch |err| switch (err) {
             error.QueueEmpty => {
                 // No data to write
                 return;
@@ -1069,6 +1069,7 @@ pub const Connection = struct {
                 return;
             },
             error.QueueClosed => return error.ShouldStop,
+            error.Canceled => return error.Canceled,
         };
 
         if (gather.slices.len == 0) {
@@ -1141,7 +1142,7 @@ pub const Connection = struct {
 
             // Queue message for subscription (both sync and async use the queue)
             // For async subscriptions, the handler fiber will pick it up
-            s.messages.push(message) catch |err| {
+            s.messages.push(self.rt, message) catch |err| {
                 switch (err) {
                     error.QueueClosed => {
                         // Queue is closed; drop gracefully.
@@ -1150,6 +1151,7 @@ pub const Connection = struct {
                         subscription_mod.decrementPending(s, message.data.len);
                         return;
                     },
+                    error.Canceled => return error.Canceled,
                     else => {
                         // Allocation or unexpected push failure; log and tear down the connection.
                         log.err("Failed to enqueue message for sid {d}: {}", .{ message.sid, err });
@@ -1462,7 +1464,7 @@ pub const Connection = struct {
         self.stream_available_cond.broadcast(self.rt);
 
         // Always freeze write buffer (idempotent operation)
-        self.write_buffer.freeze();
+        self.write_buffer.freeze(self.rt);
 
         // Wake up any waiting flush() calls
         self.pong_condition.broadcast(self.rt);
@@ -1522,7 +1524,7 @@ pub const Connection = struct {
 
         // Spawn reconnect fiber if not already running
         if (self.reconnect_task == null) {
-            self.reconnect_task = self.rt.spawn(doReconnectLoop, .{self}, .{}) catch |spawn_err| {
+            self.reconnect_task = self.rt.spawn(doReconnectLoop, .{self}) catch |spawn_err| {
                 log.err("Failed to spawn reconnect fiber: {}", .{spawn_err});
                 // Fall back to closing connection
                 needs_close = true;

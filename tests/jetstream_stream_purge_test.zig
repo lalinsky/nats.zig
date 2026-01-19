@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
+const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "purge stream" {
