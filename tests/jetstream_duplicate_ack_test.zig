@@ -7,7 +7,10 @@ const utils = @import("utils.zig");
 const log = std.log.default;
 
 test "ack should succeed on first call" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -84,7 +87,10 @@ test "ack should succeed on first call" {
 }
 
 test "ack should fail on second call" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -170,7 +176,10 @@ test "ack should fail on second call" {
 }
 
 test "nak should fail after ack" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -256,7 +265,10 @@ test "nak should fail after ack" {
 }
 
 test "inProgress can be called multiple times" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

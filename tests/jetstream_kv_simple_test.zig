@@ -5,7 +5,10 @@ const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "KV simple put and get" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

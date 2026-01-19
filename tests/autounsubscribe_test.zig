@@ -5,7 +5,10 @@ const utils = @import("utils.zig");
 const Message = nats.Message;
 
 test "autounsubscribe sync basic functionality" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("auto.test");
@@ -38,7 +41,10 @@ test "autounsubscribe sync basic functionality" {
 }
 
 test "autounsubscribe async basic functionality" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var messages_received = std.ArrayList(*Message){};
@@ -93,7 +99,10 @@ test "autounsubscribe async basic functionality" {
 }
 
 test "autounsubscribe error conditions" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("error.test");
@@ -114,7 +123,10 @@ test "autounsubscribe error conditions" {
 }
 
 test "autounsubscribe delivered message counter" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("counter.test");
@@ -166,9 +178,12 @@ const ReconnectTracker = struct {
 };
 
 test "autounsubscribe with reconnection" {
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
     ReconnectTracker.reset();
 
-    const conn = try utils.createConnection(.node1, .{
+    const conn = try utils.createConnection(rt, .node1, .{
         .reconnect = .{
             .allow_reconnect = true,
             .reconnect_wait_ms = 100,

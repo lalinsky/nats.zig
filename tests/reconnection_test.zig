@@ -68,9 +68,12 @@ const CallbackTracker = struct {
 };
 
 test "basic reconnection when server stops" {
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
     tracker.reset();
 
-    const nc = try utils.createConnection(.node1, .{
+    const nc = try utils.createConnection(rt, .node1, .{
         .trace = true,
         .reconnect = .{
             .allow_reconnect = true,
@@ -114,9 +117,12 @@ test "basic reconnection when server stops" {
 }
 
 test "manual reconnection with nc.reconnect()" {
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
     tracker.reset();
 
-    const nc = try utils.createConnection(.node1, .{
+    const nc = try utils.createConnection(rt, .node1, .{
         .trace = true,
         .reconnect = .{
             .allow_reconnect = true,
@@ -182,7 +188,10 @@ test "manual reconnection with nc.reconnect()" {
 }
 
 test "reconnect() errors when disabled" {
-    const nc = try utils.createConnection(.node1, .{
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const nc = try utils.createConnection(rt, .node1, .{
         .reconnect = .{
             .allow_reconnect = false,
         },
@@ -194,7 +203,10 @@ test "reconnect() errors when disabled" {
 }
 
 test "reconnect() errors when connection closed" {
-    const nc = try utils.createConnection(.node1, .{});
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const nc = try utils.createConnection(rt, .node1, .{});
     defer utils.closeConnection(nc);
 
     nc.close();

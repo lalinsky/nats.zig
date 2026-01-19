@@ -7,7 +7,10 @@ const utils = @import("utils.zig");
 const log = std.log.default;
 
 test "basic push subscription" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -63,7 +66,10 @@ test "basic push subscription" {
 }
 
 test "push subscription with flow control" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -122,7 +128,10 @@ test "push subscription with flow control" {
 }
 
 test "push subscription error handling" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

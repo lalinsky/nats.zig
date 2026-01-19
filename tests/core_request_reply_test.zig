@@ -40,7 +40,10 @@ fn slowEchoHandler(msg: *nats.Message, connection: *nats.Connection) void {
 }
 
 test "basic request reply" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const replier_sub = try conn.subscribe("test.echo", echoHandler, .{conn});
@@ -58,7 +61,10 @@ test "basic request reply" {
 }
 
 test "simple request reply functionality" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create a replier that echoes back the request
@@ -76,7 +82,10 @@ test "simple request reply functionality" {
 }
 
 test "concurrent request reply" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create echo handler
@@ -106,7 +115,10 @@ test "concurrent request reply" {
 }
 
 test "request with no responders" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Send a request to a subject with no responder - should return NoResponders error
@@ -117,7 +129,10 @@ test "request with no responders" {
 }
 
 test "request timeout with slow responder" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Set up a slow responder that takes 200ms to respond
@@ -134,7 +149,10 @@ test "request timeout with slow responder" {
 }
 
 test "request with different subjects" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Set up multiple echo handlers on different subjects
@@ -157,7 +175,10 @@ test "request with different subjects" {
 }
 
 test "requestMsg basic functionality" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create echo handler
@@ -181,7 +202,10 @@ test "requestMsg basic functionality" {
 }
 
 test "requestMsg with headers" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create handler that echoes back with headers
@@ -209,7 +233,10 @@ test "requestMsg with headers" {
 }
 
 test "requestMsg validation errors" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var request_msg = try conn.newMsg();
@@ -237,7 +264,10 @@ fn multiResponder(msg: *nats.Message, connection: *nats.Connection) void {
 }
 
 test "requestMany with max_messages" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Set up handler that sends multiple responses
@@ -258,7 +288,10 @@ test "requestMany with max_messages" {
 }
 
 test "requestMany with timeout collecting all" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Set up handler that sends multiple responses
@@ -295,7 +328,10 @@ fn sentinelResponder(msg: *nats.Message, connection: *nats.Connection) void {
 }
 
 test "requestMany with sentinel function" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Set up handler that sends responses with sentinel
@@ -328,7 +364,10 @@ test "requestMany with sentinel function" {
 }
 
 test "requestMany with no responders" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const result = conn.requestMany("test.no.responder.many", "no one", 100, .{});
@@ -336,7 +375,10 @@ test "requestMany with no responders" {
 }
 
 test "requestMany with stall timeout" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Set up sync subscription to handle the request manually

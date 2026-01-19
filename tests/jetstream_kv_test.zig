@@ -7,7 +7,10 @@ const utils = @import("utils.zig");
 const log = std.log.default;
 
 test "KV basic create bucket" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -34,7 +37,10 @@ test "KV basic create bucket" {
 }
 
 test "KV put and get operations" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -72,7 +78,10 @@ test "KV put and get operations" {
 }
 
 test "KV create and update operations" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -115,7 +124,10 @@ test "KV create and update operations" {
 }
 
 test "KV delete operation" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -155,7 +167,10 @@ test "KV delete operation" {
 }
 
 test "KV purge operation" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -192,7 +207,10 @@ test "KV purge operation" {
 }
 
 test "KV status operation" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

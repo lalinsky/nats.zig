@@ -7,7 +7,10 @@ const utils = @import("utils.zig");
 const log = std.log.default;
 
 test "ObjectStore basic create store" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});
@@ -33,7 +36,10 @@ test "ObjectStore basic create store" {
 }
 
 test "ObjectStore put and get operations" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});
@@ -81,7 +87,10 @@ test "ObjectStore put and get operations" {
 }
 
 test "ObjectStore chunked operations" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});
@@ -129,7 +138,10 @@ test "ObjectStore chunked operations" {
 }
 
 test "ObjectStore delete operations" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});
@@ -174,7 +186,10 @@ test "ObjectStore delete operations" {
 }
 
 test "ObjectStore list operations" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});
@@ -242,7 +257,10 @@ test "ObjectStore list operations" {
 }
 
 test "ObjectStore validation" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Test store name validation
@@ -263,7 +281,10 @@ test "ObjectStore validation" {
 }
 
 test "ObjectStore error handling" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});

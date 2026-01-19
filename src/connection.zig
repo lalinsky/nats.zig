@@ -697,7 +697,7 @@ pub const Connection = struct {
         } else {
             try buffer.writer(allocator).print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
         }
-        try self.write_buffer.append(self.rt,buffer.items);
+        try self.write_buffer.append(self.rt, buffer.items);
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
@@ -775,7 +775,7 @@ pub const Connection = struct {
             writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
         }
 
-        try self.write_buffer.append(self.rt,stream.getWritten());
+        try self.write_buffer.append(self.rt, stream.getWritten());
     }
 
     pub fn unsubscribe(self: *Self, sub: *Subscription) void {
@@ -1088,24 +1088,14 @@ pub const Connection = struct {
                 log.err("Write error: {}", .{err});
                 // Consume what we wrote so far before returning error
                 if (bytes_written > 0) {
-                    gather.consume(bytes_written) catch {};
+                    gather.consume(self.rt, bytes_written) catch {};
                 }
                 return err;
             };
             bytes_written += slice.len;
         }
 
-        gather.consume(bytes_written) catch |err| switch (err) {
-            error.BufferReset => {
-                // This can only happen during reconnection, we can assume
-                // it's safe to continue, since we will have a new buffer
-                return;
-            },
-            error.ConcurrentConsumer => {
-                // This is a bug, we can't handle it
-                std.debug.panic("Concurrent consumer detected", .{});
-            },
-        };
+        try gather.consume(self.rt, bytes_written);
     }
 
     // Parser callback methods
@@ -1210,7 +1200,7 @@ pub const Connection = struct {
         try buffer.writer(allocator).writeAll("PING\r\n");
 
         // Send via buffer (mutex already held)
-        try self.write_buffer.append(self.rt,buffer.items);
+        try self.write_buffer.append(self.rt, buffer.items);
 
         log.debug("Sent CONNECT+PING during handshake", .{});
     }
@@ -1372,7 +1362,7 @@ pub const Connection = struct {
     }
 
     fn sendPing(self: *Self, comptime lock: bool) !u64 {
-        try self.write_buffer.append(self.rt,"PING\r\n");
+        try self.write_buffer.append(self.rt, "PING\r\n");
 
         if (lock) self.mutex.lockUncancelable(self.rt);
         defer if (lock) self.mutex.unlock(self.rt);
@@ -1435,7 +1425,7 @@ pub const Connection = struct {
         self.mutex.lockUncancelable(self.rt);
         defer self.mutex.unlock(self.rt);
 
-        try self.write_buffer.append(self.rt,"PONG\r\n");
+        try self.write_buffer.append(self.rt, "PONG\r\n");
     }
 
     // Reconnection Logic
@@ -1458,9 +1448,9 @@ pub const Connection = struct {
             }
         }
 
-        // Detach socket and wake any threads waiting for it
-        const old_socket = self.socket;
-        self.socket = null;
+        // Detach stream and wake any threads waiting for it
+        const old_stream = self.stream;
+        self.stream = null;
         self.stream_available_cond.broadcast(self.rt);
 
         // Always freeze write buffer (idempotent operation)
@@ -1474,16 +1464,16 @@ pub const Connection = struct {
         self.handshake_error = null;
         self.handshake_cond.broadcast(self.rt);
 
-        // Handle socket cleanup
-        if (old_socket) |socket| {
+        // Handle stream cleanup
+        if (old_stream) |s| {
             // Always shutdown first to interrupt ongoing I/O
-            socket.shutdown(.both) catch |shutdown_err| {
-                log.debug("Socket shutdown failed: {}", .{shutdown_err});
+            s.shutdown(self.rt, .both) catch |shutdown_err| {
+                log.debug("Stream shutdown failed: {}", .{shutdown_err});
             };
 
-            // Close socket if requested
+            // Close stream if requested
             if (close_socket) {
-                socket.close();
+                s.close(self.rt);
             }
         }
     }
@@ -1569,13 +1559,13 @@ pub const Connection = struct {
 
         log.debug("Starting reconnection", .{});
 
-        // Close old socket if still attached (reader thread owns socket lifecycle)
-        const old_socket = self.socket;
-        self.socket = null;
-        self.stream_available_cond.broadcast(self.rt); // Wake any threads waiting for socket
+        // Close old stream if still attached (reader thread owns stream lifecycle)
+        const old_stream = self.stream;
+        self.stream = null;
+        self.stream_available_cond.broadcast(self.rt); // Wake any threads waiting for stream
 
-        if (old_socket) |socket| {
-            socket.close();
+        if (old_stream) |s| {
+            s.close(self.rt);
         }
 
         var total_attempts: u32 = 0;
@@ -1641,7 +1631,7 @@ pub const Connection = struct {
             };
 
             // Flush pending messages
-            self.pending_buffer.moveToBuffer(&self.write_buffer) catch |err| {
+            self.pending_buffer.moveToBuffer(self.rt, &self.write_buffer) catch |err| {
                 log.warn("Failed to flush pending messages: {}", .{err});
             };
 
@@ -1737,7 +1727,7 @@ pub const Connection = struct {
 
             // Send all subscription commands via write buffer
             if (buffer.items.len > 0) {
-                try self.write_buffer.append(self.rt,buffer.items);
+                try self.write_buffer.append(self.rt, buffer.items);
             }
         }
 

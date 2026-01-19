@@ -7,7 +7,10 @@ const utils = @import("utils.zig");
 const log = std.log.default;
 
 test "NAK redelivery with delivery count verification" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -146,7 +149,10 @@ test "NAK redelivery with delivery count verification" {
 }
 
 test "NAK with max delivery limit" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -243,7 +249,10 @@ test "NAK with max delivery limit" {
 }
 
 test "JetStream message metadata parsing" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -335,7 +344,10 @@ test "JetStream message metadata parsing" {
 }
 
 test "NAK with delay redelivery timing" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -454,7 +466,10 @@ test "NAK with delay redelivery timing" {
 }
 
 test "NAK with zero delay behaves like regular NAK" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

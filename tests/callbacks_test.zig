@@ -16,9 +16,12 @@ const Counters = struct {
 var counts: Counters = Counters{};
 
 test "close callback" {
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
     counts.reset();
 
-    const conn = try utils.createConnection(.node1, .{
+    const conn = try utils.createConnection(rt, .node1, .{
         .callbacks = .{
             .closed_cb = struct {
                 fn close(_: *nats.Connection) void {
