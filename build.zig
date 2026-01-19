@@ -34,6 +34,11 @@ pub fn build(b: *std.Build) void {
     }
     defer if (should_free) std.zon.parse.free(b.allocator, parsed_zon);
 
+    const zio = b.dependency("zio", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create build options
     const options = b.addOptions();
     options.addOption([]const u8, "version", parsed_zon.version);
@@ -52,6 +57,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lib_mod.addImport("zio", zio.module("zio"));
 
     // Add build options to the module
     lib_mod.addOptions("build_options", options);
@@ -95,6 +101,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
     integration_tests.root_module.addImport("nats", lib_mod);
+    integration_tests.root_module.addImport("zio", zio.module("zio"));
 
     const run_integration_tests = b.addRunArtifact(integration_tests);
     run_integration_tests.has_side_effects = true; // Allow repeated runs with Docker interactions
