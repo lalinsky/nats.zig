@@ -58,7 +58,7 @@ test "basic push subscription" {
     try conn.publish("orders.update", "Order Update");
 
     // Wait a bit for messages to be processed
-    std.Thread.sleep(100 * std.time.ns_per_ms);
+    try rt.sleep(.fromMilliseconds(100));
 
     // Verify messages were received
     try testing.expect(message_count > 0);
@@ -86,12 +86,12 @@ test "push subscription with flow control" {
     var processed_count: u32 = 0;
 
     const TaskHandler = struct {
-        fn handle(js_msg: *nats.JetStreamMessage, counter: *u32) void {
+        fn handle(js_msg: *nats.JetStreamMessage, runtime: *zio.Runtime, counter: *u32) void {
             defer js_msg.deinit();
             counter.* += 1;
 
             // Simulate some processing time
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            runtime.sleep(.fromMilliseconds(10)) catch {};
 
             // Acknowledge successful processing
             js_msg.ack() catch |err| {
@@ -101,7 +101,7 @@ test "push subscription with flow control" {
     };
 
     // Subscribe with flow control enabled (deliver_subject auto-generated)
-    var push_sub = try js.subscribe("tasks.*", TaskHandler.handle, .{&processed_count}, .{
+    var push_sub = try js.subscribe("tasks.*", TaskHandler.handle, .{ rt, &processed_count }, .{
         .stream = "TEST_PUSH_FC_STREAM",
         .durable = "task_processor",
         .config = .{
@@ -121,7 +121,7 @@ test "push subscription with flow control" {
     }
 
     // Allow time for processing
-    std.Thread.sleep(200 * std.time.ns_per_ms);
+    try rt.sleep(.fromMilliseconds(200));
 
     try testing.expect(processed_count > 0);
     log.info("Processed {d} tasks with flow control", .{processed_count});

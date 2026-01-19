@@ -58,16 +58,17 @@ test "autounsubscribe async basic functionality" {
     const TestContext = struct {
         messages: *std.ArrayList(*Message),
         allocator: std.mem.Allocator,
-        mutex: std.Thread.Mutex = .{},
+        mutex: zio.Mutex = .{},
+        rt: *zio.Runtime,
 
         pub fn handleMessage(msg: *Message, self: *@This()) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            try self.mutex.lock(self.rt);
+            defer self.mutex.unlock(self.rt);
             try self.messages.append(self.allocator, msg);
         }
     };
 
-    var ctx = TestContext{ .messages = &messages_received, .allocator = std.testing.allocator };
+    var ctx = TestContext{ .messages = &messages_received, .allocator = std.testing.allocator, .rt = rt };
 
     const sub = try conn.subscribe("auto.async.test", TestContext.handleMessage, .{&ctx});
     defer sub.deinit();
@@ -88,11 +89,11 @@ test "autounsubscribe async basic functionality" {
     const deadline_ms = std.time.milliTimestamp() + 1000;
     var count: usize = 0;
     while (std.time.milliTimestamp() < deadline_ms) {
-        ctx.mutex.lock();
+        try ctx.mutex.lock(rt);
         count = messages_received.items.len;
-        ctx.mutex.unlock();
+        ctx.mutex.unlock(rt);
         if (count >= 2) break;
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        try rt.sleep(.fromMilliseconds(10));
     }
 
     try std.testing.expectEqual(@as(usize, 2), count);
@@ -161,19 +162,18 @@ test "autounsubscribe delivered message counter" {
 
 const ReconnectTracker = struct {
     var reconnected_called: u32 = 0;
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: zio.Mutex = .{};
 
-    fn reset() void {
-        mutex.lock();
-        defer mutex.unlock();
+    fn reset(rt: *zio.Runtime) !void {
+        try mutex.lock(rt);
+        defer mutex.unlock(rt);
         reconnected_called = 0;
     }
 
     fn reconnectedCallback(conn: *nats.Connection) void {
-        mutex.lock();
-        defer mutex.unlock();
+        mutex.lockUncancelable(conn.rt);
+        defer mutex.unlock(conn.rt);
         reconnected_called += 1;
-        _ = conn;
     }
 };
 
@@ -181,7 +181,7 @@ test "autounsubscribe with reconnection" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    ReconnectTracker.reset();
+    try ReconnectTracker.reset(rt);
 
     const conn = try utils.createConnection(rt, .node1, .{
         .reconnect = .{
@@ -227,7 +227,7 @@ test "autounsubscribe with reconnection" {
         if (timer.read() >= 5000 * std.time.ns_per_ms) {
             return error.ReconnectionTimeout;
         }
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        try rt.sleep(.fromMilliseconds(10));
     }
 
     // Publish more messages after reconnection (should only receive 2 more to reach limit of 5)

@@ -58,7 +58,7 @@ test "async subscribe" {
         count: u32 = 0,
         data: []const u8 = "",
         subject: []const u8 = "",
-        called: std.Thread.ResetEvent = .{},
+        called: zio.ResetEvent = .init,
 
         fn handleMsg(msg: *nats.Message, self: *@This()) void {
             defer self.called.set();
@@ -86,7 +86,7 @@ test "async subscribe" {
     try conn.flush();
 
     // Wait a bit for async processing
-    try handler.called.timedWait(100 * std.time.ns_per_ms);
+    try handler.called.timedWait(rt, .fromMilliseconds(100));
 
     // Check if message was received by handler
     try std.testing.expect(handler.count == 1);

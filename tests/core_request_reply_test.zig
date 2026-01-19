@@ -24,19 +24,11 @@ fn simpleEchoHandler(msg: *nats.Message, connection: *nats.Connection) void {
     }
 }
 
-// Slow echo handler that delays before responding (for timeout testing)
-fn slowEchoHandler(msg: *nats.Message, connection: *nats.Connection) void {
+// Handler that never responds (for timeout testing)
+fn noResponseHandler(msg: *nats.Message, connection: *nats.Connection) void {
+    _ = connection;
     defer msg.deinit();
-
-    // Sleep for 200ms to simulate slow processing
-    std.Thread.sleep(200_000_000); // 200ms
-
-    if (msg.reply) |reply_subject| {
-        const response = std.fmt.allocPrint(std.testing.allocator, "slow: {s}", .{msg.data}) catch return;
-        defer std.testing.allocator.free(response);
-
-        connection.publish(reply_subject, response) catch return;
-    }
+    // Don't respond - this will cause the request to timeout
 }
 
 test "basic request reply" {
@@ -50,7 +42,7 @@ test "basic request reply" {
     defer replier_sub.deinit();
 
     // Give the subscription time to register
-    std.Thread.sleep(10_000_000); // 10ms
+    try rt.sleep(.fromMilliseconds(10));
 
     // Send a request
     var msg = try conn.request("test.echo", "hello world", 1000);
@@ -72,7 +64,7 @@ test "simple request reply functionality" {
     defer replier_sub.deinit();
 
     // Give the subscription time to register
-    std.Thread.sleep(10_000_000); // 10ms
+    try rt.sleep(.fromMilliseconds(10));
 
     // Send a request
     var msg = try conn.request("test.simple.echo", "hello world", 1000);
@@ -92,7 +84,7 @@ test "concurrent request reply" {
     const replier_sub = try conn.subscribe("test.concurrent", echoHandler, .{conn});
     defer replier_sub.deinit();
 
-    std.Thread.sleep(10_000_000); // 10ms
+    try rt.sleep(.fromMilliseconds(10));
 
     // Send multiple requests concurrently
     var requests: [5]*nats.Message = undefined;
@@ -128,20 +120,20 @@ test "request with no responders" {
     try std.testing.expectError(error.NoResponders, response);
 }
 
-test "request timeout with slow responder" {
+test "request timeout with no responder" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
-    // Set up a slow responder that takes 200ms to respond
-    const slow_sub = try conn.subscribe("test.slow", slowEchoHandler, .{conn});
+    // Set up a handler that never responds
+    const slow_sub = try conn.subscribe("test.slow", noResponseHandler, .{conn});
     defer slow_sub.deinit();
 
-    std.Thread.sleep(10_000_000); // 10ms
+    try rt.sleep(.fromMilliseconds(10));
 
-    // Send request with 100ms timeout (less than the 200ms handler delay)
+    // Send request with 100ms timeout - will timeout since handler never responds
     const response = conn.request("test.slow", "timeout test", 100);
 
     // Should return timeout error
@@ -162,7 +154,7 @@ test "request with different subjects" {
     const replier2 = try conn.subscribe("test.subject2", echoHandler, .{conn});
     defer replier2.deinit();
 
-    std.Thread.sleep(10_000_000); // 10ms
+    try rt.sleep(.fromMilliseconds(10));
 
     // Test requests to different subjects
     const response1 = try conn.request("test.subject1", "message1", 1000);
@@ -185,7 +177,7 @@ test "requestMsg basic functionality" {
     const replier_sub = try conn.subscribe("test.requestmsg", simpleEchoHandler, .{conn});
     defer replier_sub.deinit();
 
-    std.Thread.sleep(10_000_000); // 10ms
+    try rt.sleep(.fromMilliseconds(10));
 
     var request_msg = try conn.newMsg();
     defer request_msg.deinit();
@@ -212,7 +204,7 @@ test "requestMsg with headers" {
     const replier_sub = try conn.subscribe("test.requestmsg.headers", echoHandler, .{conn});
     defer replier_sub.deinit();
 
-    std.Thread.sleep(10_000_000); // 10ms
+    try rt.sleep(.fromMilliseconds(10));
 
     var request_msg = try conn.newMsg();
     defer request_msg.deinit();
@@ -338,7 +330,7 @@ test "requestMany with sentinel function" {
     const replier_sub = try conn.subscribe("test.sentinel", sentinelResponder, .{conn});
     defer replier_sub.deinit();
 
-    std.Thread.sleep(10_000_000); // 10ms
+    try rt.sleep(.fromMilliseconds(10));
 
     // Sentinel function that stops when it sees "END" message (ADR-47: false = stop)
     const sentinel = struct {

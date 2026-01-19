@@ -50,7 +50,7 @@ test "subscription drain sync - with pending messages" {
     // Wait (up to 1s) for both messages to be counted as pending
     var waited: u64 = 0;
     while (sub.pending_msgs.load(.acquire) < 2 and waited < 1000) : (waited += 5) {
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        try rt.sleep(.fromMilliseconds(5));
     }
 
     // Should have pending messages
@@ -95,11 +95,12 @@ test "subscription drain async - with callback processing" {
     defer utils.closeConnection(conn);
 
     var messages_processed: u32 = 0;
-    var processing_complete: std.Thread.ResetEvent = .{};
+    var processing_complete: zio.ResetEvent = .init;
 
     const TestContext = struct {
         processed_count_ptr: *u32,
-        completion_event_ptr: *std.Thread.ResetEvent,
+        completion_event_ptr: *zio.ResetEvent,
+        rt: *zio.Runtime,
     };
 
     const testHandler = struct {
@@ -107,7 +108,7 @@ test "subscription drain async - with callback processing" {
             defer msg.deinit();
 
             // Simulate some processing time
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            ctx.rt.sleep(.fromMilliseconds(5)) catch {};
 
             ctx.processed_count_ptr.* += 1;
             if (ctx.processed_count_ptr.* == 3) {
@@ -120,6 +121,7 @@ test "subscription drain async - with callback processing" {
     const sub = try conn.subscribe("test.drain.async", testHandler, .{TestContext{
         .processed_count_ptr = &messages_processed,
         .completion_event_ptr = &processing_complete,
+        .rt = rt,
     }});
     defer sub.deinit();
 
@@ -130,7 +132,7 @@ test "subscription drain async - with callback processing" {
     try conn.flush();
 
     // Give messages time to arrive but not necessarily process
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    try rt.sleep(.fromMilliseconds(10));
 
     // Messages should have arrived (they may be processing or queued)
     // Note: pending count may be 0 if already processed, so we'll skip this check
@@ -150,7 +152,7 @@ test "subscription drain async - with callback processing" {
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 0);
 
     // Wait for all messages to be processed
-    processing_complete.wait();
+    try processing_complete.wait(rt);
     try std.testing.expect(messages_processed == 3);
 }
 
@@ -168,7 +170,7 @@ test "subscription drain blocks new messages" {
     // Publish initial message
     try conn.publish("test.drain.block", "before drain");
     try conn.flush();
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    try rt.sleep(.fromMilliseconds(10));
 
     // Should have 1 pending message
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 1);
@@ -180,7 +182,7 @@ test "subscription drain blocks new messages" {
     try conn.publish("test.drain.block", "after drain 1");
     try conn.publish("test.drain.block", "after drain 2");
     try conn.flush();
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    try rt.sleep(.fromMilliseconds(10));
 
     // Should still have only 1 pending message (new ones dropped)
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 1);
@@ -214,7 +216,7 @@ test "subscription drain timeout" {
     // Wait briefly for arrival
     var waited: u64 = 0;
     while (sub.pending_msgs.load(.acquire) < 1 and waited < 200) : (waited += 5) {
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        try rt.sleep(.fromMilliseconds(5));
     }
     sub.drain();
 
@@ -274,7 +276,7 @@ test "connection drain - single subscription" {
     // Wait for messages to arrive
     var waited: u64 = 0;
     while (sub.pending_msgs.load(.acquire) < 2 and waited < 1000) : (waited += 5) {
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        try rt.sleep(.fromMilliseconds(5));
     }
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 2);
 
@@ -317,7 +319,7 @@ test "connection drain - multiple subscriptions" {
     // Wait for messages to arrive
     var waited: u64 = 0;
     while ((sub1.pending_msgs.load(.acquire) < 1 or sub2.pending_msgs.load(.acquire) < 1) and waited < 1000) : (waited += 5) {
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        try rt.sleep(.fromMilliseconds(5));
     }
     try std.testing.expect(sub1.pending_msgs.load(.acquire) == 1);
     try std.testing.expect(sub2.pending_msgs.load(.acquire) == 1);
