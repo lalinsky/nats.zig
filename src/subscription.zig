@@ -12,11 +12,11 @@
 // limitations under the License.
 
 const std = @import("std");
+const zio = @import("zio");
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const RefCounter = @import("ref_counter.zig").RefCounter;
 const ConcurrentQueue = @import("queue.zig").ConcurrentQueue;
-const Dispatcher = @import("dispatcher.zig").Dispatcher;
 const Connection = @import("connection.zig").Connection;
 
 const log = @import("log.zig").log;
@@ -51,8 +51,8 @@ pub const Subscription = struct {
     // Callback support
     handler: ?MsgHandler = null,
 
-    // Assigned dispatcher (for async subscriptions only)
-    dispatcher: ?*Dispatcher = null,
+    // Handler fiber group (for async subscriptions only)
+    handler_group: zio.Group = .init,
 
     // Track pending messages and bytes for both sync and async subscriptions
     pending_msgs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -96,6 +96,61 @@ pub const Subscription = struct {
         return sub;
     }
 
+    /// Start the handler fiber for async subscriptions.
+    /// This should be called after the subscription is fully registered.
+    pub fn startHandler(self: *Subscription) !void {
+        if (self.handler == null) return; // Sync subscription, no handler fiber needed
+
+        try self.handler_group.spawn(self.nc.rt, handlerLoop, .{self});
+    }
+
+    /// Handler fiber loop - waits for messages and calls the handler
+    fn handlerLoop(self: *Subscription) void {
+        log.debug("Handler fiber started for subscription {}", .{self.sid});
+
+        while (true) {
+            // Wait for a message with timeout (allows periodic checking)
+            const msg = self.messages.pop(self.nc.rt, 100) catch |err| {
+                if (err == error.QueueClosed or err == error.Canceled) {
+                    log.debug("Subscription {} queue closed, stopping handler", .{self.sid});
+                    break;
+                }
+                // Timeout - continue loop
+                continue;
+            };
+
+            // Check autounsubscribe limit
+            const max = self.max_msgs.load(.acquire);
+            const delivered = self.delivered_msgs.fetchAdd(1, .acq_rel) + 1;
+
+            // Save message data length before handler is called
+            const message_data_len = msg.data.len;
+
+            // Call the handler
+            if (self.handler) |handler| {
+                handler.call(msg) catch |err| {
+                    log.err("Message handler failed for subscription {}: {}", .{ self.sid, err });
+                };
+            } else {
+                // No handler - shouldn't happen for async subscriptions
+                log.warn("Received message for subscription {} without handler", .{self.sid});
+                msg.deinit();
+            }
+
+            // Decrement pending counters after handler completes
+            decrementPending(self, message_data_len);
+
+            // Check if we've reached autounsubscribe limit
+            if (max > 0 and delivered >= max) {
+                log.debug("Subscription {} reached autounsubscribe limit ({}), removing", .{ self.sid, max });
+                self.nc.removeSubscriptionInternal(self.sid);
+                break;
+            }
+        }
+
+        log.debug("Handler fiber stopped for subscription {}", .{self.sid});
+    }
+
     /// Unsubscribe from the server and release the user reference.
     /// After calling this, the subscription should not be used.
     pub fn deinit(self: *Subscription) void {
@@ -104,6 +159,9 @@ pub const Subscription = struct {
     }
 
     fn destroy(self: *Subscription) void {
+        // Cancel handler fiber group and wait for completion
+        self.handler_group.cancel(self.nc.rt);
+
         self.nc.allocator.free(self.subject);
 
         if (self.queue) |queue_group| {
@@ -116,8 +174,8 @@ pub const Subscription = struct {
         }
 
         // Close the queue to prevent new messages and clean up pending messages
-        self.messages.close();
-        while (self.messages.tryPop()) |msg| {
+        self.messages.close(self.nc.rt);
+        while (self.messages.tryPop(self.nc.rt)) |msg| {
             msg.deinit();
         }
         self.messages.deinit();
@@ -204,17 +262,18 @@ pub const Subscription = struct {
         self.max_msgs.store(max, .release);
     }
 
-    pub fn nextMsg(self: *Subscription, timeout_ms: u64) error{Timeout}!*Message {
+    pub fn nextMsg(self: *Subscription, timeout_ms: u64) (zio.Cancelable || error{Timeout})!*Message {
         // Check if subscription has reached autounsubscribe limit
         const max = self.max_msgs.load(.acquire);
         if (max > 0 and self.delivered_msgs.load(.acquire) >= max) {
             return error.Timeout; // Consistent with "no more messages" semantics
         }
 
-        const msg = self.messages.pop(timeout_ms) catch |err| switch (err) {
+        const msg = self.messages.pop(self.nc.rt, timeout_ms) catch |err| switch (err) {
             error.BufferFrozen => return error.Timeout,
             error.QueueEmpty => return error.Timeout,
             error.QueueClosed => return error.Timeout, // TODO: this should be mapped to ConnectionClosed
+            error.Canceled => return error.Canceled,
         };
 
         // Increment delivered counter with proper memory ordering

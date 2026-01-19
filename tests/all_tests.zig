@@ -3,7 +3,6 @@ const nats = @import("nats");
 const utils = @import("utils.zig");
 
 test {
-    _ = @import("socket_test.zig");
     _ = @import("minimal_test.zig");
     _ = @import("auth_test.zig");
     _ = @import("headers_test.zig");

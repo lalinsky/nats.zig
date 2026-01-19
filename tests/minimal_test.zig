@@ -1,23 +1,33 @@
 const std = @import("std");
 const nats = @import("nats");
+const zio = @import("zio");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
 
 test "connect" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 }
 
 test "connect wrong port" {
-    const conn = utils.createConnectionWrongPort() catch return;
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = utils.createConnectionWrongPort(rt) catch return;
     defer utils.closeConnection(conn);
 
     try std.testing.expect(false);
 }
 
 test "basic publish and subscribe" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -37,7 +47,10 @@ test "basic publish and subscribe" {
 }
 
 test "async subscribe" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Message handler function
