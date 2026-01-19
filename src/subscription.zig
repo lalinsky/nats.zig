@@ -64,7 +64,7 @@ pub const Subscription = struct {
 
     // Drain state
     draining: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    drain_complete: std.Thread.ResetEvent = .{},
+    drain_complete: zio.ResetEvent = .init,
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
@@ -226,13 +226,9 @@ pub const Subscription = struct {
 
         if (timeout_ms == 0) {
             // No timeout - wait indefinitely
-            self.drain_complete.wait();
+            try self.drain_complete.wait(self.nc.rt);
         } else {
-            // Convert timeout to nanoseconds
-            const timeout_ns = timeout_ms * std.time.ns_per_ms;
-            self.drain_complete.timedWait(timeout_ns) catch {
-                return error.Timeout;
-            };
+            try self.drain_complete.timedWait(self.nc.rt, .fromMilliseconds(timeout_ms));
         }
     }
 

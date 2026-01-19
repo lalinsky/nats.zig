@@ -13,6 +13,7 @@
 // limitations under the License.
 
 const std = @import("std");
+const zio = @import("zio");
 const Message = @import("message.zig").Message;
 const MessagePool = @import("message.zig").MessagePool;
 const log = @import("log.zig").log;
@@ -76,11 +77,11 @@ pub const Parser = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator) Self {
+    pub fn init(allocator: std.mem.Allocator, rt: *zio.Runtime) Self {
         return Self{
             .allocator = allocator,
             .arg_buf_rec = std.ArrayList(u8){},
-            .msg_pool = MessagePool.init(allocator),
+            .msg_pool = MessagePool.init(allocator, rt),
         };
     }
 

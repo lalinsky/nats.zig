@@ -285,7 +285,7 @@ pub const Connection = struct {
 
     // Connection draining
     drain_state: std.atomic.Value(DrainState) = std.atomic.Value(DrainState).init(.not_draining),
-    drain_completion: std.Thread.ResetEvent = .{},
+    drain_completion: zio.ResetEvent = .init,
     drain_subscription_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     drain_ping_id: u64 = 0,
 
@@ -307,8 +307,8 @@ pub const Connection = struct {
             .pending_buffer = WriteBuffer.init(allocator, .{ .max_size = options.reconnect.reconnect_buf_size }),
             .write_buffer = WriteBuffer.init(allocator, .{}),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
-            .response_manager = ResponseManager.init(allocator),
-            .parser = Parser.init(allocator),
+            .response_manager = ResponseManager.init(allocator, rt),
+            .parser = Parser.init(allocator, rt),
             .scratch = std.heap.ArenaAllocator.init(allocator),
             .ping_timer = std.time.Timer.start() catch unreachable,
         };
@@ -1899,9 +1899,9 @@ pub const Connection = struct {
         }
 
         if (timeout_ms) |timeout| {
-            try self.drain_completion.timedWait(timeout * std.time.ns_per_ms);
+            try self.drain_completion.timedWait(self.rt, .fromMilliseconds(timeout));
         } else {
-            self.drain_completion.wait();
+            try self.drain_completion.wait(self.rt);
         }
     }
 
