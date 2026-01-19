@@ -256,7 +256,8 @@ pub const Connection = struct {
     // Fibers
     reader_task: ?zio.JoinHandle(void) = null,
     flusher_task: ?zio.JoinHandle(void) = null,
-    reconnect_task: ?zio.JoinHandle(void) = null,
+    reconnect_group: zio.Group = .init,
+    reconnect_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     should_stop_cond: zio.Condition = .{},
 
@@ -326,10 +327,7 @@ pub const Connection = struct {
             task.cancel(self.rt);
             self.reader_task = null;
         }
-        if (self.reconnect_task) |*task| {
-            task.cancel(self.rt);
-            self.reconnect_task = null;
-        }
+        self.reconnect_group.cancel(self.rt);
 
         // Clean up response manager
         self.response_manager.deinit();
@@ -541,9 +539,10 @@ pub const Connection = struct {
         self.cleanupFailedConnection(synthetic_error, false);
 
         // Spawn reconnect fiber if not already running
-        if (self.reconnect_task == null) {
-            self.reconnect_task = self.rt.spawn(doReconnectLoop, .{self}) catch |spawn_err| {
+        if (!self.reconnect_running.swap(true, .acq_rel)) {
+            self.reconnect_group.spawn(self.rt, doReconnectLoop, .{self}) catch |spawn_err| {
                 log.err("Failed to spawn reconnect fiber: {}", .{spawn_err});
+                self.reconnect_running.store(false, .release);
                 // Fall back to closing connection
                 needs_close = true;
                 return spawn_err;
@@ -1513,9 +1512,10 @@ pub const Connection = struct {
         self.cleanupFailedConnection(err, false);
 
         // Spawn reconnect fiber if not already running
-        if (self.reconnect_task == null) {
-            self.reconnect_task = self.rt.spawn(doReconnectLoop, .{self}) catch |spawn_err| {
+        if (!self.reconnect_running.swap(true, .acq_rel)) {
+            self.reconnect_group.spawn(self.rt, doReconnectLoop, .{self}) catch |spawn_err| {
                 log.err("Failed to spawn reconnect fiber: {}", .{spawn_err});
+                self.reconnect_running.store(false, .release);
                 // Fall back to closing connection
                 needs_close = true;
                 return;
@@ -1529,16 +1529,7 @@ pub const Connection = struct {
     }
 
     fn doReconnectLoop(self: *Self) void {
-        defer {
-            self.mutex.lockUncancelable(self.rt);
-            defer self.mutex.unlock(self.rt);
-            if (self.reconnect_task) |*task| {
-                task.detach(self.rt);
-                self.reconnect_task = null;
-            }
-        }
-
-        // Run existing doReconnect logic
+        defer self.reconnect_running.store(false, .release);
         self.doReconnect();
     }
 
