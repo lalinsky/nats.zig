@@ -13,8 +13,8 @@ const CallbackTracker = struct {
     reconnected_called: u32 = 0,
     closed_called: u32 = 0,
     error_called: u32 = 0,
-    mutex: std.Thread.Mutex = .{},
-    cond: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    cond: zio.Condition = .{},
 
     fn reset(self: *@This()) void {
         self.disconnected_called = 0;
@@ -25,45 +25,41 @@ const CallbackTracker = struct {
 
     fn disconnectedCallback(conn: *nats.Connection) void {
         var self = &tracker;
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(conn.rt);
+        defer self.mutex.unlock(conn.rt);
         self.disconnected_called += 1;
-        self.cond.signal();
-        _ = conn;
+        self.cond.signal(conn.rt);
     }
 
     fn reconnectedCallback(conn: *nats.Connection) void {
         var self = &tracker;
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(conn.rt);
+        defer self.mutex.unlock(conn.rt);
         self.reconnected_called += 1;
-        self.cond.signal();
-        _ = conn;
+        self.cond.signal(conn.rt);
     }
 
     fn closedCallback(conn: *nats.Connection) void {
         var self = &tracker;
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(conn.rt);
+        defer self.mutex.unlock(conn.rt);
         self.closed_called += 1;
-        self.cond.signal();
-        _ = conn;
+        self.cond.signal(conn.rt);
     }
 
     fn errorCallback(conn: *nats.Connection, msg: []const u8) void {
         var self = &tracker;
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(conn.rt);
+        defer self.mutex.unlock(conn.rt);
         self.error_called += 1;
-        self.cond.signal();
-        _ = conn;
+        self.cond.signal(conn.rt);
         _ = msg;
     }
 
-    fn timedWait(self: *@This(), timeout_ms: u32) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return self.cond.timedWait(&self.mutex, timeout_ms * std.time.ns_per_ms);
+    fn timedWait(self: *@This(), rt: *zio.Runtime, timeout_ms: u32) !void {
+        try self.mutex.lock(rt);
+        defer self.mutex.unlock(rt);
+        return self.cond.timedWait(rt, &self.mutex, .fromMilliseconds(timeout_ms));
     }
 };
 
@@ -102,7 +98,7 @@ test "basic reconnection when server stops" {
             return error.StillNotConnected;
         }
 
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        try rt.sleep(.fromMilliseconds(10));
     }
 
     // Verify connection works after reconnection
@@ -110,8 +106,8 @@ test "basic reconnection when server stops" {
     try nc.publish("test.after", "hello after reconnection");
 
     // Verify both disconnected and reconnected callbacks were called
-    tracker.mutex.lock();
-    defer tracker.mutex.unlock();
+    tracker.mutex.lockUncancelable(rt);
+    defer tracker.mutex.unlock(rt);
     try testing.expectEqual(@as(u32, 1), tracker.disconnected_called);
     try testing.expectEqual(@as(u32, 1), tracker.reconnected_called);
 }
@@ -163,16 +159,16 @@ test "manual reconnection with nc.reconnect()" {
         if (timer.read() >= 5000 * std.time.ns_per_ms) {
             return error.ReconnectionTimeout;
         }
-        try tracker.timedWait(100);
+        try tracker.timedWait(rt, 100);
     }
 
     log.debug("Manual reconnection completed", .{});
 
     // Verify callbacks were called
-    tracker.mutex.lock();
+    tracker.mutex.lockUncancelable(rt);
     try testing.expectEqual(@as(u32, 1), tracker.disconnected_called);
     try testing.expectEqual(@as(u32, 1), tracker.reconnected_called);
-    tracker.mutex.unlock();
+    tracker.mutex.unlock(rt);
 
     // Verify connection is working after reconnection
     log.debug("Publishing test message after manual reconnection", .{});
