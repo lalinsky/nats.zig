@@ -385,9 +385,9 @@ test "requestMany with stall timeout" {
     const replier_sub = try conn.subscribeSync("test.stall");
     defer replier_sub.deinit();
 
-    // Thread that will send delayed responses
-    const ResponderThread = struct {
-        fn run(connection: *nats.Connection, sub: *nats.Subscription) void {
+    // Fiber that will send delayed responses
+    const ResponderFiber = struct {
+        fn run(runtime: *zio.Runtime, connection: *nats.Connection, sub: *nats.Subscription) void {
             // Wait for the request message
             const request_msg = sub.nextMsg(1000) catch return;
             defer request_msg.deinit();
@@ -398,20 +398,20 @@ test "requestMany with stall timeout" {
             connection.publish(reply_subject, "response-1") catch return;
 
             // Send second response after 10ms (within stall timeout)
-            std.Thread.sleep(10_000_000); // 10ms
+            runtime.sleep(.fromMilliseconds(10)) catch return;
             connection.publish(reply_subject, "response-2") catch return;
 
             // Wait 150ms (longer than 100ms stall timeout) then try to send third response
-            std.Thread.sleep(150_000_000); // 150ms
+            runtime.sleep(.fromMilliseconds(150)) catch return;
             connection.publish(reply_subject, "response-3") catch return;
         }
     };
 
-    // Start responder thread
-    const responder_thread = try std.Thread.spawn(.{}, ResponderThread.run, .{ conn, replier_sub });
-    defer responder_thread.join();
+    // Start responder fiber
+    var responder_task = try rt.spawn(ResponderFiber.run, .{ rt, conn, replier_sub });
+    defer responder_task.cancel(rt);
 
-    std.Thread.sleep(10_000_000); // 10ms to ensure subscription is ready
+    try rt.sleep(.fromMilliseconds(10)); // 10ms to ensure subscription is ready
 
     // Request with 100ms stall timeout - should get only first 2 responses
     var messages = try conn.requestMany("test.stall", "get with stall", 1000, .{ .stall_ms = 100 });
