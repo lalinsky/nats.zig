@@ -4,7 +4,10 @@ const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "pending_msgs counter sync subscription" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create sync subscription
@@ -66,7 +69,10 @@ test "pending_msgs counter sync subscription" {
 }
 
 test "pending_msgs counter async subscription" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var message_count = std.atomic.Value(u32).init(0);

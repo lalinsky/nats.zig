@@ -6,7 +6,10 @@ const utils = @import("utils.zig");
 const log = std.log.default;
 
 test "publish and receive message with headers" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -46,7 +49,10 @@ test "publish and receive message with headers" {
 }
 
 test "publish message without headers using publishMsg" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -75,6 +81,9 @@ test "publish message without headers using publishMsg" {
 }
 
 test "header manipulation API" {
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
     // Test header manipulation on a message
     var msg = nats.Message.init(std.testing.allocator);
     defer msg.deinit();
@@ -110,7 +119,10 @@ test "header manipulation API" {
 }
 
 test "message with reply and headers" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -152,6 +164,9 @@ test "message with reply and headers" {
 }
 
 test "no responders header detection" {
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
     // Create a message that simulates "no responders" response
     var msg = nats.Message.init(std.testing.allocator);
     defer msg.deinit();

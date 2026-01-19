@@ -12,8 +12,11 @@ const MessageBatch = nats.MessageBatch;
 const PullSubscription = nats.PullSubscription;
 
 test "JetStream pull consumer basic fetch" {
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
     // Use existing utility functions
-    const nc = try utils.createDefaultConnection();
+    const nc = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(nc);
 
     var js = nc.jetstream(.{});

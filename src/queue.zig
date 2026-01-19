@@ -596,7 +596,7 @@ pub fn VectorGather(comptime T: type, comptime chunk_size: usize) type {
 
         const Self = @This();
 
-        pub fn consume(self: Self, rt: *zio.Runtime, bytes_consumed: usize) (zio.Cancelable || error{BufferReset, ConcurrentConsumer})!void {
+        pub fn consume(self: Self, rt: *zio.Runtime, bytes_consumed: usize) (zio.Cancelable || error{ BufferReset, ConcurrentConsumer })!void {
             if (bytes_consumed > self.total_bytes) {
                 std.debug.panic("Attempting to consume {} bytes but only {} were gathered", .{ bytes_consumed, self.total_bytes });
             }

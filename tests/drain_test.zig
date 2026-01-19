@@ -4,7 +4,10 @@ const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "subscription drain sync - immediate completion" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create sync subscription
@@ -27,7 +30,10 @@ test "subscription drain sync - immediate completion" {
 }
 
 test "subscription drain sync - with pending messages" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create sync subscription
@@ -82,7 +88,10 @@ test "subscription drain sync - with pending messages" {
 }
 
 test "subscription drain async - with callback processing" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var messages_processed: u32 = 0;
@@ -146,7 +155,10 @@ test "subscription drain async - with callback processing" {
 }
 
 test "subscription drain blocks new messages" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create sync subscription
@@ -187,7 +199,10 @@ test "subscription drain blocks new messages" {
 }
 
 test "subscription drain timeout" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create sync subscription and leave one message unconsumed
@@ -209,7 +224,10 @@ test "subscription drain timeout" {
 }
 
 test "subscription drain not draining error" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("test.drain.not_draining");
@@ -221,7 +239,10 @@ test "subscription drain not draining error" {
 }
 
 test "connection drain - no subscriptions" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Initially not draining
@@ -235,7 +256,10 @@ test "connection drain - no subscriptions" {
 }
 
 test "connection drain - single subscription" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create subscription with pending messages
@@ -273,7 +297,10 @@ test "connection drain - single subscription" {
 }
 
 test "connection drain - multiple subscriptions" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create multiple subscriptions
@@ -321,7 +348,10 @@ test "connection drain - multiple subscriptions" {
 }
 
 test "connection drain - already draining" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // First drain call
@@ -334,7 +364,10 @@ test "connection drain - already draining" {
 }
 
 test "connection drain not draining error" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Should error if not draining
