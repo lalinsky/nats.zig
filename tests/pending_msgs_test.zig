@@ -1,5 +1,6 @@
 const std = @import("std");
 const nats = @import("nats");
+const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "pending_msgs counter sync subscription" {
