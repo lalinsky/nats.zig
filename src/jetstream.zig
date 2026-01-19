@@ -12,6 +12,7 @@
 // limitations under the License.
 
 const std = @import("std");
+const zio = @import("zio");
 const message_mod = @import("message.zig");
 const Message = message_mod.Message;
 const MessageList = message_mod.MessageList;
@@ -417,8 +418,8 @@ pub const PullSubscription = struct {
     inbox_prefix: []u8,
     /// Fetch ID counter for unique reply subjects
     fetch_id_counter: u64 = 0,
-    /// Mutex for thread safety
-    mutex: std.Thread.Mutex = .{},
+    /// Mutex for fiber safety
+    mutex: zio.Mutex = .{},
 
     pub fn deinit(self: *PullSubscription) void {
         self.consumer_info.deinit();
@@ -431,8 +432,8 @@ pub const PullSubscription = struct {
     pub fn fetch(self: *PullSubscription, batch: usize, timeout_ms: u64) !MessageBatch {
         if (batch == 0) return error.InvalidBatchSize;
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.js.nc.rt);
+        defer self.mutex.unlock(self.js.nc.rt);
 
         // Generate unique fetch ID and reply subject
         self.fetch_id_counter += 1;
