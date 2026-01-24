@@ -375,7 +375,7 @@ pub const Connection = struct {
     }
 
     pub fn addServer(self: *Self, url_str: []const u8) !bool {
-        self.mutex.lockUncancelable(self.rt);
+        try self.mutex.lock(self.rt);
         defer self.mutex.unlock(self.rt);
         return try self.server_pool.addServer(url_str, false); // Explicit server
     }
@@ -384,7 +384,7 @@ pub const Connection = struct {
         errdefer self.close();
 
         // This is called from initial connect() - needs to manage its own mutex
-        self.mutex.lockUncancelable(self.rt);
+        try  self.mutex.lock(self.rt);
         defer self.mutex.unlock(self.rt);
 
         self.status = .connecting;
@@ -501,7 +501,7 @@ pub const Connection = struct {
         var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
         defer if (callback) |cb| cb(self);
 
-        self.mutex.lockUncancelable(self.rt);
+        try self.mutex.lock(self.rt);
         defer self.mutex.unlock(self.rt);
 
         // Check if reconnection is allowed
@@ -601,7 +601,7 @@ pub const Connection = struct {
             return error.DrainInProgress;
         }
 
-        self.mutex.lockUncancelable(self.rt);
+        try self.mutex.lock(self.rt);
         defer self.mutex.unlock(self.rt);
 
         const allocator = self.scratch.allocator();
@@ -672,14 +672,14 @@ pub const Connection = struct {
     }
 
     fn subscribeInternal(self: *Self, sub: *Subscription) !void {
-        self.mutex.lockUncancelable(self.rt);
+        try self.mutex.lock(self.rt);
         defer self.mutex.unlock(self.rt);
 
         if (self.status != .connected) {
             return ConnectionError.ConnectionClosed;
         }
 
-        self.subs_mutex.lockUncancelable(self.rt);
+        try self.subs_mutex.lock(self.rt);
         defer self.subs_mutex.unlock(self.rt);
 
         try self.subscriptions.put(sub.sid, sub);
@@ -819,7 +819,7 @@ pub const Connection = struct {
     }
 
     pub fn flush(self: *Self) !void {
-        self.mutex.lockUncancelable(self.rt);
+        try self.mutex.lock(self.rt);
         defer self.mutex.unlock(self.rt);
 
         if (self.status != .connected) {
@@ -1107,7 +1107,7 @@ pub const Connection = struct {
         }
 
         // Retain subscription while holding lock, then release lock
-        self.subs_mutex.lockUncancelable(self.rt);
+        try self.subs_mutex.lock(self.rt);
         const sub = self.subscriptions.get(message.sid);
         if (sub) |s| {
             s.retain(); // Keep subscription alive
@@ -1211,7 +1211,7 @@ pub const Connection = struct {
 
         log.debug("Received INFO: {s}", .{info_json});
 
-        self.mutex.lockUncancelable(self.rt);
+        try self.mutex.lock(self.rt);
         defer self.mutex.unlock(self.rt);
 
         // Reset arena to clear any previous server info strings
@@ -1264,7 +1264,7 @@ pub const Connection = struct {
             return error.ShouldStop;
         }
 
-        self.mutex.lockUncancelable(self.rt);
+        try self.mutex.lock(self.rt);
         defer self.mutex.unlock(self.rt);
 
         log.debug("Received +OK", .{});
@@ -1336,7 +1336,7 @@ pub const Connection = struct {
         var callback: @TypeOf(self.options.callbacks.error_cb) = null;
         defer if (callback) |cb| cb(self, err_msg);
 
-        self.mutex.lockUncancelable(self.rt);
+        try self.mutex.lock(self.rt);
         defer self.mutex.unlock(self.rt);
 
         // Parse the protocol error once
