@@ -120,6 +120,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "sub", .file = "examples/sub.zig" },
         .{ .name = "requestor", .file = "examples/requestor.zig" },
         .{ .name = "replier", .file = "examples/replier.zig" },
+        .{ .name = "sub_async", .file = "examples/sub_async.zig" },
     };
 
     const examples_step = b.step("examples", "Build all examples");
@@ -134,6 +135,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         exe.root_module.addImport("nats", lib_mod);
+        exe.root_module.addImport("zio", zio.module("zio"));
 
         // Only install examples when explicitly building examples step
         const install_exe = b.addInstallArtifact(exe, .{});
@@ -160,6 +162,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         exe.root_module.addImport("nats", lib_mod);
+        exe.root_module.addImport("zio", zio.module("zio"));
 
         // Only install benchmarks when explicitly building benchmarks step
         const install_exe = b.addInstallArtifact(exe, .{});
