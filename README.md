@@ -1,14 +1,7 @@
 # NATS.zig
 
-A Zig client library for NATS, the cloud-native messaging system.
-
-## Development Status
-
-This library is mostly feature-complete but lacks production testing. The API is functional and covers the core NATS and JetStream features, but may still undergo changes based on feedback.
-
-**Testers are welcome!** If you're interested in testing the library in your projects, please report any issues or feedback. The goal is to be as feature complete as the official NATS client libraries. It is based on the NATS C and Go libraries.
-
-⚠️ **Note:** While the library is mostly finished, the API may still change before the 1.0 release. Use at your own discretion in production environments.
+A Zig client library for NATS, based on the [zio](https://github.com/lalinsky/zio) asynchronous I/O library.
+It supports most of the funcionality found in the official client libraries.
 
 ## Installation
 
@@ -35,7 +28,10 @@ exe.root_module.addImport("nats", nats.module("nats"));
 ### Connect
 
 ```zig
-var nc = nats.Connection.init(allocator, .{});
+const rt = try zio.Runtime.init(allocator, .{});
+defer rt.deinit();
+
+var nc = nats.Connection.init(allocator, rt, .{});
 defer nc.deinit();
 
 try nc.connect("nats://localhost:4222");
