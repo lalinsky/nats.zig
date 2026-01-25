@@ -1,10 +1,14 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
+const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "ObjectStore streaming put and get" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create JetStream context
@@ -74,7 +78,10 @@ test "ObjectStore streaming put and get" {
 }
 
 test "ObjectStore streaming empty object" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create JetStream context

@@ -1,6 +1,7 @@
 // Asynchronous subscriber example - uses callback for message handling
 const std = @import("std");
 const nats = @import("nats");
+const zio = @import("zio");
 
 fn messageHandler(msg: *nats.Message, counter: *u32, prefix: []const u8) void {
     defer msg.deinit();
@@ -16,8 +17,12 @@ pub fn main() !void {
 
     std.log.info("Starting async subscriber for subject 'foo'", .{});
 
+    // Initialize zio runtime
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
     // Connect to NATS server
-    var conn = nats.Connection.init(allocator, .{});
+    var conn = nats.Connection.init(allocator, rt, .{});
     defer conn.deinit();
 
     try conn.connect("nats://localhost:4222");

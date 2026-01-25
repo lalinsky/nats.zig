@@ -34,6 +34,11 @@ pub fn build(b: *std.Build) void {
     }
     defer if (should_free) std.zon.parse.free(b.allocator, parsed_zon);
 
+    const zio = b.dependency("zio", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create build options
     const options = b.addOptions();
     options.addOption([]const u8, "version", parsed_zon.version);
@@ -52,6 +57,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lib_mod.addImport("zio", zio.module("zio"));
 
     // Add build options to the module
     lib_mod.addOptions("build_options", options);
@@ -95,6 +101,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
     integration_tests.root_module.addImport("nats", lib_mod);
+    integration_tests.root_module.addImport("zio", zio.module("zio"));
 
     const run_integration_tests = b.addRunArtifact(integration_tests);
     run_integration_tests.has_side_effects = true; // Allow repeated runs with Docker interactions
@@ -113,6 +120,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "sub", .file = "examples/sub.zig" },
         .{ .name = "requestor", .file = "examples/requestor.zig" },
         .{ .name = "replier", .file = "examples/replier.zig" },
+        .{ .name = "sub_async", .file = "examples/sub_async.zig" },
     };
 
     const examples_step = b.step("examples", "Build all examples");
@@ -127,6 +135,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         exe.root_module.addImport("nats", lib_mod);
+        exe.root_module.addImport("zio", zio.module("zio"));
 
         // Only install examples when explicitly building examples step
         const install_exe = b.addInstallArtifact(exe, .{});
@@ -153,6 +162,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         exe.root_module.addImport("nats", lib_mod);
+        exe.root_module.addImport("zio", zio.module("zio"));
 
         // Only install benchmarks when explicitly building benchmarks step
         const install_exe = b.addInstallArtifact(exe, .{});

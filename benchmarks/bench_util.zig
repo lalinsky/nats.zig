@@ -1,5 +1,6 @@
 const std = @import("std");
 const nats = @import("nats");
+const zio = @import("zio");
 
 // Global flag for signal handling
 pub var keep_running: bool = true;
@@ -90,10 +91,14 @@ pub fn setupSignals() !void {
 
 // Connect to NATS server
 pub fn connect(allocator: std.mem.Allocator, url: ?[]const u8) !*nats.Connection {
+    // Create zio runtime
+    const rt = try zio.Runtime.init(allocator, .{});
+    errdefer rt.deinit();
+
     var conn = try allocator.create(nats.Connection);
     errdefer allocator.destroy(conn);
 
-    conn.* = nats.Connection.init(allocator, .{});
+    conn.* = nats.Connection.init(allocator, rt, .{});
 
     const connect_url = url orelse "nats://localhost:4222";
     conn.connect(connect_url) catch |err| {
@@ -108,6 +113,8 @@ pub fn connect(allocator: std.mem.Allocator, url: ?[]const u8) !*nats.Connection
 // Common cleanup
 pub fn cleanup(conn: *nats.Connection) void {
     const allocator = conn.allocator;
+    const rt = conn.rt;
     conn.deinit();
     allocator.destroy(conn);
+    rt.deinit();
 }
