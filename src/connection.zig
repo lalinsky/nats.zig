@@ -22,8 +22,6 @@ const MessageList = @import("message.zig").MessageList;
 const subscription_mod = @import("subscription.zig");
 const Subscription = subscription_mod.Subscription;
 const MsgHandler = subscription_mod.MsgHandler;
-const dispatcher_mod = @import("dispatcher.zig");
-const DispatcherPool = dispatcher_mod.DispatcherPool;
 const server_pool_mod = @import("server_pool.zig");
 const ServerPool = server_pool_mod.ServerPool;
 const Server = server_pool_mod.Server;
@@ -34,8 +32,8 @@ const build_options = @import("build_options");
 const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
 const ResponseManager = @import("response_manager.zig").ResponseManager;
 const MAX_CONTROL_LINE_SIZE = @import("parser.zig").MAX_CONTROL_LINE_SIZE;
-const Socket = @import("socket.zig").Socket;
 const validation = @import("validation.zig");
+const zio = @import("zio");
 
 const log = @import("log.zig").log;
 
@@ -152,6 +150,7 @@ pub const ConnectionStatus = enum {
     connecting,
     connected,
     reconnecting,
+    connection_failed,
 };
 
 pub const DrainState = enum(u8) {
@@ -230,15 +229,13 @@ pub const ConnectionOptions = struct {
 
 pub const Connection = struct {
     allocator: Allocator,
+    rt: *zio.Runtime,
     options: ConnectionOptions,
 
     status: ConnectionStatus = .closed,
+    status_cond: zio.Condition = .{},
 
-    // Network
-    socket: ?Socket = null,
-    socket_refs: u64 = 0,
-    socket_available_cond: std.Thread.Condition = .{}, // Signals when socket becomes available
-    socket_unused_cond: std.Thread.Condition = .{}, // Signals when socket is no longer in use
+    reconnect_requested: zio.ResetEvent = .{},
 
     // Server management
     server_pool: ServerPool,
@@ -252,22 +249,18 @@ pub const Connection = struct {
     // Handshake state
     handshake_state: HandshakeState = .not_started,
     handshake_error: ?anyerror = null,
-    handshake_cond: std.Thread.Condition = .{},
+    handshake_cond: zio.Condition = .{},
 
-    // Threading
-    reader_thread: ?std.Thread = null,
-    flusher_thread: ?std.Thread = null,
-    reconnect_thread: ?std.Thread = null,
-    should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    should_stop_cond: std.Thread.Condition = .{}, // Signals when should_stop becomes true
+    // Connection manager fiber (owns reader/flusher tasks)
+    manager_task: zio.Group = .init,
 
     // Main connection mutex (protects most fields)
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
 
     // PING/PONG flush tracking (simplified counter approach)
     outgoing_pings: u64 = 0,
     incoming_pongs: u64 = 0,
-    pong_condition: std.Thread.Condition = .{},
+    pong_condition: zio.Condition = .{},
 
     // PING/PONG keep-alive tracking
     ping_timer: std.time.Timer, // Timer for tracking ping intervals
@@ -279,17 +272,14 @@ pub const Connection = struct {
     // Subscriptions
     next_sid: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
     subscriptions: std.AutoHashMap(u64, *Subscription),
-    subs_mutex: std.Thread.Mutex = .{},
-
-    // Message dispatching
-    dispatcher_pool: ?*DispatcherPool = null,
+    subs_mutex: zio.Mutex = .{},
 
     // Response management (shared subscription for request/reply)
     response_manager: ResponseManager,
 
     // Connection draining
     drain_state: std.atomic.Value(DrainState) = std.atomic.Value(DrainState).init(.not_draining),
-    drain_completion: std.Thread.ResetEvent = .{},
+    drain_completion: zio.ResetEvent = .init,
     drain_subscription_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     drain_ping_id: u64 = 0,
 
@@ -301,17 +291,18 @@ pub const Connection = struct {
     const Self = @This();
     const WriteBuffer = ConcurrentWriteBuffer(65536); // 64KB chunk size
 
-    pub fn init(allocator: Allocator, options: ConnectionOptions) Self {
+    pub fn init(allocator: Allocator, rt: *zio.Runtime, options: ConnectionOptions) Self {
         return Self{
             .allocator = allocator,
+            .rt = rt,
             .options = options,
             .server_pool = ServerPool.init(allocator),
             .server_info_arena = std.heap.ArenaAllocator.init(allocator),
             .pending_buffer = WriteBuffer.init(allocator, .{ .max_size = options.reconnect.reconnect_buf_size }),
             .write_buffer = WriteBuffer.init(allocator, .{}),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
-            .response_manager = ResponseManager.init(allocator),
-            .parser = Parser.init(allocator),
+            .response_manager = ResponseManager.init(allocator, rt),
+            .parser = Parser.init(allocator, rt),
             .scratch = std.heap.ArenaAllocator.init(allocator),
             .ping_timer = std.time.Timer.start() catch unreachable,
         };
@@ -319,26 +310,6 @@ pub const Connection = struct {
 
     pub fn deinit(self: *Self) void {
         self.close();
-
-        // Join threads (they should have been signaled to stop by close())
-        if (self.flusher_thread) |thread| {
-            thread.join();
-            self.flusher_thread = null;
-        }
-        if (self.reader_thread) |thread| {
-            thread.join();
-            self.reader_thread = null;
-        }
-        if (self.reconnect_thread) |thread| {
-            thread.join();
-            self.reconnect_thread = null;
-        }
-
-        // Release global dispatcher pool
-        if (self.dispatcher_pool != null) {
-            dispatcher_mod.releaseGlobalPool();
-            self.dispatcher_pool = null;
-        }
 
         // Clean up response manager
         self.response_manager.deinit();
@@ -372,74 +343,52 @@ pub const Connection = struct {
         return self.parser.msg_pool.acquire();
     }
 
-    /// Ensure dispatcher pool is initialized (lazy initialization)
-    fn ensureDispatcherPool(self: *Self) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.dispatcher_pool != null) return; // Already initialized
-
-        self.dispatcher_pool = try dispatcher_mod.acquireGlobalPool(self.allocator);
-
-        log.debug("Acquired global dispatcher pool", .{});
-    }
-
     pub fn connect(self: *Self, url: []const u8) !void {
-        if (self.status != .closed) {
-            return ConnectionError.ConnectionFailed;
-        }
-
-        // Add server to pool if it's not already there
-        if (self.server_pool.getSize() == 0) {
-            _ = try self.server_pool.addServer(url, false); // Explicit server
-        }
-
-        return self.connectToServer();
-    }
-
-    pub fn addServer(self: *Self, url_str: []const u8) !bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return try self.server_pool.addServer(url_str, false); // Explicit server
-    }
-
-    fn connectToServer(self: *Self) !void {
         errdefer self.close();
 
-        // This is called from initial connect() - needs to manage its own mutex
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.rt);
+        defer self.mutex.unlock(self.rt);
+
+        if (self.status != .closed) {
+            log.err("Already connected", .{});
+            return error.AlreadyConnected;
+        }
 
         self.status = .connecting;
+        self.status_cond.broadcast(self.rt);
 
-        // Get server using C library's GetNextServer algorithm
-        const selected_server = try self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) orelse {
-            return ConnectionError.ConnectionFailed;
-        };
+        _ = try self.server_pool.addServer(url, false);
 
-        // Update current server and track reconnection attempt (like C library)
-        self.current_server = selected_server;
-        selected_server.reconnects += 1;
+        try self.manager_task.spawn(self.rt, managerLoop, .{self});
+        errdefer self.manager_task.cancel(self.rt);
 
-        // Establish connection (under mutex for consistent state management)
-        try self.establishConnection(selected_server);
+        while (true) {
+            switch (self.status) {
+                .closed => return error.ConnectionClosed,
+                .connection_failed => {
+                    if (self.handshake_state == .failed) {
+                        if (self.handshake_error) |err| {
+                            return err;
+                        }
+                    }
+                    return error.ConnectionFailed;
+                },
+                .connected => {
+                    log.info("Connected successfully", .{});
+                    return;
+                },
+                else => {
+                    try self.status_cond.wait(self.rt, &self.mutex);
+                },
+            }
+        }
+    }
 
-        // Socket is now established and connection state is set up
-        self.should_stop.store(false, .monotonic);
+    pub fn addServer(self: *Self, url: []const u8) !void {
+        try self.mutex.lock(self.rt);
+        defer self.mutex.unlock(self.rt);
 
-        // Start reader thread - it will handle the handshake
-        self.reader_thread = try std.Thread.spawn(.{}, readerLoop, .{self});
-
-        // Start flusher thread
-        self.flusher_thread = try std.Thread.spawn(.{}, flusherLoop, .{self});
-
-        // Wait for handshake completion
-        try self.waitForHandshakeCompletion();
-
-        // Handshake completed successfully
-        self.status = .connected;
-
-        log.info("Connected successfully to {s}", .{selected_server.parsed_url.full_url});
+        _ = try self.server_pool.addServer(url, false);
     }
 
     /// Close the connection
@@ -448,48 +397,27 @@ pub const Connection = struct {
         var callback: @TypeOf(self.options.callbacks.closed_cb) = null;
         defer if (callback) |cb| cb(self);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        log.info("Closing connection", .{});
+
+        self.manager_task.cancel(self.rt);
+
+        self.mutex.lockUncancelable(self.rt);
+        defer self.mutex.unlock(self.rt);
 
         if (self.status == .closed) {
             return;
         }
 
-        log.info("Closing connection", .{});
-
         // Mark the connection as permanently closed
         self.status = .closed;
-        self.should_stop.store(true, .release);
-        self.should_stop_cond.broadcast(); // Wake up any threads waiting on should_stop
+        self.status_cond.broadcast(self.rt);
 
-        // Detach socket immediately and wake any waiting threads
-        const old_socket = self.socket;
-        self.socket = null;
-        self.socket_available_cond.broadcast();
-
-        // Shutdown socket to interrupt ongoing I/O (but don't close yet)
-        if (old_socket) |socket| {
-            socket.shutdown(.both) catch |shutdown_err| {
-                log.err("Socket shutdown failed: {}", .{shutdown_err});
-            };
-        }
-
-        // Close write buffer - this wakes up the flusher thread
-        self.pending_buffer.close();
-        self.write_buffer.close();
-
-        // Wait for both threads to release the socket with timeout
-        self.waitForSocketUnused(self.options.timeout_ms * 2) catch {
-            log.warn("Timeout waiting for socket references to be released during close", .{});
-        };
-
-        // Now safe to close socket since threads are done with it
-        if (old_socket) |socket| {
-            socket.close();
-        }
+        // Close write buffers to wake up any waiting fibers
+        self.pending_buffer.close(self.rt);
+        self.write_buffer.close(self.rt);
 
         // Wake up any waiting flush() calls
-        self.pong_condition.broadcast();
+        self.pong_condition.broadcast(self.rt);
 
         // Make sure we invoke the closed callback
         if (self.options.callbacks.closed_cb) |cb| {
@@ -498,8 +426,8 @@ pub const Connection = struct {
     }
 
     pub fn getStatus(self: *Self) ConnectionStatus {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.rt);
+        defer self.mutex.unlock(self.rt);
         return self.status;
     }
 
@@ -519,13 +447,8 @@ pub const Connection = struct {
     /// - Testing reconnection behavior
     /// Returns error if reconnection cannot be initiated
     pub fn reconnect(self: *Self) !void {
-        var needs_close = false;
-        defer if (needs_close) self.close();
-        var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
-        defer if (callback) |cb| cb(self);
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.rt);
+        defer self.mutex.unlock(self.rt);
 
         // Check if reconnection is allowed
         if (!self.options.reconnect.allow_reconnect) {
@@ -543,7 +466,7 @@ pub const Connection = struct {
                 log.warn("Cannot reconnect: connection is closed", .{});
                 return ConnectionError.ConnectionClosed;
             },
-            .connecting => {
+            .connecting, .connection_failed => {
                 log.warn("Cannot reconnect: initial connection not yet established", .{});
                 return ConnectionError.NotConnected;
             },
@@ -554,27 +477,8 @@ pub const Connection = struct {
 
         log.info("Manual reconnection requested", .{});
 
-        // Use a synthetic error to trigger the reconnection
-        const synthetic_error = ConnectionError.ManualReconnect;
-
-        // Perform connection cleanup (don't close socket - let reconnect handle it)
-        self.status = .reconnecting;
-        self.cleanupFailedConnection(synthetic_error, false);
-
-        // Spawn reconnect thread if not already running
-        if (self.reconnect_thread == null) {
-            self.reconnect_thread = std.Thread.spawn(.{}, doReconnectThread, .{self}) catch |spawn_err| {
-                log.err("Failed to spawn reconnect thread: {}", .{spawn_err});
-                // Fall back to closing connection
-                needs_close = true;
-                return spawn_err;
-            };
-        }
-
-        // Invoke disconnected callback
-        if (self.options.callbacks.disconnected_cb) |cb| {
-            callback = cb;
-        }
+        // Signal manager to reconnect
+        self.reconnect_requested.set();
     }
 
     /// Publishes data on a subject.
@@ -623,8 +527,8 @@ pub const Connection = struct {
             return error.DrainInProgress;
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.rt);
+        defer self.mutex.unlock(self.rt);
 
         const allocator = self.scratch.allocator();
         defer self.resetScratch();
@@ -681,9 +585,9 @@ pub const Connection = struct {
 
         // Published messages go to pending_buffer during reconnection, otherwise write_buffer
         if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
-            try self.pending_buffer.append(buffer.items);
+            try self.pending_buffer.append(self.rt, buffer.items);
         } else {
-            try self.write_buffer.append(buffer.items);
+            try self.write_buffer.append(self.rt, buffer.items);
         }
 
         if (reply_to_use) |reply| {
@@ -694,15 +598,15 @@ pub const Connection = struct {
     }
 
     fn subscribeInternal(self: *Self, sub: *Subscription) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.rt);
+        defer self.mutex.unlock(self.rt);
 
         if (self.status != .connected) {
             return ConnectionError.ConnectionClosed;
         }
 
-        self.subs_mutex.lock();
-        defer self.subs_mutex.unlock();
+        try self.subs_mutex.lock(self.rt);
+        defer self.subs_mutex.unlock(self.rt);
 
         try self.subscriptions.put(sub.sid, sub);
         errdefer _ = self.subscriptions.remove(sub.sid);
@@ -718,7 +622,7 @@ pub const Connection = struct {
         } else {
             try buffer.writer(allocator).print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
         }
-        try self.write_buffer.append(buffer.items);
+        try self.write_buffer.append(self.rt, buffer.items);
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
@@ -731,10 +635,8 @@ pub const Connection = struct {
         const sub = try Subscription.create(self, sid, subject, null, handler);
         errdefer sub.release();
 
-        try self.ensureDispatcherPool();
-        sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
-
         try self.subscribeInternal(sub);
+        try sub.startHandler();
 
         log.debug("Subscribed to {s} with sid {d} (async)", .{ sub.subject, sub.sid });
         return sub;
@@ -765,10 +667,8 @@ pub const Connection = struct {
         const sub = try Subscription.create(self, sid, subject, queue, handler);
         errdefer sub.release();
 
-        try self.ensureDispatcherPool();
-        sub.dispatcher = self.dispatcher_pool.?.assignDispatcher();
-
         try self.subscribeInternal(sub);
+        try sub.startHandler();
 
         log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (async)", .{ sub.subject, queue, sub.sid });
         return sub;
@@ -800,17 +700,17 @@ pub const Connection = struct {
             writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
         }
 
-        try self.write_buffer.append(stream.getWritten());
+        try self.write_buffer.append(self.rt, stream.getWritten());
     }
 
     pub fn unsubscribe(self: *Self, sub: *Subscription) void {
         // Remove from subscription table first
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.rt);
+            defer self.mutex.unlock(self.rt);
 
-            self.subs_mutex.lock();
-            defer self.subs_mutex.unlock();
+            self.subs_mutex.lockUncancelable(self.rt);
+            defer self.subs_mutex.unlock(self.rt);
 
             if (!self.subscriptions.remove(sub.sid)) {
                 // Nothing to do, already unsubscribed
@@ -834,8 +734,8 @@ pub const Connection = struct {
     /// Remove subscription from connection's subscription table
     /// This does not send UNSUB to server - that should be done separately
     pub fn removeSubscriptionInternal(self: *Self, sid: u64) void {
-        self.subs_mutex.lock();
-        defer self.subs_mutex.unlock();
+        self.subs_mutex.lockUncancelable(self.rt);
+        defer self.subs_mutex.unlock(self.rt);
 
         if (self.subscriptions.fetchRemove(sid)) |kv| {
             log.debug("Removed subscription {d} ({s}) from connection", .{ sid, kv.value.subject });
@@ -845,11 +745,15 @@ pub const Connection = struct {
     }
 
     pub fn flush(self: *Self) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.rt);
+        defer self.mutex.unlock(self.rt);
 
-        if (self.status != .connected) {
-            return ConnectionError.ConnectionClosed;
+        while (self.status != .connected) {
+            if (self.status == .closed) {
+                log.debug("Flush skipped, no longer connected", .{});
+                return error.ConnectionClosed;
+            }
+            try self.status_cond.wait(self.rt, &self.mutex);
         }
 
         const our_ping_id = try self.sendPing(false);
@@ -861,6 +765,7 @@ pub const Connection = struct {
 
         while (self.incoming_pongs < our_ping_id) {
             if (self.status != .connected) {
+                log.debug("Flush interrupted, no longer connected", .{});
                 return ConnectionError.ConnectionClosed;
             }
 
@@ -871,7 +776,7 @@ pub const Connection = struct {
             }
 
             const remaining_ns = timeout_ns - elapsed_ns;
-            self.pong_condition.timedWait(&self.mutex, remaining_ns) catch {};
+            self.pong_condition.timedWait(self.rt, &self.mutex, .fromNanoseconds(remaining_ns)) catch {};
         }
 
         log.debug("Flush completed, received PONG for ping_id={}", .{our_ping_id});
@@ -959,37 +864,86 @@ pub const Connection = struct {
         return messages;
     }
 
-    fn establishConnection(self: *Self, server: *Server) !void {
-        // Establish TCP connection
-        log.debug("Connecting to server: {s}:{d}", .{ server.parsed_url.host, server.parsed_url.port });
-        const socket = Socket.connect(self.allocator, server.parsed_url.host, server.parsed_url.port) catch |err| {
-            log.err("Failed to connect to server: {}", .{err});
-            return err;
-        };
-        errdefer socket.close();
+    fn managerLoop(self: *Self) anyerror!void {
+        log.debug("Manager loop started", .{});
+        defer log.debug("Manager loop exited", .{});
 
-        // Configure socket options (fail hard if these don't work)
-        socket.setKeepAlive(true) catch |err| {
-            log.err("Failed to set keep alive: {}", .{err});
-            return err;
-        };
-        socket.setReadTimeout(self.options.timeout_ms) catch |err| {
-            log.err("Failed to set read timeout: {}", .{err});
-            return err;
-        };
-        socket.setWriteTimeout(self.options.timeout_ms) catch |err| {
-            log.err("Failed to set write timeout: {}", .{err});
-            return err;
-        };
+        defer {
+            self.mutex.lockUncancelable(self.rt);
+            defer self.mutex.unlock(self.rt);
+
+            if (self.status != .closed) {
+                self.status = .connection_failed;
+                self.status_cond.broadcast(self.rt);
+            }
+        }
+
+        while (true) {
+            var conn_err: ?anyerror = null;
+            self.runConnection() catch |err| {
+                if (err == error.Canceled) {
+                    return err;
+                }
+                if (err == error.ShouldClose) {
+                    return;
+                }
+                conn_err = err;
+            };
+
+            var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
+            defer if (callback) |cb| cb(self);
+
+            try self.mutex.lock(self.rt);
+            defer self.mutex.unlock(self.rt);
+
+            if (conn_err) |err| {
+                log.info("Connection failed: {}", .{err});
+            } else {
+                log.info("Disconnected", .{});
+            }
+
+            if (self.status == .connecting) {
+                return;
+            }
+
+            self.status = .reconnecting;
+            self.status_cond.broadcast(self.rt);
+
+            if (self.options.callbacks.disconnected_cb) |cb| {
+                callback = cb;
+            }
+
+            // TODO delay
+        }
+    }
+
+    fn selectNextServer(self: *Self) !*Server {
+        try self.mutex.lock(self.rt);
+        defer self.mutex.unlock(self.rt);
+
+        const server = try self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) orelse return error.NoServerAvailable;
+        server.reconnects += 1;
+        self.current_server = server;
+        return server;
+    }
+
+    fn establishConnection(self: *Self, server: *Server) !zio.net.Stream {
+        log.debug("Connecting to server: {s}:{d} ({d} retries)", .{ server.parsed_url.host, server.parsed_url.port, server.reconnects });
+        const stream = try zio.net.tcpConnectToHost(self.rt, server.parsed_url.host, server.parsed_url.port, .{});
+        errdefer stream.close(self.rt);
+
+        try stream.socket.setKeepAlive(true);
 
         if (self.options.trace) {
             log.debug("Connected, starting handshake...", .{});
         }
 
-        // Setup connection state
-        self.socket = socket;
-        self.socket_available_cond.broadcast();
+        try self.mutex.lock(self.rt);
+        defer self.mutex.unlock(self.rt);
 
+        std.debug.assert(self.status == .connecting or self.status == .reconnecting);
+
+        // Setup connection state
         server.did_connect = true;
         server.reconnects = 0;
 
@@ -1003,102 +957,125 @@ pub const Connection = struct {
         // Initialize handshake state
         self.handshake_state = .waiting_for_info;
         self.handshake_error = null;
+        self.handshake_cond.broadcast(self.rt);
 
         // Unfreeze write buffer now that we have a working socket
-        self.write_buffer.unfreeze();
+        self.write_buffer.unfreeze(self.rt);
+
+        return stream;
     }
 
-    fn readerLoop(self: *Self) void {
-        log.debug("Reader loop started", .{});
+    fn runConnection(self: *Self) !void {
+        self.reconnect_requested = .{};
 
-        while (!self.should_stop.load(.acquire)) {
-            self.readerIteration() catch |err| {
-                // Handle errors from readerIteration
-                switch (err) {
-                    error.ShouldStop => break,
-                    else => {
-                        // Mark that reconnection is needed
-                        self.markNeedsReconnect(err);
-                        continue;
-                    },
-                }
-            };
+        const server = try self.selectNextServer();
 
-            // Check if we need to send a PING
-            self.checkAndSendPing() catch |err| {
-                self.markNeedsReconnect(err);
-                continue;
-            };
+        var stream = try self.establishConnection(server);
+        defer stream.close(self.rt);
+
+        var reader_task = try self.rt.spawn(readerLoop, .{ self, &stream });
+        defer reader_task.cancel(self.rt);
+
+        var flusher_task = try self.rt.spawn(flusherLoop, .{ self, &stream });
+        defer flusher_task.cancel(self.rt);
+
+        var was_reconnect = false;
+
+        try self.mutex.lock(self.rt);
+        self.waitForHandshakeCompletion() catch |err| {
+            self.mutex.unlock(self.rt);
+            return err;
+        };
+        if (self.status == .reconnecting) {
+            was_reconnect = true;
+        }
+        self.status = .connected;
+        self.status_cond.broadcast(self.rt);
+        self.mutex.unlock(self.rt);
+
+        log.info("Connected successfully to {s}", .{server.parsed_url.full_url});
+
+        // Invoke reconnected callback if this is a reconnection
+        if (was_reconnect) {
+            if (self.options.callbacks.reconnected_cb) |cb| {
+                cb(self);
+            }
         }
 
-        log.debug("Reader loop exited", .{});
-    }
+        try self.resendSubscriptions();
 
-    fn readerIteration(self: *Self) !void {
-        var buffer: [4096]u8 = undefined;
+        try self.pending_buffer.moveToBuffer(self.rt, &self.write_buffer);
 
-        const socket = try self.acquireSocket();
-        defer self.releaseSocket();
-
-        // Simple blocking read - shutdown() will wake us up
-        const bytes_read = socket.read(&buffer) catch |err| switch (err) {
-            error.WouldBlock => {
-                // Read timeout from SO_RCVTIMEO - this is expected, continue reading
+        const result = try zio.select(self.rt, .{
+            .reader = &reader_task,
+            .flusher = &flusher_task,
+            .reconnect = &self.reconnect_requested,
+        });
+        switch (result) {
+            .reader => |res| {
+                res catch |err| {
+                    log.err("Error in reader loop: {}", .{err});
+                    return err;
+                };
                 return;
             },
-            else => {
-                log.err("Read error: {}", .{err});
-                return err;
-            },
-        };
-
-        if (bytes_read == 0) {
-            log.debug("Connection closed by server (EOF)", .{});
-            return error.EndOfStream;
-        }
-
-        log.debug("Read {} bytes: {s}", .{ bytes_read, buffer[0..bytes_read] });
-
-        // Parse the received data
-        self.parser.parse(self, buffer[0..bytes_read]) catch |err| {
-            switch (err) {
-                error.ShouldStop, error.ShouldClose => return err,
-                else => {
-                    log.err("Parser error: {}", .{err});
+            .flusher => |res| {
+                res catch |err| {
+                    log.err("Error in flusher loop: {}", .{err});
                     return err;
-                },
-            }
-        };
+                };
+                return;
+            },
+            .reconnect => {
+                log.info("Reconnect requested", .{});
+            },
+        }
     }
 
-    fn flusherLoop(self: *Self) void {
-        log.debug("Flusher loop started", .{});
+    fn readerLoop(self: *Self, stream: *zio.net.Stream) !void {
+        log.debug("Reader loop started", .{});
+        defer {
+            log.debug("Reader loop exited", .{});
+        }
 
-        while (!self.should_stop.load(.acquire)) {
-            self.flusherIteration() catch |err| {
-                // Handle errors from flusherIteration
-                switch (err) {
-                    error.ShouldStop => break,
-                    else => {
-                        // Mark that reconnection is needed
-                        self.markNeedsReconnect(err);
-                        continue;
-                    },
-                }
+        var buffer: [4096]u8 = undefined;
+
+        while (true) {
+            const bytes_read = try stream.read(self.rt, &buffer, .none);
+            if (bytes_read == 0) {
+                log.debug("Connection closed by server (EOF)", .{});
+                break;
+            }
+
+            log.debug("Read {} bytes: {s}", .{ bytes_read, buffer[0..bytes_read] });
+            try self.parser.parse(self, buffer[0..bytes_read]);
+
+            try self.checkAndSendPing();
+        }
+    }
+
+    fn flusherLoop(self: *Self, stream: *zio.net.Stream) !void {
+        log.debug("Flusher loop started", .{});
+        defer {
+            log.debug("Flusher loop stopped", .{});
+        }
+
+        while (true) {
+            self.flusherIteration(stream) catch |err| {
+                log.err("Flusher loop error: {}", .{err});
+                return;
             };
 
             if (self.drain_state.load(.acquire) == .draining_pubs) {
                 self.sendDrainPing();
             }
         }
-
-        log.debug("Flusher loop exited", .{});
     }
 
-    fn flusherIteration(self: *Self) !void {
+    fn flusherIteration(self: *Self, stream: *zio.net.Stream) !void {
         // Try to gather data from buffer first
-        var iovecs: [16]std.posix.iovec_const = undefined;
-        const gather = self.write_buffer.gatherReadVectors(&iovecs, self.options.timeout_ms) catch |err| switch (err) {
+        var slices: [16][]const u8 = undefined;
+        const gather = self.write_buffer.gatherReadSlices(self.rt, &slices, self.options.timeout_ms) catch |err| switch (err) {
             error.QueueEmpty => {
                 // No data to write
                 return;
@@ -1107,40 +1084,17 @@ pub const Connection = struct {
                 // Buffer frozen during reconnection
                 return;
             },
-            error.QueueClosed => return error.ShouldStop,
+            error.QueueClosed => return error.QueueClosed,
+            error.Canceled => return error.Canceled,
         };
 
-        if (gather.iovecs.len == 0) {
+        if (gather.slices.len == 0) {
             // No data to write
             return;
         }
 
-        // Now try to get a socket - blocks until available
-        const socket = try self.acquireSocket();
-        defer self.releaseSocket();
-
-        const bytes_written = socket.writev(gather.iovecs) catch |err| switch (err) {
-            error.WouldBlock => {
-                // Write timeout from SO_SNDTIMEO - this is expected, continue writing
-                return;
-            },
-            else => {
-                log.err("Write error: {}", .{err});
-                return err;
-            },
-        };
-
-        gather.consume(bytes_written) catch |err| switch (err) {
-            error.BufferReset => {
-                // This can only happen during reconnection, we can assume
-                // it's safe to continue, since we will have a new buffer
-                return;
-            },
-            error.ConcurrentConsumer => {
-                // This is a bug, we can't handle it
-                std.debug.panic("Concurrent consumer detected", .{});
-            },
-        };
+        const bytes_written = try stream.write(self.rt, gather.slices[0], .none); // TODO: use writeVec
+        try gather.consume(self.rt, bytes_written);
     }
 
     // Parser callback methods
@@ -1148,17 +1102,13 @@ pub const Connection = struct {
         var owns_message = true;
         defer if (owns_message) message.deinit();
 
-        if (self.should_stop.load(.acquire)) {
-            return error.ShouldStop;
-        }
-
         // Retain subscription while holding lock, then release lock
-        self.subs_mutex.lock();
+        try self.subs_mutex.lock(self.rt);
         const sub = self.subscriptions.get(message.sid);
         if (sub) |s| {
             s.retain(); // Keep subscription alive
         }
-        self.subs_mutex.unlock();
+        self.subs_mutex.unlock(self.rt);
 
         if (sub) |s| {
             defer s.release(); // Release when done
@@ -1175,44 +1125,28 @@ pub const Connection = struct {
             // Log before consuming message (to avoid use-after-free)
             log.debug("Delivering message to subscription {d}: {s}", .{ message.sid, message.data });
 
-            if (s.handler) |_| {
-                // Async subscription - dispatch to assigned dispatcher
-                if (s.dispatcher) |dispatcher| {
-                    dispatcher.enqueue(s, message) catch |err| {
-                        log.err("Failed to dispatch message for sid {d}: {}", .{ message.sid, err });
-                        // Undo the pending counters since we failed to enqueue
+            // Queue message for subscription (both sync and async use the queue)
+            // For async subscriptions, the handler fiber will pick it up
+            s.messages.push(self.rt, message) catch |err| {
+                switch (err) {
+                    error.QueueClosed => {
+                        // Queue is closed; drop gracefully.
+                        log.debug("Queue closed for sid {d}; dropping message", .{message.sid});
+                        // Undo the pending counters since queue is closed
                         subscription_mod.decrementPending(s, message.data.len);
                         return;
-                    };
-                    owns_message = false;
-                } else {
-                    log.err("Async subscription {} has no assigned dispatcher", .{message.sid});
-                    // Undo the pending counters since we can't process
-                    subscription_mod.decrementPending(s, message.data.len);
-                    return;
+                    },
+                    error.Canceled => return error.Canceled,
+                    else => {
+                        // Allocation or unexpected push failure; log and tear down the connection.
+                        log.err("Failed to enqueue message for sid {d}: {}", .{ message.sid, err });
+                        // Undo the pending counters since we failed to enqueue
+                        subscription_mod.decrementPending(s, message.data.len);
+                        return err;
+                    },
                 }
-            } else {
-                // Sync subscription - queue message
-                s.messages.push(message) catch |err| {
-                    switch (err) {
-                        error.QueueClosed => {
-                            // Queue is closed; drop gracefully.
-                            log.debug("Queue closed for sid {d}; dropping message", .{message.sid});
-                            // Undo the pending counters since queue is closed
-                            subscription_mod.decrementPending(s, message.data.len);
-                            return;
-                        },
-                        else => {
-                            // Allocation or unexpected push failure; log and tear down the connection.
-                            log.err("Failed to enqueue message for sid {d}: {}", .{ message.sid, err });
-                            // Undo the pending counters since we failed to enqueue
-                            subscription_mod.decrementPending(s, message.data.len);
-                            return err;
-                        },
-                    }
-                };
-                owns_message = false;
-            }
+            };
+            owns_message = false;
         } else {
             // No sub subscription found, try to send UNSUB command
             self.unsubscribeInternal(message.sid, null) catch |err| {
@@ -1261,20 +1195,16 @@ pub const Connection = struct {
         try buffer.writer(allocator).writeAll("PING\r\n");
 
         // Send via buffer (mutex already held)
-        try self.write_buffer.append(buffer.items);
+        try self.write_buffer.append(self.rt, buffer.items);
 
         log.debug("Sent CONNECT+PING during handshake", .{});
     }
 
     pub fn processInfo(self: *Self, info_json: []const u8) !void {
-        if (self.should_stop.load(.acquire)) {
-            return error.ShouldStop;
-        }
-
         log.debug("Received INFO: {s}", .{info_json});
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.rt);
+        defer self.mutex.unlock(self.rt);
 
         // Reset arena to clear any previous server info strings
         _ = self.server_info_arena.reset(.retain_capacity);
@@ -1297,12 +1227,12 @@ pub const Connection = struct {
                 log.err("Failed to send CONNECT+PING: {}", .{err});
                 self.handshake_error = err;
                 self.handshake_state = .failed;
-                self.handshake_cond.broadcast();
+                self.handshake_cond.broadcast(self.rt);
                 return;
             };
 
             self.handshake_state = .waiting_for_pong;
-            self.handshake_cond.broadcast(); // Signal state change
+            self.handshake_cond.broadcast(self.rt); // Signal state change
             log.debug("Handshake: sent CONNECT+PING, waiting for PONG", .{});
         }
 
@@ -1322,12 +1252,8 @@ pub const Connection = struct {
     }
 
     pub fn processOK(self: *Self) !void {
-        if (self.should_stop.load(.acquire)) {
-            return error.ShouldStop;
-        }
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.rt);
+        defer self.mutex.unlock(self.rt);
 
         log.debug("Received +OK", .{});
 
@@ -1390,16 +1316,12 @@ pub const Connection = struct {
     }
 
     pub fn processErr(self: *Self, err_msg: []const u8) !void {
-        if (self.should_stop.load(.acquire)) {
-            return error.ShouldStop;
-        }
-
         // Call the callback outside of mutex, if provided
         var callback: @TypeOf(self.options.callbacks.error_cb) = null;
         defer if (callback) |cb| cb(self, err_msg);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.rt);
+        defer self.mutex.unlock(self.rt);
 
         // Parse the protocol error once
         const protocol_err = parseProtocolError(err_msg, self.allocator);
@@ -1411,7 +1333,7 @@ pub const Connection = struct {
             // Propagate specific protocol errors to client
             self.handshake_error = protocol_err;
             self.handshake_state = .failed;
-            self.handshake_cond.broadcast(); // Signal handshake failure
+            self.handshake_cond.broadcast(self.rt); // Signal handshake failure
             log.debug("Handshake failed: {}", .{protocol_err});
             return;
         }
@@ -1423,10 +1345,10 @@ pub const Connection = struct {
     }
 
     fn sendPing(self: *Self, comptime lock: bool) !u64 {
-        try self.write_buffer.append("PING\r\n");
+        try self.write_buffer.append(self.rt, "PING\r\n");
 
-        if (lock) self.mutex.lock();
-        defer if (lock) self.mutex.unlock();
+        if (lock) try self.mutex.lock(self.rt);
+        defer if (lock) self.mutex.unlock(self.rt);
 
         self.outgoing_pings += 1;
         return self.outgoing_pings;
@@ -1449,24 +1371,20 @@ pub const Connection = struct {
     }
 
     pub fn processPong(self: *Self) !void {
-        if (self.should_stop.load(.acquire)) {
-            return error.ShouldStop;
-        }
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.rt);
+        defer self.mutex.unlock(self.rt);
 
         // Handle handshake completion
         if (self.handshake_state == .waiting_for_pong) {
             self.handshake_state = .completed;
-            self.handshake_cond.broadcast(); // Signal handshake completion
+            self.handshake_cond.broadcast(self.rt); // Signal handshake completion
             log.debug("Handshake completed successfully", .{});
             return;
         }
 
         // Regular PONG handling for flush() calls
         self.incoming_pongs += 1;
-        self.pong_condition.broadcast();
+        self.pong_condition.broadcast(self.rt);
 
         log.debug("Received PONG for ping_id={}", .{self.incoming_pongs});
 
@@ -1479,244 +1397,10 @@ pub const Connection = struct {
     }
 
     pub fn processPing(self: *Self) !void {
-        if (self.should_stop.load(.acquire)) {
-            return error.ShouldStop;
-        }
+        self.mutex.lockUncancelable(self.rt);
+        defer self.mutex.unlock(self.rt);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        try self.write_buffer.append("PONG\r\n");
-    }
-
-    // Reconnection Logic
-
-    /// Performs cleanup after connection failure while keeping the Connection
-    /// object intact for potential reconnection attempts.
-    /// This should be called with mutex already held.
-    ///
-    /// @param err The error that caused the connection failure
-    /// @param close_socket Whether to close the socket (false for markNeedsReconnect)
-    fn cleanupFailedConnection(self: *Self, err: anyerror, close_socket: bool) void {
-        // Update server tracking if we have a current server
-        if (self.current_server) |server| {
-            server.did_connect = false;
-            server.last_error = err;
-
-            // Only increment reconnects for active connection loss
-            if (self.status == .reconnecting) {
-                server.reconnects += 1;
-            }
-        }
-
-        // Detach socket and wake any threads waiting for it
-        const old_socket = self.socket;
-        self.socket = null;
-        self.socket_available_cond.broadcast();
-
-        // Always freeze write buffer (idempotent operation)
-        self.write_buffer.freeze();
-
-        // Wake up any waiting flush() calls
-        self.pong_condition.broadcast();
-
-        // Reset handshake state
-        self.handshake_state = .not_started;
-        self.handshake_error = null;
-        self.handshake_cond.broadcast();
-
-        // Handle socket cleanup
-        if (old_socket) |socket| {
-            // Always shutdown first to interrupt ongoing I/O
-            socket.shutdown(.both) catch |shutdown_err| {
-                log.debug("Socket shutdown failed: {}", .{shutdown_err});
-            };
-
-            // Close socket if requested
-            if (close_socket) {
-                socket.close();
-            }
-        }
-    }
-
-    fn markNeedsReconnect(self: *Self, err: anyerror) void {
-        var needs_close = false;
-        defer if (needs_close) self.close();
-
-        var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
-        defer if (callback) |cb| cb(self);
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.status != .connected) {
-            log.info("Connection not in connected state", .{});
-            return;
-        }
-
-        // Handle explicit close request
-        if (err == error.ShouldClose) {
-            needs_close = true;
-            return;
-        }
-
-        // Check if reconnection is allowed
-        if (!self.options.reconnect.allow_reconnect) {
-            log.info("Connection lost: {} (reconnect disabled)", .{err});
-            needs_close = true;
-            return;
-        }
-
-        log.info("Connection lost: {}", .{err});
-
-        // Perform connection cleanup (don't close socket - let reconnect handle it)
-        self.status = .reconnecting;
-        self.cleanupFailedConnection(err, false);
-
-        // Spawn reconnect thread if not already running
-        if (self.reconnect_thread == null) {
-            self.reconnect_thread = std.Thread.spawn(.{}, doReconnectThread, .{self}) catch |spawn_err| {
-                log.err("Failed to spawn reconnect thread: {}", .{spawn_err});
-                // Fall back to closing connection
-                needs_close = true;
-                return;
-            };
-        }
-
-        // Invoke disconnected callback
-        if (self.options.callbacks.disconnected_cb) |cb| {
-            callback = cb;
-        }
-    }
-
-    fn doReconnectThread(self: *Self) void {
-        defer {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            // Detach thread and mark as null
-            if (self.reconnect_thread) |thread| {
-                thread.detach();
-                self.reconnect_thread = null;
-            }
-        }
-
-        // Run existing doReconnect logic
-        self.doReconnect();
-    }
-
-    fn doReconnect(self: *Self) void {
-        var needs_close = false;
-        defer if (needs_close) self.close();
-
-        var callback: @TypeOf(self.options.callbacks.reconnected_cb) = null;
-        defer if (callback) |cb| cb(self);
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // Check if we should still reconnect (could have been closed)
-        if (self.status != .reconnecting) {
-            return;
-        }
-
-        log.debug("Starting reconnection", .{});
-
-        // Close old socket if still attached (reader thread owns socket lifecycle)
-        const old_socket = self.socket;
-        self.socket = null;
-        self.socket_available_cond.broadcast(); // Wake any threads waiting for socket
-
-        if (old_socket) |socket| {
-            socket.close();
-        }
-
-        var total_attempts: u32 = 0;
-        var server_cycle_count: u32 = 0;
-        const max_attempts = self.options.reconnect.max_reconnect;
-
-        // Main reconnection loop (under mutex for state consistency)
-        while (total_attempts < max_attempts and self.status == .reconnecting and !self.should_stop.load(.acquire)) {
-            const server_count = self.server_pool.getSize();
-            if (server_count == 0) {
-                log.err("No servers available for reconnection", .{});
-                break;
-            }
-
-            // Sleep after trying all servers once (using condition variable for responsive shutdown)
-            if (server_cycle_count >= server_count and total_attempts > 0) {
-                server_cycle_count = 0;
-                const delay_ms = self.calculateReconnectDelay(total_attempts);
-                log.debug("Waiting {}ms before next reconnection attempt", .{delay_ms});
-
-                const timeout_ns = delay_ms * std.time.ns_per_ms;
-                self.should_stop_cond.timedWait(&self.mutex, timeout_ns) catch {};
-
-                // Re-check status after wait (either timeout or signaled)
-                if (self.status != .reconnecting or self.should_stop.load(.acquire)) break;
-            }
-
-            // Get next server
-            const server = self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) catch |err| {
-                log.err("Server pool error: {}", .{err});
-                break;
-            } orelse {
-                log.err("No servers available for reconnection", .{});
-                break;
-            };
-
-            self.current_server = server;
-            server.reconnects += 1;
-            total_attempts += 1;
-            server_cycle_count += 1;
-
-            log.debug("Reconnection attempt {} to {s}:{d}", .{ total_attempts, server.parsed_url.host, server.parsed_url.port });
-
-            // Try to establish connection
-            self.establishConnection(server) catch |err| {
-                log.debug("Reconnection attempt {} failed: {}", .{ total_attempts, err });
-                self.cleanupFailedConnection(err, true);
-                continue;
-            };
-
-            // Try to execute the handshake procedure
-            self.waitForHandshakeCompletion() catch |err| {
-                log.debug("Reconnect handshake failed: {}", .{err});
-                self.cleanupFailedConnection(err, true);
-                continue;
-            };
-
-            // Handshake completed successfully!
-            self.status = .connected;
-
-            // Re-establish subscriptions
-            self.resendSubscriptions() catch |err| {
-                log.err("Failed to re-establish subscriptions: {}", .{err});
-            };
-
-            // Flush pending messages
-            self.pending_buffer.moveToBuffer(&self.write_buffer) catch |err| {
-                log.warn("Failed to flush pending messages: {}", .{err});
-            };
-
-            // Invoke callback (in defer outside of mutex)
-            if (self.options.callbacks.reconnected_cb) |cb| {
-                callback = cb;
-            }
-
-            log.info("Reconnection successful after {} attempts", .{total_attempts});
-            return;
-        }
-
-        // Reconnection ended (either failed or closed)
-        if (self.should_stop.load(.acquire)) {
-            log.debug("Reconnection aborted due to connection close", .{});
-        } else {
-            log.err("Reconnection failed after {} attempts", .{total_attempts});
-        }
-
-        // Will call close() in defer (outside of the mutex)
-        needs_close = true;
+        try self.write_buffer.append(self.rt, "PONG\r\n");
     }
 
     fn calculateReconnectDelay(self: *Self, attempts: u32) u64 {
@@ -1744,8 +1428,8 @@ pub const Connection = struct {
         defer to_remove.deinit(self.allocator);
 
         {
-            self.subs_mutex.lock();
-            defer self.subs_mutex.unlock();
+            self.subs_mutex.lockUncancelable(self.rt);
+            defer self.subs_mutex.unlock(self.rt);
 
             const allocator = self.scratch.allocator();
             defer self.resetScratch();
@@ -1791,56 +1475,13 @@ pub const Connection = struct {
 
             // Send all subscription commands via write buffer
             if (buffer.items.len > 0) {
-                try self.write_buffer.append(buffer.items);
+                try self.write_buffer.append(self.rt, buffer.items);
             }
         }
 
         // Now remove stale subs outside the subs_mutex
         for (to_remove.items) |sid| {
             self.removeSubscriptionInternal(sid);
-        }
-    }
-
-    /// Acquires a reference to the socket for safe concurrent use.
-    /// Blocks until a socket becomes available.
-    /// The caller MUST call releaseSocket() when done with the socket.
-    fn acquireSocket(self: *Self) !Socket {
-        // Check should_stop flag before acquiring the mutex
-        if (self.should_stop.load(.acquire)) {
-            return error.ShouldStop;
-        }
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // Wait until socket is available
-        while (self.socket == null) {
-            if (self.should_stop.load(.acquire)) {
-                return error.ShouldStop;
-            }
-            self.socket_available_cond.wait(&self.mutex);
-        }
-
-        if (self.socket) |socket| {
-            self.socket_refs += 1;
-            return socket;
-        }
-
-        unreachable;
-    }
-
-    /// Releases a reference to the socket obtained via acquireSocket().
-    /// This must be called for every successful acquireSocket() call.
-    fn releaseSocket(self: *Self) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.socket_refs > 0) {
-            self.socket_refs -= 1;
-            // Only broadcast when all references are released
-            if (self.socket_refs == 0) {
-                self.socket_unused_cond.broadcast();
-            }
         }
     }
 
@@ -1861,20 +1502,12 @@ pub const Connection = struct {
                 log.err("Handshake timeout", .{});
                 self.handshake_error = ConnectionError.Timeout;
                 self.handshake_state = .failed;
-                self.handshake_cond.broadcast(); // Signal the state change
+                self.handshake_cond.broadcast(self.rt); // Signal the state change
                 break;
             }
 
             const remaining_ns = timeout_ns - elapsed_ns;
-            self.handshake_cond.timedWait(&self.mutex, remaining_ns) catch {};
-
-            // Check for early termination conditions
-            if (self.should_stop.load(.acquire)) {
-                self.handshake_error = ConnectionError.ConnectionClosed;
-                self.handshake_state = .failed;
-                self.handshake_cond.broadcast(); // Signal the state change
-                break;
-            }
+            self.handshake_cond.timedWait(self.rt, &self.mutex, .fromNanoseconds(remaining_ns)) catch {};
         }
 
         // Return the handshake error if it failed, or void if successful
@@ -1883,32 +1516,6 @@ pub const Connection = struct {
         } else {
             return self.handshake_error orelse ConnectionError.ConnectionFailed;
         }
-    }
-
-    /// Internal helper for waiting for socket to become unused (assumes mutex is held)
-    fn waitForSocketUnused(self: *Self, timeout_ms: u64) !void {
-        if (self.socket_refs == 0) {
-            return; // Already unused
-        }
-
-        if (timeout_ms == 0) {
-            return error.Timeout; // Non-blocking, socket still in use
-        }
-
-        var timer = std.time.Timer.start() catch return error.Timeout;
-        const timeout_ns = timeout_ms * std.time.ns_per_ms;
-
-        while (self.socket_refs > 0) {
-            const elapsed_ns = timer.read();
-            if (elapsed_ns >= timeout_ns) {
-                return error.Timeout;
-            }
-
-            const remaining_ns = timeout_ns - elapsed_ns;
-            self.socket_unused_cond.timedWait(&self.mutex, remaining_ns) catch {};
-        }
-
-        // Socket became unused
     }
 
     // JetStream support
@@ -1925,14 +1532,14 @@ pub const Connection = struct {
         _ = self.drain_subscription_count.fetchAdd(1, .release);
 
         // Start draining subscriptions
-        self.subs_mutex.lock();
+        self.subs_mutex.lockUncancelable(self.rt);
         var iter = self.subscriptions.valueIterator();
         while (iter.next()) |sub_ptr| {
             const sub = sub_ptr.*;
             _ = self.drain_subscription_count.fetchAdd(1, .release);
             sub.drain(); // Drain the subscription
         }
-        self.subs_mutex.unlock();
+        self.subs_mutex.unlock(self.rt);
 
         // Release the blocker
         self.notifySubscriptionDrainComplete();
@@ -1963,9 +1570,9 @@ pub const Connection = struct {
         }
 
         if (timeout_ms) |timeout| {
-            try self.drain_completion.timedWait(timeout * std.time.ns_per_ms);
+            try self.drain_completion.timedWait(self.rt, .fromMilliseconds(timeout));
         } else {
-            self.drain_completion.wait();
+            try self.drain_completion.wait(self.rt);
         }
     }
 
@@ -1982,8 +1589,8 @@ pub const Connection = struct {
     }
 
     fn sendDrainPing(self: *Self) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.rt);
+        defer self.mutex.unlock(self.rt);
 
         if (self.drain_ping_id > 0) return; // Already sent the last ping
 

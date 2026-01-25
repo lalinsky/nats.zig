@@ -1,6 +1,7 @@
 // Simple subscriber example - listens for a single message
 const std = @import("std");
 const nats = @import("nats");
+const zio = @import("zio");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -9,8 +10,12 @@ pub fn main() !void {
 
     std.log.info("Listening for message on subject 'foo'", .{});
 
+    // Initialize zio runtime
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
     // Connect to NATS server
-    var conn = nats.Connection.init(allocator, .{});
+    var conn = nats.Connection.init(allocator, rt, .{});
     defer conn.deinit();
 
     try conn.connect("nats://localhost:4222");

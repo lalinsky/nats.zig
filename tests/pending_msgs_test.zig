@@ -1,9 +1,13 @@
 const std = @import("std");
 const nats = @import("nats");
+const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "pending_msgs counter sync subscription" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create sync subscription
@@ -24,7 +28,7 @@ test "pending_msgs counter sync subscription" {
     while (waited_ms < 1000) : (waited_ms += 10) {
         if (sub.pending_msgs.load(.acquire) == 1 and
             sub.pending_bytes.load(.acquire) == msg1_data.len) break;
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        try rt.sleep(.fromMilliseconds(10));
     }
 
     // Should have 1 pending message and correct bytes
@@ -40,7 +44,7 @@ test "pending_msgs counter sync subscription" {
     while (waited_ms < 1000) : (waited_ms += 10) {
         if (sub.pending_msgs.load(.acquire) == 2 and
             sub.pending_bytes.load(.acquire) == msg1_data.len + msg2_data.len) break;
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        try rt.sleep(.fromMilliseconds(10));
     }
 
     // Should have 2 pending messages and correct total bytes
@@ -65,7 +69,10 @@ test "pending_msgs counter sync subscription" {
 }
 
 test "pending_msgs counter async subscription" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     var message_count = std.atomic.Value(u32).init(0);
@@ -76,6 +83,7 @@ test "pending_msgs counter async subscription" {
         message_count_ptr: *std.atomic.Value(u32),
         processed_count_ptr: *std.atomic.Value(u32),
         total_bytes_ptr: *std.atomic.Value(u64),
+        rt: *zio.Runtime,
     };
 
     const testHandler = struct {
@@ -84,7 +92,7 @@ test "pending_msgs counter async subscription" {
             _ = ctx.message_count_ptr.fetchAdd(1, .acq_rel);
             _ = ctx.total_bytes_ptr.fetchAdd(@intCast(msg.data.len), .acq_rel);
             // Add a small delay to simulate processing
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            ctx.rt.sleep(.fromMilliseconds(5)) catch {};
             _ = ctx.processed_count_ptr.fetchAdd(1, .acq_rel);
         }
     }.handle;
@@ -94,6 +102,7 @@ test "pending_msgs counter async subscription" {
         .message_count_ptr = &message_count,
         .processed_count_ptr = &processed_count,
         .total_bytes_ptr = &total_bytes_processed,
+        .rt = rt,
     }});
     defer sub.deinit();
 
@@ -111,7 +120,7 @@ test "pending_msgs counter async subscription" {
     try conn.flush();
 
     // Give a moment for messages to arrive but not fully process
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    try rt.sleep(.fromMilliseconds(20));
 
     // Should have some pending messages (might be processing)
     // Note: We can't assert an exact number here since processing might start immediately
@@ -119,7 +128,7 @@ test "pending_msgs counter async subscription" {
     // Wait for all messages to be processed
     var attempts: u32 = 0;
     while (processed_count.load(.acquire) < 3 and attempts < 200) {
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        try rt.sleep(.fromMilliseconds(10));
         attempts += 1;
     }
 

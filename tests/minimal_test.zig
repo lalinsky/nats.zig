@@ -1,23 +1,33 @@
 const std = @import("std");
 const nats = @import("nats");
+const zio = @import("zio");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
 
 test "connect" {
-    const conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 }
 
 test "connect wrong port" {
-    const conn = utils.createConnectionWrongPort() catch return;
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const conn = utils.createConnectionWrongPort(rt) catch return;
     defer utils.closeConnection(conn);
 
     try std.testing.expect(false);
 }
 
 test "basic publish and subscribe" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -37,7 +47,10 @@ test "basic publish and subscribe" {
 }
 
 test "async subscribe" {
-    var conn = try utils.createDefaultConnection();
+    const rt = try zio.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var conn = try utils.createDefaultConnection(rt);
     defer utils.closeConnection(conn);
 
     // Message handler function
@@ -45,7 +58,7 @@ test "async subscribe" {
         count: u32 = 0,
         data: []const u8 = "",
         subject: []const u8 = "",
-        called: std.Thread.ResetEvent = .{},
+        called: zio.ResetEvent = .init,
 
         fn handleMsg(msg: *nats.Message, self: *@This()) void {
             defer self.called.set();
@@ -73,7 +86,7 @@ test "async subscribe" {
     try conn.flush();
 
     // Wait a bit for async processing
-    try handler.called.timedWait(100 * std.time.ns_per_ms);
+    try handler.called.timedWait(rt, .fromMilliseconds(100));
 
     // Check if message was received by handler
     try std.testing.expect(handler.count == 1);
