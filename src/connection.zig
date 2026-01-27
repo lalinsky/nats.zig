@@ -1093,7 +1093,7 @@ pub const Connection = struct {
             return;
         }
 
-        const bytes_written = try stream.write(self.rt, gather.slices[0], .none); // TODO: use writeVec
+        const bytes_written = try stream.writeVec(self.rt, gather.slices, .none);
         try gather.consume(self.rt, bytes_written);
     }
 
