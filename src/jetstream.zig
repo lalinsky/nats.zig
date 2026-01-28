@@ -1576,6 +1576,12 @@ pub const JetStream = struct {
         }
 
         // Send request without retry logic
+        // TODO: Implement retry logic for NoResponders (503) errors in clustered environments
+        // See ADR-22: https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-22.md
+        // Reference implementations:
+        // - nats.go: 250ms backoff, 2 retries by default
+        // - nats.c: Check their implementation
+        // - nats.java: Check their implementation
         const resp = self.nc.requestMsg(msg, self.opts.request_timeout_ms) catch |request_err| {
             return if (request_err == error.NoResponders) error.NoStreamResponse else request_err;
         };

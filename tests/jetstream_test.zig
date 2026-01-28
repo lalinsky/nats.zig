@@ -706,6 +706,10 @@ test "JetStream publish basic message" {
     var stream_info = try js.addStream(stream_config);
     defer stream_info.deinit();
 
+    // Wait for stream metadata to propagate across cluster nodes
+    // TODO: Remove this delay once retry logic is implemented (see ADR-22)
+    try rt.sleep(.fromMilliseconds(100));
+
     // Publish a message using JetStream publish
     const test_data = "Hello JetStream!";
     var pub_ack = try js.publish(subject, test_data, .{});
