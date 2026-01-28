@@ -650,6 +650,61 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             return self.queue.pushSlice(rt, data);
         }
 
+        /// Append multiple slices to the buffer in a single operation
+        /// More efficient than calling append() multiple times as it only takes the lock once
+        pub fn appendMany(self: *Self, rt: *zio.Runtime, slices: []const []const u8) (zio.Cancelable || PushError)!void {
+            try self.queue.mutex.lock(rt);
+            defer self.queue.mutex.unlock(rt);
+
+            if (self.queue.is_closed) {
+                return PushError.QueueClosed;
+            }
+            if (self.queue.is_frozen) {
+                return PushError.BufferFrozen;
+            }
+
+            // Calculate total size needed
+            var total_size: usize = 0;
+            for (slices) |slice| {
+                total_size += slice.len;
+            }
+
+            // Check size limit before adding (overflow-safe)
+            if (self.queue.max_size > 0) {
+                const max_items = self.queue.max_size;
+                if (self.queue.items_available >= max_items) {
+                    return PushError.OutOfMemory;
+                }
+                if (total_size > max_items - self.queue.items_available) {
+                    return PushError.OutOfMemory;
+                }
+            }
+
+            // Append each slice
+            for (slices) |slice| {
+                var remaining = slice;
+
+                while (remaining.len > 0) {
+                    const chunk = try self.queue.ensureWritableChunk();
+
+                    const available = chunk.availableToWrite();
+                    const to_write = @min(available, remaining.len);
+
+                    @memcpy(chunk.getWriteSlice()[0..to_write], remaining[0..to_write]);
+
+                    chunk.write_pos += to_write;
+                    remaining = remaining[to_write..];
+
+                    if (chunk.availableToWrite() == 0) {
+                        chunk.is_sealed = true;
+                    }
+                }
+            }
+
+            self.queue.items_available += total_size;
+            self.queue.data_cond.signal(rt);
+        }
+
         /// Close the buffer to prevent further writes
         pub fn close(self: *Self, rt: *zio.Runtime) void {
             self.queue.close(rt);
