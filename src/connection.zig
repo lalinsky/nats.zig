@@ -533,7 +533,6 @@ pub const Connection = struct {
         const allocator = self.scratch.allocator();
         defer self.resetScratch();
 
-        // TODO pre-allocate headers_buffer
         var headers_buffer = ArrayList(u8){};
         defer headers_buffer.deinit(allocator);
 
@@ -548,30 +547,27 @@ pub const Connection = struct {
 
         const reply_to_use = reply_override orelse msg.reply;
 
-        var buffer = try std.ArrayListUnmanaged(u8).initCapacity(allocator, MAX_CONTROL_LINE_SIZE + total_payload);
+        // Build control line + headers (without copying msg.data)
+        var buffer = try std.ArrayListUnmanaged(u8).initCapacity(allocator, MAX_CONTROL_LINE_SIZE + headers_len);
         defer buffer.deinit(allocator);
 
         var buffer_writer = buffer.fixedWriter();
 
         if (headers_len > 0) {
-            // HPUB <subject> [reply] <headers_len> <total_len>\r\n<headers><data>\r\n
+            // HPUB <subject> [reply] <headers_len> <total_len>\r\n<headers>
             if (reply_to_use) |reply| {
                 try buffer_writer.print("HPUB {s} {s} {d} {d}\r\n", .{ msg.subject, reply, headers_len, total_payload });
             } else {
                 try buffer_writer.print("HPUB {s} {d} {d}\r\n", .{ msg.subject, headers_len, total_payload });
             }
             try buffer_writer.writeAll(headers_buffer.items);
-            try buffer_writer.writeAll(msg.data);
-            try buffer_writer.writeAll("\r\n");
         } else {
-            // PUB <subject> [reply] <size>\r\n<data>\r\n
+            // PUB <subject> [reply] <size>\r\n
             if (reply_to_use) |reply| {
                 try buffer_writer.print("PUB {s} {s} {d}\r\n", .{ msg.subject, reply, msg.data.len });
             } else {
                 try buffer_writer.print("PUB {s} {d}\r\n", .{ msg.subject, msg.data.len });
             }
-            try buffer_writer.writeAll(msg.data);
-            try buffer_writer.writeAll("\r\n");
         }
 
         // Allow publishes when connected or reconnecting (buffered).
@@ -583,11 +579,14 @@ pub const Connection = struct {
             },
         }
 
+        // Append control+headers, data, and trailer without copying msg.data
+        const slices = &[_][]const u8{ buffer.items, msg.data, "\r\n" };
+
         // Published messages go to pending_buffer during reconnection, otherwise write_buffer
         if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
-            try self.pending_buffer.append(self.rt, buffer.items);
+            try self.pending_buffer.appendMany(self.rt, slices);
         } else {
-            try self.write_buffer.append(self.rt, buffer.items);
+            try self.write_buffer.appendMany(self.rt, slices);
         }
 
         if (reply_to_use) |reply| {
