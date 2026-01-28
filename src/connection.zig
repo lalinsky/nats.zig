@@ -1371,7 +1371,7 @@ pub const Connection = struct {
     }
 
     pub fn processPong(self: *Self) !void {
-        self.mutex.lockUncancelable(self.rt);
+        try self.mutex.lock(self.rt);
         defer self.mutex.unlock(self.rt);
 
         // Handle handshake completion
@@ -1397,7 +1397,7 @@ pub const Connection = struct {
     }
 
     pub fn processPing(self: *Self) !void {
-        self.mutex.lockUncancelable(self.rt);
+        try self.mutex.lock(self.rt);
         defer self.mutex.unlock(self.rt);
 
         try self.write_buffer.append(self.rt, "PONG\r\n");
