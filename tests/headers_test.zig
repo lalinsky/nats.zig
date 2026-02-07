@@ -9,7 +9,7 @@ test "publish and receive message with headers" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection(rt);
+    var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -52,7 +52,7 @@ test "publish message without headers using publishMsg" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection(rt);
+    var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -122,7 +122,7 @@ test "message with reply and headers" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection(rt);
+    var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     // Create a subscription

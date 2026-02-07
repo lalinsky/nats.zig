@@ -229,7 +229,7 @@ pub const ConnectionOptions = struct {
 
 pub const Connection = struct {
     allocator: Allocator,
-    rt: *zio.Runtime,
+
     options: ConnectionOptions,
 
     status: ConnectionStatus = .closed,
@@ -291,18 +291,18 @@ pub const Connection = struct {
     const Self = @This();
     const WriteBuffer = ConcurrentWriteBuffer(65536); // 64KB chunk size
 
-    pub fn init(allocator: Allocator, rt: *zio.Runtime, options: ConnectionOptions) Self {
+    pub fn init(allocator: Allocator, options: ConnectionOptions) Self {
         return Self{
             .allocator = allocator,
-            .rt = rt,
+
             .options = options,
             .server_pool = ServerPool.init(allocator),
             .server_info_arena = std.heap.ArenaAllocator.init(allocator),
             .pending_buffer = WriteBuffer.init(allocator, .{ .max_size = options.reconnect.reconnect_buf_size }),
             .write_buffer = WriteBuffer.init(allocator, .{}),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
-            .response_manager = ResponseManager.init(allocator, rt),
-            .parser = Parser.init(allocator, rt),
+            .response_manager = ResponseManager.init(allocator),
+            .parser = Parser.init(allocator),
             .scratch = std.heap.ArenaAllocator.init(allocator),
             .ping_timer = std.time.Timer.start() catch unreachable,
         };
@@ -346,8 +346,8 @@ pub const Connection = struct {
     pub fn connect(self: *Self, url: []const u8) !void {
         errdefer self.close();
 
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         if (self.status != .closed) {
             log.err("Already connected", .{});
@@ -355,12 +355,12 @@ pub const Connection = struct {
         }
 
         self.status = .connecting;
-        self.status_cond.broadcast(self.rt);
+        self.status_cond.broadcast();
 
         _ = try self.server_pool.addServer(url, false);
 
-        try self.manager_task.spawn(self.rt, managerLoop, .{self});
-        errdefer self.manager_task.cancel(self.rt);
+        try self.manager_task.spawn(managerLoop, .{self});
+        errdefer self.manager_task.cancel();
 
         while (true) {
             switch (self.status) {
@@ -378,15 +378,15 @@ pub const Connection = struct {
                     return;
                 },
                 else => {
-                    try self.status_cond.wait(self.rt, &self.mutex);
+                    try self.status_cond.wait(&self.mutex);
                 },
             }
         }
     }
 
     pub fn addServer(self: *Self, url: []const u8) !void {
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         _ = try self.server_pool.addServer(url, false);
     }
@@ -399,10 +399,10 @@ pub const Connection = struct {
 
         log.info("Closing connection", .{});
 
-        self.manager_task.cancel(self.rt);
+        self.manager_task.cancel();
 
-        self.mutex.lockUncancelable(self.rt);
-        defer self.mutex.unlock(self.rt);
+        self.mutex.lockUncancelable();
+        defer self.mutex.unlock();
 
         if (self.status == .closed) {
             return;
@@ -410,14 +410,14 @@ pub const Connection = struct {
 
         // Mark the connection as permanently closed
         self.status = .closed;
-        self.status_cond.broadcast(self.rt);
+        self.status_cond.broadcast();
 
         // Close write buffers to wake up any waiting fibers
-        self.pending_buffer.close(self.rt);
-        self.write_buffer.close(self.rt);
+        self.pending_buffer.close();
+        self.write_buffer.close();
 
         // Wake up any waiting flush() calls
-        self.pong_condition.broadcast(self.rt);
+        self.pong_condition.broadcast();
 
         // Make sure we invoke the closed callback
         if (self.options.callbacks.closed_cb) |cb| {
@@ -426,8 +426,8 @@ pub const Connection = struct {
     }
 
     pub fn getStatus(self: *Self) ConnectionStatus {
-        self.mutex.lockUncancelable(self.rt);
-        defer self.mutex.unlock(self.rt);
+        self.mutex.lockUncancelable();
+        defer self.mutex.unlock();
         return self.status;
     }
 
@@ -447,8 +447,8 @@ pub const Connection = struct {
     /// - Testing reconnection behavior
     /// Returns error if reconnection cannot be initiated
     pub fn reconnect(self: *Self) !void {
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         // Check if reconnection is allowed
         if (!self.options.reconnect.allow_reconnect) {
@@ -527,8 +527,8 @@ pub const Connection = struct {
             return error.DrainInProgress;
         }
 
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         const allocator = self.scratch.allocator();
         defer self.resetScratch();
@@ -584,9 +584,9 @@ pub const Connection = struct {
 
         // Published messages go to pending_buffer during reconnection, otherwise write_buffer
         if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
-            try self.pending_buffer.appendMany(self.rt, slices);
+            try self.pending_buffer.appendMany(slices);
         } else {
-            try self.write_buffer.appendMany(self.rt, slices);
+            try self.write_buffer.appendMany(slices);
         }
 
         if (reply_to_use) |reply| {
@@ -597,15 +597,15 @@ pub const Connection = struct {
     }
 
     fn subscribeInternal(self: *Self, sub: *Subscription) !void {
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         if (self.status != .connected) {
             return ConnectionError.ConnectionClosed;
         }
 
-        try self.subs_mutex.lock(self.rt);
-        defer self.subs_mutex.unlock(self.rt);
+        try self.subs_mutex.lock();
+        defer self.subs_mutex.unlock();
 
         try self.subscriptions.put(sub.sid, sub);
         errdefer _ = self.subscriptions.remove(sub.sid);
@@ -621,7 +621,7 @@ pub const Connection = struct {
         } else {
             try buffer.writer(allocator).print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
         }
-        try self.write_buffer.append(self.rt, buffer.items);
+        try self.write_buffer.append(buffer.items);
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
@@ -699,17 +699,17 @@ pub const Connection = struct {
             writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
         }
 
-        try self.write_buffer.append(self.rt, stream.getWritten());
+        try self.write_buffer.append(stream.getWritten());
     }
 
     pub fn unsubscribe(self: *Self, sub: *Subscription) void {
         // Remove from subscription table first
         {
-            self.mutex.lockUncancelable(self.rt);
-            defer self.mutex.unlock(self.rt);
+            self.mutex.lockUncancelable();
+            defer self.mutex.unlock();
 
-            self.subs_mutex.lockUncancelable(self.rt);
-            defer self.subs_mutex.unlock(self.rt);
+            self.subs_mutex.lockUncancelable();
+            defer self.subs_mutex.unlock();
 
             if (!self.subscriptions.remove(sub.sid)) {
                 // Nothing to do, already unsubscribed
@@ -733,8 +733,8 @@ pub const Connection = struct {
     /// Remove subscription from connection's subscription table
     /// This does not send UNSUB to server - that should be done separately
     pub fn removeSubscriptionInternal(self: *Self, sid: u64) void {
-        self.subs_mutex.lockUncancelable(self.rt);
-        defer self.subs_mutex.unlock(self.rt);
+        self.subs_mutex.lockUncancelable();
+        defer self.subs_mutex.unlock();
 
         if (self.subscriptions.fetchRemove(sid)) |kv| {
             log.debug("Removed subscription {d} ({s}) from connection", .{ sid, kv.value.subject });
@@ -744,15 +744,15 @@ pub const Connection = struct {
     }
 
     pub fn flush(self: *Self) !void {
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         while (self.status != .connected) {
             if (self.status == .closed) {
                 log.debug("Flush skipped, no longer connected", .{});
                 return error.ConnectionClosed;
             }
-            try self.status_cond.wait(self.rt, &self.mutex);
+            try self.status_cond.wait(&self.mutex);
         }
 
         const our_ping_id = try self.sendPing(false);
@@ -775,7 +775,7 @@ pub const Connection = struct {
             }
 
             const remaining_ns = timeout_ns - elapsed_ns;
-            self.pong_condition.timedWait(self.rt, &self.mutex, .fromNanoseconds(remaining_ns)) catch {};
+            self.pong_condition.timedWait(&self.mutex, .fromNanoseconds(remaining_ns)) catch {};
         }
 
         log.debug("Flush completed, received PONG for ping_id={}", .{our_ping_id});
@@ -868,12 +868,12 @@ pub const Connection = struct {
         defer log.debug("Manager loop exited", .{});
 
         defer {
-            self.mutex.lockUncancelable(self.rt);
-            defer self.mutex.unlock(self.rt);
+            self.mutex.lockUncancelable();
+            defer self.mutex.unlock();
 
             if (self.status != .closed) {
                 self.status = .connection_failed;
-                self.status_cond.broadcast(self.rt);
+                self.status_cond.broadcast();
             }
         }
 
@@ -892,8 +892,8 @@ pub const Connection = struct {
             var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
             defer if (callback) |cb| cb(self);
 
-            try self.mutex.lock(self.rt);
-            defer self.mutex.unlock(self.rt);
+            try self.mutex.lock();
+            defer self.mutex.unlock();
 
             if (conn_err) |err| {
                 log.info("Connection failed: {}", .{err});
@@ -906,7 +906,7 @@ pub const Connection = struct {
             }
 
             self.status = .reconnecting;
-            self.status_cond.broadcast(self.rt);
+            self.status_cond.broadcast();
 
             if (self.options.callbacks.disconnected_cb) |cb| {
                 callback = cb;
@@ -917,8 +917,8 @@ pub const Connection = struct {
     }
 
     fn selectNextServer(self: *Self) !*Server {
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         const server = try self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) orelse return error.NoServerAvailable;
         server.reconnects += 1;
@@ -928,8 +928,8 @@ pub const Connection = struct {
 
     fn establishConnection(self: *Self, server: *Server) !zio.net.Stream {
         log.debug("Connecting to server: {s}:{d} ({d} retries)", .{ server.parsed_url.host, server.parsed_url.port, server.reconnects });
-        const stream = try zio.net.tcpConnectToHost(self.rt, server.parsed_url.host, server.parsed_url.port, .{});
-        errdefer stream.close(self.rt);
+        const stream = try zio.net.tcpConnectToHost(server.parsed_url.host, server.parsed_url.port, .{});
+        errdefer stream.close();
 
         try stream.socket.setKeepAlive(true);
 
@@ -937,8 +937,8 @@ pub const Connection = struct {
             log.debug("Connected, starting handshake...", .{});
         }
 
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         std.debug.assert(self.status == .connecting or self.status == .reconnecting);
 
@@ -956,10 +956,10 @@ pub const Connection = struct {
         // Initialize handshake state
         self.handshake_state = .waiting_for_info;
         self.handshake_error = null;
-        self.handshake_cond.broadcast(self.rt);
+        self.handshake_cond.broadcast();
 
         // Unfreeze write buffer now that we have a working socket
-        self.write_buffer.unfreeze(self.rt);
+        self.write_buffer.unfreeze();
 
         return stream;
     }
@@ -970,27 +970,27 @@ pub const Connection = struct {
         const server = try self.selectNextServer();
 
         var stream = try self.establishConnection(server);
-        defer stream.close(self.rt);
+        defer stream.close();
 
-        var reader_task = try self.rt.spawn(readerLoop, .{ self, &stream });
-        defer reader_task.cancel(self.rt);
+        var reader_task = try zio.spawn(readerLoop, .{ self, &stream });
+        defer reader_task.cancel();
 
-        var flusher_task = try self.rt.spawn(flusherLoop, .{ self, &stream });
-        defer flusher_task.cancel(self.rt);
+        var flusher_task = try zio.spawn(flusherLoop, .{ self, &stream });
+        defer flusher_task.cancel();
 
         var was_reconnect = false;
 
-        try self.mutex.lock(self.rt);
+        try self.mutex.lock();
         self.waitForHandshakeCompletion() catch |err| {
-            self.mutex.unlock(self.rt);
+            self.mutex.unlock();
             return err;
         };
         if (self.status == .reconnecting) {
             was_reconnect = true;
         }
         self.status = .connected;
-        self.status_cond.broadcast(self.rt);
-        self.mutex.unlock(self.rt);
+        self.status_cond.broadcast();
+        self.mutex.unlock();
 
         log.info("Connected successfully to {s}", .{server.parsed_url.full_url});
 
@@ -1003,9 +1003,9 @@ pub const Connection = struct {
 
         try self.resendSubscriptions();
 
-        try self.pending_buffer.moveToBuffer(self.rt, &self.write_buffer);
+        try self.pending_buffer.moveToBuffer(&self.write_buffer);
 
-        const result = try zio.select(self.rt, .{
+        const result = try zio.select(.{
             .reader = &reader_task,
             .flusher = &flusher_task,
             .reconnect = &self.reconnect_requested,
@@ -1040,7 +1040,7 @@ pub const Connection = struct {
         var buffer: [4096]u8 = undefined;
 
         while (true) {
-            const bytes_read = try stream.read(self.rt, &buffer, .none);
+            const bytes_read = try stream.read(&buffer, .none);
             if (bytes_read == 0) {
                 log.debug("Connection closed by server (EOF)", .{});
                 break;
@@ -1074,7 +1074,7 @@ pub const Connection = struct {
     fn flusherIteration(self: *Self, stream: *zio.net.Stream) !void {
         // Try to gather data from buffer first
         var slices: [16][]const u8 = undefined;
-        const gather = self.write_buffer.gatherReadSlices(self.rt, &slices, self.options.timeout_ms) catch |err| switch (err) {
+        const gather = self.write_buffer.gatherReadSlices(&slices, self.options.timeout_ms) catch |err| switch (err) {
             error.QueueEmpty => {
                 // No data to write
                 return;
@@ -1092,8 +1092,8 @@ pub const Connection = struct {
             return;
         }
 
-        const bytes_written = try stream.writeVec(self.rt, gather.slices, .none);
-        try gather.consume(self.rt, bytes_written);
+        const bytes_written = try stream.writeVec(gather.slices, .none);
+        try gather.consume(bytes_written);
     }
 
     // Parser callback methods
@@ -1102,12 +1102,12 @@ pub const Connection = struct {
         defer if (owns_message) message.deinit();
 
         // Retain subscription while holding lock, then release lock
-        try self.subs_mutex.lock(self.rt);
+        try self.subs_mutex.lock();
         const sub = self.subscriptions.get(message.sid);
         if (sub) |s| {
             s.retain(); // Keep subscription alive
         }
-        self.subs_mutex.unlock(self.rt);
+        self.subs_mutex.unlock();
 
         if (sub) |s| {
             defer s.release(); // Release when done
@@ -1126,7 +1126,7 @@ pub const Connection = struct {
 
             // Queue message for subscription (both sync and async use the queue)
             // For async subscriptions, the handler fiber will pick it up
-            s.messages.push(self.rt, message) catch |err| {
+            s.messages.push(message) catch |err| {
                 switch (err) {
                     error.QueueClosed => {
                         // Queue is closed; drop gracefully.
@@ -1194,7 +1194,7 @@ pub const Connection = struct {
         try buffer.writer(allocator).writeAll("PING\r\n");
 
         // Send via buffer (mutex already held)
-        try self.write_buffer.append(self.rt, buffer.items);
+        try self.write_buffer.append(buffer.items);
 
         log.debug("Sent CONNECT+PING during handshake", .{});
     }
@@ -1202,8 +1202,8 @@ pub const Connection = struct {
     pub fn processInfo(self: *Self, info_json: []const u8) !void {
         log.debug("Received INFO: {s}", .{info_json});
 
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         // Reset arena to clear any previous server info strings
         _ = self.server_info_arena.reset(.retain_capacity);
@@ -1226,12 +1226,12 @@ pub const Connection = struct {
                 log.err("Failed to send CONNECT+PING: {}", .{err});
                 self.handshake_error = err;
                 self.handshake_state = .failed;
-                self.handshake_cond.broadcast(self.rt);
+                self.handshake_cond.broadcast();
                 return;
             };
 
             self.handshake_state = .waiting_for_pong;
-            self.handshake_cond.broadcast(self.rt); // Signal state change
+            self.handshake_cond.broadcast(); // Signal state change
             log.debug("Handshake: sent CONNECT+PING, waiting for PONG", .{});
         }
 
@@ -1251,8 +1251,8 @@ pub const Connection = struct {
     }
 
     pub fn processOK(self: *Self) !void {
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         log.debug("Received +OK", .{});
 
@@ -1319,8 +1319,8 @@ pub const Connection = struct {
         var callback: @TypeOf(self.options.callbacks.error_cb) = null;
         defer if (callback) |cb| cb(self, err_msg);
 
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         // Parse the protocol error once
         const protocol_err = parseProtocolError(err_msg, self.allocator);
@@ -1332,7 +1332,7 @@ pub const Connection = struct {
             // Propagate specific protocol errors to client
             self.handshake_error = protocol_err;
             self.handshake_state = .failed;
-            self.handshake_cond.broadcast(self.rt); // Signal handshake failure
+            self.handshake_cond.broadcast(); // Signal handshake failure
             log.debug("Handshake failed: {}", .{protocol_err});
             return;
         }
@@ -1344,10 +1344,10 @@ pub const Connection = struct {
     }
 
     fn sendPing(self: *Self, comptime lock: bool) !u64 {
-        try self.write_buffer.append(self.rt, "PING\r\n");
+        try self.write_buffer.append("PING\r\n");
 
-        if (lock) try self.mutex.lock(self.rt);
-        defer if (lock) self.mutex.unlock(self.rt);
+        if (lock) try self.mutex.lock();
+        defer if (lock) self.mutex.unlock();
 
         self.outgoing_pings += 1;
         return self.outgoing_pings;
@@ -1370,20 +1370,20 @@ pub const Connection = struct {
     }
 
     pub fn processPong(self: *Self) !void {
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         // Handle handshake completion
         if (self.handshake_state == .waiting_for_pong) {
             self.handshake_state = .completed;
-            self.handshake_cond.broadcast(self.rt); // Signal handshake completion
+            self.handshake_cond.broadcast(); // Signal handshake completion
             log.debug("Handshake completed successfully", .{});
             return;
         }
 
         // Regular PONG handling for flush() calls
         self.incoming_pongs += 1;
-        self.pong_condition.broadcast(self.rt);
+        self.pong_condition.broadcast();
 
         log.debug("Received PONG for ping_id={}", .{self.incoming_pongs});
 
@@ -1396,10 +1396,10 @@ pub const Connection = struct {
     }
 
     pub fn processPing(self: *Self) !void {
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
-        try self.write_buffer.append(self.rt, "PONG\r\n");
+        try self.write_buffer.append("PONG\r\n");
     }
 
     fn calculateReconnectDelay(self: *Self, attempts: u32) u64 {
@@ -1427,8 +1427,8 @@ pub const Connection = struct {
         defer to_remove.deinit(self.allocator);
 
         {
-            self.subs_mutex.lockUncancelable(self.rt);
-            defer self.subs_mutex.unlock(self.rt);
+            self.subs_mutex.lockUncancelable();
+            defer self.subs_mutex.unlock();
 
             const allocator = self.scratch.allocator();
             defer self.resetScratch();
@@ -1474,7 +1474,7 @@ pub const Connection = struct {
 
             // Send all subscription commands via write buffer
             if (buffer.items.len > 0) {
-                try self.write_buffer.append(self.rt, buffer.items);
+                try self.write_buffer.append(buffer.items);
             }
         }
 
@@ -1501,12 +1501,12 @@ pub const Connection = struct {
                 log.err("Handshake timeout", .{});
                 self.handshake_error = ConnectionError.Timeout;
                 self.handshake_state = .failed;
-                self.handshake_cond.broadcast(self.rt); // Signal the state change
+                self.handshake_cond.broadcast(); // Signal the state change
                 break;
             }
 
             const remaining_ns = timeout_ns - elapsed_ns;
-            self.handshake_cond.timedWait(self.rt, &self.mutex, .fromNanoseconds(remaining_ns)) catch {};
+            self.handshake_cond.timedWait(&self.mutex, .fromNanoseconds(remaining_ns)) catch {};
         }
 
         // Return the handshake error if it failed, or void if successful
@@ -1531,14 +1531,14 @@ pub const Connection = struct {
         _ = self.drain_subscription_count.fetchAdd(1, .release);
 
         // Start draining subscriptions
-        self.subs_mutex.lockUncancelable(self.rt);
+        self.subs_mutex.lockUncancelable();
         var iter = self.subscriptions.valueIterator();
         while (iter.next()) |sub_ptr| {
             const sub = sub_ptr.*;
             _ = self.drain_subscription_count.fetchAdd(1, .release);
             sub.drain(); // Drain the subscription
         }
-        self.subs_mutex.unlock(self.rt);
+        self.subs_mutex.unlock();
 
         // Release the blocker
         self.notifySubscriptionDrainComplete();
@@ -1569,9 +1569,9 @@ pub const Connection = struct {
         }
 
         if (timeout_ms) |timeout| {
-            try self.drain_completion.timedWait(self.rt, .fromMilliseconds(timeout));
+            try self.drain_completion.timedWait(.fromMilliseconds(timeout));
         } else {
-            try self.drain_completion.wait(self.rt);
+            try self.drain_completion.wait();
         }
     }
 
@@ -1588,8 +1588,8 @@ pub const Connection = struct {
     }
 
     fn sendDrainPing(self: *Self) void {
-        self.mutex.lockUncancelable(self.rt);
-        defer self.mutex.unlock(self.rt);
+        self.mutex.lockUncancelable();
+        defer self.mutex.unlock();
 
         if (self.drain_ping_id > 0) return; // Already sent the last ping
 

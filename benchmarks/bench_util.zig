@@ -98,7 +98,7 @@ pub fn connect(allocator: std.mem.Allocator, url: ?[]const u8) !*nats.Connection
     var conn = try allocator.create(nats.Connection);
     errdefer allocator.destroy(conn);
 
-    conn.* = nats.Connection.init(allocator, rt, .{});
+    conn.* = nats.Connection.init(allocator, .{});
 
     const connect_url = url orelse "nats://localhost:4222";
     conn.connect(connect_url) catch |err| {
@@ -113,8 +113,6 @@ pub fn connect(allocator: std.mem.Allocator, url: ?[]const u8) !*nats.Connection
 // Common cleanup
 pub fn cleanup(conn: *nats.Connection) void {
     const allocator = conn.allocator;
-    const rt = conn.rt;
     conn.deinit();
     allocator.destroy(conn);
-    rt.deinit();
 }

@@ -14,7 +14,7 @@ pub fn main() !void {
     defer rt.deinit();
 
     // Creates a connection to the default NATS URL
-    var conn = nats.Connection.init(allocator, rt, .{});
+    var conn = nats.Connection.init(allocator, .{});
     defer conn.deinit();
 
     conn.connect("nats://localhost:4222") catch |err| {

@@ -7,7 +7,7 @@ test "pending_msgs counter sync subscription" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection(rt);
+    var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     // Create sync subscription
@@ -72,7 +72,7 @@ test "pending_msgs counter async subscription" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection(rt);
+    var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var message_count = std.atomic.Value(u32).init(0);

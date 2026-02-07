@@ -101,7 +101,7 @@ pub const Subscription = struct {
     pub fn startHandler(self: *Subscription) !void {
         if (self.handler == null) return; // Sync subscription, no handler fiber needed
 
-        try self.handler_group.spawn(self.nc.rt, handlerLoop, .{self});
+        try self.handler_group.spawn(handlerLoop, .{self});
     }
 
     /// Handler fiber loop - waits for messages and calls the handler
@@ -110,7 +110,7 @@ pub const Subscription = struct {
 
         while (true) {
             // Wait for a message with timeout (allows periodic checking)
-            const msg = self.messages.pop(self.nc.rt, 100) catch |err| {
+            const msg = self.messages.pop(100) catch |err| {
                 if (err == error.QueueClosed or err == error.Canceled) {
                     log.debug("Subscription {} queue closed, stopping handler", .{self.sid});
                     break;
@@ -160,7 +160,7 @@ pub const Subscription = struct {
 
     fn destroy(self: *Subscription) void {
         // Cancel handler fiber group and wait for completion
-        self.handler_group.cancel(self.nc.rt);
+        self.handler_group.cancel();
 
         self.nc.allocator.free(self.subject);
 
@@ -174,8 +174,8 @@ pub const Subscription = struct {
         }
 
         // Close the queue to prevent new messages and clean up pending messages
-        self.messages.close(self.nc.rt);
-        while (self.messages.tryPop(self.nc.rt)) |msg| {
+        self.messages.close();
+        while (self.messages.tryPop()) |msg| {
             msg.deinit();
         }
         self.messages.deinit();
@@ -226,9 +226,9 @@ pub const Subscription = struct {
 
         if (timeout_ms == 0) {
             // No timeout - wait indefinitely
-            try self.drain_complete.wait(self.nc.rt);
+            try self.drain_complete.wait();
         } else {
-            try self.drain_complete.timedWait(self.nc.rt, .fromMilliseconds(timeout_ms));
+            try self.drain_complete.timedWait(.fromMilliseconds(timeout_ms));
         }
     }
 
@@ -265,7 +265,7 @@ pub const Subscription = struct {
             return error.Timeout; // Consistent with "no more messages" semantics
         }
 
-        const msg = self.messages.pop(self.nc.rt, timeout_ms) catch |err| switch (err) {
+        const msg = self.messages.pop(timeout_ms) catch |err| switch (err) {
             error.BufferFrozen => return error.Timeout,
             error.QueueEmpty => return error.Timeout,
             error.QueueClosed => return error.Timeout, // TODO: this should be mapped to ConnectionClosed

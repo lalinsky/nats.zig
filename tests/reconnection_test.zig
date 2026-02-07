@@ -23,62 +23,62 @@ const CallbackTracker = struct {
         self.error_called = 0;
     }
 
-    fn disconnectedCallback(conn: *nats.Connection) void {
+    fn disconnectedCallback(_: *nats.Connection) void {
         var self = &tracker;
-        self.mutex.lockUncancelable(conn.rt);
-        defer self.mutex.unlock(conn.rt);
+        self.mutex.lockUncancelable();
+        defer self.mutex.unlock();
         self.disconnected_called += 1;
-        self.cond.signal(conn.rt);
+        self.cond.signal();
     }
 
-    fn reconnectedCallback(conn: *nats.Connection) void {
+    fn reconnectedCallback(_: *nats.Connection) void {
         var self = &tracker;
-        self.mutex.lockUncancelable(conn.rt);
-        defer self.mutex.unlock(conn.rt);
+        self.mutex.lockUncancelable();
+        defer self.mutex.unlock();
         self.reconnected_called += 1;
-        self.cond.signal(conn.rt);
+        self.cond.signal();
     }
 
-    fn closedCallback(conn: *nats.Connection) void {
+    fn closedCallback(_: *nats.Connection) void {
         var self = &tracker;
-        self.mutex.lockUncancelable(conn.rt);
-        defer self.mutex.unlock(conn.rt);
+        self.mutex.lockUncancelable();
+        defer self.mutex.unlock();
         self.closed_called += 1;
-        self.cond.signal(conn.rt);
+        self.cond.signal();
     }
 
-    fn errorCallback(conn: *nats.Connection, msg: []const u8) void {
+    fn errorCallback(_: *nats.Connection, msg: []const u8) void {
         var self = &tracker;
-        self.mutex.lockUncancelable(conn.rt);
-        defer self.mutex.unlock(conn.rt);
+        self.mutex.lockUncancelable();
+        defer self.mutex.unlock();
         self.error_called += 1;
-        self.cond.signal(conn.rt);
+        self.cond.signal();
         _ = msg;
     }
 
-    fn waitForDisconnected(self: *@This(), rt: *zio.Runtime, timeout_ms: u64) !void {
-        try self.mutex.lock(rt);
-        defer self.mutex.unlock(rt);
+    fn waitForDisconnected(self: *@This(), timeout_ms: u64) !void {
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         var timer = try std.time.Timer.start();
         while (self.disconnected_called == 0) {
             if (timer.read() >= timeout_ms * std.time.ns_per_ms) {
                 return error.DisconnectTimeout;
             }
-            self.cond.timedWait(rt, &self.mutex, .fromMilliseconds(100)) catch {};
+            self.cond.timedWait(&self.mutex, .fromMilliseconds(100)) catch {};
         }
     }
 
-    fn waitForReconnected(self: *@This(), rt: *zio.Runtime, timeout_ms: u64) !void {
-        try self.mutex.lock(rt);
-        defer self.mutex.unlock(rt);
+    fn waitForReconnected(self: *@This(), timeout_ms: u64) !void {
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         var timer = try std.time.Timer.start();
         while (self.reconnected_called == 0) {
             if (timer.read() >= timeout_ms * std.time.ns_per_ms) {
                 return error.ReconnectionTimeout;
             }
-            self.cond.timedWait(rt, &self.mutex, .fromMilliseconds(100)) catch {};
+            self.cond.timedWait(&self.mutex, .fromMilliseconds(100)) catch {};
         }
     }
 };
@@ -89,7 +89,7 @@ test "basic reconnection when server stops" {
 
     tracker.reset();
 
-    const nc = try utils.createConnection(rt, .node1, .{
+    const nc = try utils.createConnection(.node1, .{
         .trace = true,
         .reconnect = .{
             .allow_reconnect = true,
@@ -111,16 +111,16 @@ test "basic reconnection when server stops" {
     try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
 
     // Wait for disconnect and reconnection callbacks
-    try tracker.waitForDisconnected(rt, 10000);
-    try tracker.waitForReconnected(rt, 10000);
+    try tracker.waitForDisconnected(10000);
+    try tracker.waitForReconnected(10000);
 
     // Verify connection works after reconnection
     log.debug("Publishing after reconnection", .{});
     try nc.publish("test.after", "hello after reconnection");
 
     // Verify both disconnected and reconnected callbacks were called
-    tracker.mutex.lockUncancelable(rt);
-    defer tracker.mutex.unlock(rt);
+    tracker.mutex.lockUncancelable();
+    defer tracker.mutex.unlock();
     try testing.expectEqual(@as(u32, 1), tracker.disconnected_called);
     try testing.expectEqual(@as(u32, 1), tracker.reconnected_called);
 }
@@ -131,7 +131,7 @@ test "manual reconnection with nc.reconnect()" {
 
     tracker.reset();
 
-    const nc = try utils.createConnection(rt, .node1, .{
+    const nc = try utils.createConnection(.node1, .{
         .trace = true,
         .reconnect = .{
             .allow_reconnect = true,
@@ -167,14 +167,14 @@ test "manual reconnection with nc.reconnect()" {
     try nc.reconnect();
 
     // Wait for reconnection to complete
-    try tracker.waitForReconnected(rt, 5000);
+    try tracker.waitForReconnected(5000);
     log.debug("Manual reconnection completed", .{});
 
     // Verify callbacks were called
-    tracker.mutex.lockUncancelable(rt);
+    tracker.mutex.lockUncancelable();
     try testing.expectEqual(@as(u32, 1), tracker.disconnected_called);
     try testing.expectEqual(@as(u32, 1), tracker.reconnected_called);
-    tracker.mutex.unlock(rt);
+    tracker.mutex.unlock();
 
     // Verify connection is working after reconnection
     log.debug("Publishing test message after manual reconnection", .{});
@@ -193,7 +193,7 @@ test "reconnect() errors when disabled" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const nc = try utils.createConnection(rt, .node1, .{
+    const nc = try utils.createConnection(.node1, .{
         .reconnect = .{
             .allow_reconnect = false,
         },
@@ -208,7 +208,7 @@ test "reconnect() errors when connection closed" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const nc = try utils.createConnection(rt, .node1, .{});
+    const nc = try utils.createConnection(.node1, .{});
     defer utils.closeConnection(nc);
 
     nc.close();

@@ -16,7 +16,7 @@ test "JetStream pull consumer basic fetch" {
     defer rt.deinit();
 
     // Use existing utility functions
-    const nc = try utils.createDefaultConnection(rt);
+    const nc = try utils.createDefaultConnection();
     defer utils.closeConnection(nc);
 
     var js = nc.jetstream(.{});

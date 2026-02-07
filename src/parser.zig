@@ -77,11 +77,11 @@ pub const Parser = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, rt: *zio.Runtime) Self {
+    pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
             .arg_buf_rec = std.ArrayList(u8){},
-            .msg_pool = MessagePool.init(allocator, rt),
+            .msg_pool = MessagePool.init(allocator),
         };
     }
 
@@ -627,10 +627,7 @@ const MockConnection = struct {
 test "parser ping pong" {
     const testing = std.testing;
 
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-
-    var parser = Parser.init(testing.allocator, rt);
+    var parser = Parser.init(testing.allocator);
     defer parser.deinit();
 
     var mock_conn = MockConnection{};
@@ -648,10 +645,7 @@ test "parser ping pong" {
 test "parser ok" {
     const testing = std.testing;
 
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-
-    var parser = Parser.init(testing.allocator, rt);
+    var parser = Parser.init(testing.allocator);
     defer parser.deinit();
 
     var mock_conn = MockConnection{};
@@ -664,10 +658,7 @@ test "parser ok" {
 test "parser err" {
     const testing = std.testing;
 
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-
-    var parser = Parser.init(testing.allocator, rt);
+    var parser = Parser.init(testing.allocator);
     defer parser.deinit();
 
     var mock_conn = MockConnection{};
@@ -681,10 +672,7 @@ test "parser err" {
 test "parser info" {
     const testing = std.testing;
 
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-
-    var parser = Parser.init(testing.allocator, rt);
+    var parser = Parser.init(testing.allocator);
     defer parser.deinit();
 
     var mock_conn = MockConnection{};
@@ -700,10 +688,7 @@ test "parser info" {
 test "parser msg" {
     const testing = std.testing;
 
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-
-    var parser = Parser.init(testing.allocator, rt);
+    var parser = Parser.init(testing.allocator);
     defer parser.deinit();
 
     var mock_conn = MockConnection{};
@@ -719,10 +704,7 @@ test "parser msg" {
 test "parser msg with reply" {
     const testing = std.testing;
 
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-
-    var parser = Parser.init(testing.allocator, rt);
+    var parser = Parser.init(testing.allocator);
     defer parser.deinit();
 
     var mock_conn = MockConnection{ .parser_ref = &parser };
@@ -736,10 +718,7 @@ test "parser msg with reply" {
 test "parser hmsg" {
     const testing = std.testing;
 
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-
-    var parser = Parser.init(testing.allocator, rt);
+    var parser = Parser.init(testing.allocator);
     defer parser.deinit();
 
     var mock_conn = MockConnection{ .parser_ref = &parser };
@@ -764,14 +743,11 @@ fn parseInChunks(parser: *Parser, conn: *MockConnection, data: []const u8, chunk
 }
 
 test "parser split msg" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
     const data = "MSG foo 1 11\r\nhello world\r\n";
     for (1..data.len) |chunk_size| {
         log.debug("chunk_size: {}", .{chunk_size});
 
-        var parser = Parser.init(std.testing.allocator, rt);
+        var parser = Parser.init(std.testing.allocator);
         defer parser.deinit();
 
         var capture = MockConnection{};
@@ -786,14 +762,11 @@ test "parser split msg" {
 }
 
 test "parser split hmsg" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
     const data = "HMSG foo 1 22 27\r\nNATS/1.0\r\nFoo: Bar\r\n\r\nhello\r\n";
     for (1..data.len) |chunk_size| {
         log.info("chunk_size: {}", .{chunk_size});
 
-        var parser = Parser.init(std.testing.allocator, rt);
+        var parser = Parser.init(std.testing.allocator);
         defer parser.deinit();
 
         var capture = MockConnection{};
@@ -813,14 +786,11 @@ test "parser split hmsg" {
 }
 
 test "parser split err" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
     const data = "-ERR Authentication Required\r\n";
     for (1..data.len) |chunk_size| {
         log.info("chunk_size: {}", .{chunk_size});
 
-        var parser = Parser.init(std.testing.allocator, rt);
+        var parser = Parser.init(std.testing.allocator);
         defer parser.deinit();
 
         var capture = MockConnection{};
@@ -834,14 +804,11 @@ test "parser split err" {
 }
 
 test "parser split info" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
     const data = "INFO {\"server_id\":\"test\",\"version\":\"2.0.0\"}\r\n";
     for (1..data.len) |chunk_size| {
         log.info("chunk_size: {}", .{chunk_size});
 
-        var parser = Parser.init(std.testing.allocator, rt);
+        var parser = Parser.init(std.testing.allocator);
         defer parser.deinit();
 
         var capture = MockConnection{};
@@ -855,9 +822,6 @@ test "parser split info" {
 }
 
 test "parser multiple lines" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
     const data =
         \\INFO {"server_id":"test","version":"2.0.0"}
         \\PING
@@ -869,7 +833,7 @@ test "parser multiple lines" {
     for (1..data.len) |chunk_size| {
         log.info("chunk_size: {}", .{chunk_size});
 
-        var parser = Parser.init(std.testing.allocator, rt);
+        var parser = Parser.init(std.testing.allocator);
         defer parser.deinit();
 
         var capture = MockConnection{};
