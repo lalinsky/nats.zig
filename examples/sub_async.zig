@@ -22,7 +22,7 @@ pub fn main() !void {
     defer rt.deinit();
 
     // Connect to NATS server
-    var conn = nats.Connection.init(allocator, rt, .{});
+    var conn = nats.Connection.init(allocator, .{});
     defer conn.deinit();
 
     try conn.connect("nats://localhost:4222");

@@ -10,7 +10,7 @@ test "JetStream synchronous subscription basic functionality" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -52,7 +52,7 @@ test "JetStream synchronous subscription timeout" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -88,7 +88,7 @@ test "JetStream synchronous subscription multiple messages" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -133,7 +133,7 @@ test "JetStream synchronous queue subscription basic functionality" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

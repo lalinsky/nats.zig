@@ -8,7 +8,7 @@ test "delete message" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -60,7 +60,7 @@ test "erase message" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -112,7 +112,7 @@ test "delete vs erase message behavior" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -167,7 +167,7 @@ test "delete message error cases" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -207,7 +207,7 @@ test "erase message error cases" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

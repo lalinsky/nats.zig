@@ -31,7 +31,7 @@ exe.root_module.addImport("nats", nats.module("nats"));
 const rt = try zio.Runtime.init(allocator, .{});
 defer rt.deinit();
 
-var nc = nats.Connection.init(allocator, rt, .{});
+var nc = nats.Connection.init(allocator, .{});
 defer nc.deinit();
 
 try nc.connect("nats://localhost:4222");

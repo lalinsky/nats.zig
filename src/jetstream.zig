@@ -432,8 +432,8 @@ pub const PullSubscription = struct {
     pub fn fetch(self: *PullSubscription, batch: usize, timeout_ms: u64) !MessageBatch {
         if (batch == 0) return error.InvalidBatchSize;
 
-        try self.mutex.lock(self.js.nc.rt);
-        defer self.mutex.unlock(self.js.nc.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         // Generate unique fetch ID and reply subject
         self.fetch_id_counter += 1;

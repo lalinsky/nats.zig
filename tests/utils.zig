@@ -12,7 +12,7 @@ pub const Node = enum(u16) {
     unknown = 14226,
 };
 
-pub fn createConnection(rt: *zio.Runtime, node: Node, opts: nats.ConnectionOptions) !*nats.Connection {
+pub fn createConnection(node: Node, opts: nats.ConnectionOptions) !*nats.Connection {
     const port = @intFromEnum(node);
     const url = try std.fmt.allocPrint(std.testing.allocator, "nats://127.0.0.1:{d}", .{port});
     defer std.testing.allocator.free(url);
@@ -20,7 +20,7 @@ pub fn createConnection(rt: *zio.Runtime, node: Node, opts: nats.ConnectionOptio
     var conn = try std.testing.allocator.create(nats.Connection);
     errdefer std.testing.allocator.destroy(conn);
 
-    conn.* = nats.Connection.init(std.testing.allocator, rt, opts);
+    conn.* = nats.Connection.init(std.testing.allocator, opts);
     errdefer conn.deinit();
 
     try conn.connect(url);
@@ -28,12 +28,12 @@ pub fn createConnection(rt: *zio.Runtime, node: Node, opts: nats.ConnectionOptio
     return conn;
 }
 
-pub fn createDefaultConnection(rt: *zio.Runtime) !*nats.Connection {
-    return createConnection(rt, .node1, .{});
+pub fn createDefaultConnection() !*nats.Connection {
+    return createConnection(.node1, .{});
 }
 
-pub fn createConnectionWrongPort(rt: *zio.Runtime) !*nats.Connection {
-    return createConnection(rt, .unknown, .{});
+pub fn createConnectionWrongPort() !*nats.Connection {
+    return createConnection(.unknown, .{});
 }
 
 pub fn closeConnection(conn: *nats.Connection) void {

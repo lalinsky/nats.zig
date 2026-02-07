@@ -8,7 +8,7 @@ test "purge stream" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -42,7 +42,7 @@ test "purge stream with filter" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -78,7 +78,7 @@ test "purge stream with sequence limit" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -114,7 +114,7 @@ test "purge stream with keep parameter" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

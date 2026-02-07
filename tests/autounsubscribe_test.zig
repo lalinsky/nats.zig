@@ -8,7 +8,7 @@ test "autounsubscribe sync basic functionality" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection(rt);
+    var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("auto.test");
@@ -44,7 +44,7 @@ test "autounsubscribe async basic functionality" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection(rt);
+    var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     var messages_received = std.ArrayList(*Message){};
@@ -59,16 +59,15 @@ test "autounsubscribe async basic functionality" {
         messages: *std.ArrayList(*Message),
         allocator: std.mem.Allocator,
         mutex: zio.Mutex = .{},
-        rt: *zio.Runtime,
 
         pub fn handleMessage(msg: *Message, self: *@This()) !void {
-            try self.mutex.lock(self.rt);
-            defer self.mutex.unlock(self.rt);
+            try self.mutex.lock();
+            defer self.mutex.unlock();
             try self.messages.append(self.allocator, msg);
         }
     };
 
-    var ctx = TestContext{ .messages = &messages_received, .allocator = std.testing.allocator, .rt = rt };
+    var ctx = TestContext{ .messages = &messages_received, .allocator = std.testing.allocator };
 
     const sub = try conn.subscribe("auto.async.test", TestContext.handleMessage, .{&ctx});
     defer sub.deinit();
@@ -89,9 +88,9 @@ test "autounsubscribe async basic functionality" {
     const deadline_ms = std.time.milliTimestamp() + 1000;
     var count: usize = 0;
     while (std.time.milliTimestamp() < deadline_ms) {
-        try ctx.mutex.lock(rt);
+        try ctx.mutex.lock();
         count = messages_received.items.len;
-        ctx.mutex.unlock(rt);
+        ctx.mutex.unlock();
         if (count >= 2) break;
         try rt.sleep(.fromMilliseconds(10));
     }
@@ -103,7 +102,7 @@ test "autounsubscribe error conditions" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection(rt);
+    var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("error.test");
@@ -127,7 +126,7 @@ test "autounsubscribe delivered message counter" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection(rt);
+    var conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("counter.test");
@@ -164,15 +163,15 @@ const ReconnectTracker = struct {
     var reconnected_called: u32 = 0;
     var mutex: zio.Mutex = .{};
 
-    fn reset(rt: *zio.Runtime) !void {
-        try mutex.lock(rt);
-        defer mutex.unlock(rt);
+    fn reset() void {
+        mutex.lockUncancelable();
+        defer mutex.unlock();
         reconnected_called = 0;
     }
 
-    fn reconnectedCallback(conn: *nats.Connection) void {
-        mutex.lockUncancelable(conn.rt);
-        defer mutex.unlock(conn.rt);
+    fn reconnectedCallback(_: *nats.Connection) void {
+        mutex.lockUncancelable();
+        defer mutex.unlock();
         reconnected_called += 1;
     }
 };
@@ -181,9 +180,9 @@ test "autounsubscribe with reconnection" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    try ReconnectTracker.reset(rt);
+    ReconnectTracker.reset();
 
-    const conn = try utils.createConnection(rt, .node1, .{
+    const conn = try utils.createConnection(.node1, .{
         .reconnect = .{
             .allow_reconnect = true,
             .reconnect_wait_ms = 100,

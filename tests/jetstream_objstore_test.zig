@@ -10,7 +10,7 @@ test "ObjectStore basic create store" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});
@@ -39,7 +39,7 @@ test "ObjectStore put and get operations" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});
@@ -90,7 +90,7 @@ test "ObjectStore chunked operations" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});
@@ -141,7 +141,7 @@ test "ObjectStore delete operations" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});
@@ -189,7 +189,7 @@ test "ObjectStore list operations" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});
@@ -260,7 +260,7 @@ test "ObjectStore validation" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     // Test store name validation
@@ -284,7 +284,7 @@ test "ObjectStore error handling" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection(rt);
+    const conn = try utils.createDefaultConnection();
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});

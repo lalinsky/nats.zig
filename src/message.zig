@@ -316,7 +316,6 @@ pub const Message = struct {
 
 pub const MessagePool = struct {
     allocator: std.mem.Allocator,
-    rt: *zio.Runtime,
     messages: MessageList = .{},
     mutex: zio.Mutex = .{},
     max_size: usize = 100,
@@ -324,16 +323,15 @@ pub const MessagePool = struct {
 
     pub const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, rt: *zio.Runtime) MessagePool {
+    pub fn init(allocator: std.mem.Allocator) MessagePool {
         return .{
             .allocator = allocator,
-            .rt = rt,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.mutex.lockUncancelable(self.rt);
-        defer self.mutex.unlock(self.rt);
+        self.mutex.lockUncancelable();
+        defer self.mutex.unlock();
 
         while (self.messages.pop()) |msg| {
             msg.pool = null;
@@ -343,8 +341,8 @@ pub const MessagePool = struct {
     }
 
     pub fn acquire(self: *Self) !*Message {
-        try self.mutex.lock(self.rt);
-        defer self.mutex.unlock(self.rt);
+        try self.mutex.lock();
+        defer self.mutex.unlock();
 
         if (self.messages.pop()) |msg| {
             return msg;
@@ -359,8 +357,8 @@ pub const MessagePool = struct {
     }
 
     pub fn release(self: *Self, msg: *Message) void {
-        self.mutex.lockUncancelable(self.rt);
-        defer self.mutex.unlock(self.rt);
+        self.mutex.lockUncancelable();
+        defer self.mutex.unlock();
 
         if (self.messages.len < self.max_size) {
             msg.reset();
