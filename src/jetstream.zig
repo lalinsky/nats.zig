@@ -465,6 +465,7 @@ pub const PullSubscription = struct {
         // Collect messages
         var messages = std.ArrayList(*JetStreamMessage).empty;
         defer messages.deinit(self.js.nc.allocator);
+        errdefer for (messages.items) |js_msg| js_msg.deinit();
 
         var batch_complete = false;
         var fetch_error: ?anyerror = null;
@@ -505,7 +506,10 @@ pub const PullSubscription = struct {
                     raw_msg.deinit();
                 } else {
                     // This is a regular message - convert to JetStream message
-                    const js_msg_ptr = try jetstream_message.createJetStreamMessage(self.js.nc, raw_msg);
+                    const js_msg_ptr = jetstream_message.createJetStreamMessage(self.js.nc, raw_msg) catch |err| {
+                        raw_msg.deinit();
+                        return err;
+                    };
                     errdefer js_msg_ptr.deinit();
 
                     try messages.append(self.js.nc.allocator, js_msg_ptr);
