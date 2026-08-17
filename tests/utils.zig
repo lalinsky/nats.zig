@@ -83,27 +83,41 @@ pub fn waitForHealthyServices(allocator: std.mem.Allocator, timeout: std.Io.Dura
             return error.ServicesNotHealthy;
         }
 
-        // Check service health status using docker compose ps --format "table {{.Health}}"
-        const result = try runDockerComposeCapture(allocator, &.{ "ps", "-a", "--format", "table {{ .Health }}" });
+        // Check service health status; one line per service, no header.
+        const result = try runDockerComposeCapture(allocator, &.{ "ps", "-a", "--format", "{{ .Health }}" });
         defer allocator.free(result.stdout);
         defer allocator.free(result.stderr);
 
-        // Count "healthy" occurrences in the output
+        // Count service health states in the output; require every service
+        // to be healthy, so that a server restarted by a previous test
+        // cannot slip through while it is still coming up.
         var healthy_count: u32 = 0;
+        var total_count: u32 = 0;
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         while (lines.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r\n");
+            if (trimmed.len == 0) continue;
+            total_count += 1;
             if (std.mem.eql(u8, trimmed, "healthy")) {
                 healthy_count += 1;
             }
         }
 
-        if (healthy_count >= 3) {
+        if (total_count > 0 and healthy_count == total_count) {
             return;
         }
 
         blockingIo().sleep(.fromMilliseconds(100), .awake) catch {};
     }
+}
+
+/// Publish into a JetStream stream and wait for the PubAck, so the message
+/// is durably stored before the test goes on to read stream state. A core
+/// publish + flush only confirms the connected server processed the message;
+/// in a cluster the stream may not have stored it yet.
+pub fn jsPublish(js: *nats.JetStream, subject: []const u8, data: []const u8) !void {
+    var result = try js.publish(subject, data, .{});
+    result.deinit();
 }
 
 var global_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
