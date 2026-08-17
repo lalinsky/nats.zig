@@ -214,6 +214,34 @@ pub const ConnectionCallbacks = struct {
     error_cb: ?*const fn (*Connection, []const u8) void = null,
 };
 
+const ExitReason = enum(u8) {
+    none,
+    reader_done,
+    flusher_done,
+    reconnect_requested,
+};
+
+/// One-shot exit signal owned by a single `runConnection` iteration. The
+/// reader loop, the flusher loop, and `reconnect()` all funnel into it; the
+/// first signaler decides the exit reason and everyone else is a no-op.
+const ExitSignal = struct {
+    event: xsync.Event = .init,
+    reason: std.atomic.Value(ExitReason) = .init(.none),
+    /// Written by the winning signaler before the event is set.
+    err: ?anyerror = null,
+
+    fn signal(self: *ExitSignal, io: Io, reason: ExitReason, err: ?anyerror) void {
+        if (self.reason.cmpxchgStrong(.none, reason, .acq_rel, .acquire) != null) {
+            // Someone else already decided the exit reason and will set the
+            // event; setting it here could wake the waiter before the winner
+            // has published its error.
+            return;
+        }
+        self.err = err;
+        self.event.set(io);
+    }
+};
+
 pub const ConnectionOptions = struct {
     name: ?[]const u8 = null,
     timeout_ms: u64 = 5000,
@@ -243,7 +271,8 @@ pub const Connection = struct {
     status: ConnectionStatus = .closed,
     status_cond: xsync.Condition = .init,
 
-    reconnect_requested: zio.ResetEvent = .{},
+    // Exit signal of the current runConnection iteration (protected by mutex)
+    exit_signal: ?*ExitSignal = null,
 
     // Server management
     server_pool: ServerPool,
@@ -486,8 +515,11 @@ pub const Connection = struct {
 
         log.info("Manual reconnection requested", .{});
 
-        // Signal manager to reconnect
-        self.reconnect_requested.set();
+        // Signal the current connection's exit signal; if it is already gone,
+        // the connection is being torn down and a reconnect is underway anyway.
+        if (self.exit_signal) |sig| {
+            sig.signal(self.io, .reconnect_requested, null);
+        }
     }
 
     /// Publishes data on a subject.
@@ -886,9 +918,11 @@ pub const Connection = struct {
             }
         }
 
+        var attempts: u32 = 0;
+
         while (true) {
             var conn_err: ?anyerror = null;
-            self.runConnection() catch |err| {
+            self.runConnection(&attempts) catch |err| {
                 if (err == error.Canceled) {
                     return err;
                 }
@@ -899,29 +933,39 @@ pub const Connection = struct {
             };
 
             var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
-            defer if (callback) |cb| cb(self);
 
-            try self.mutex.lock(self.io);
-            defer self.mutex.unlock(self.io);
+            {
+                try self.mutex.lock(self.io);
+                defer self.mutex.unlock(self.io);
 
-            if (conn_err) |err| {
-                log.info("Connection failed: {}", .{err});
-            } else {
-                log.info("Disconnected", .{});
+                if (conn_err) |err| {
+                    log.info("Connection failed: {}", .{err});
+                } else {
+                    log.info("Disconnected", .{});
+                }
+
+                if (self.status == .connecting) {
+                    return;
+                }
+
+                self.status = .reconnecting;
+                self.status_cond.broadcast(self.io);
+
+                if (self.options.callbacks.disconnected_cb) |cb| {
+                    callback = cb;
+                }
             }
 
-            if (self.status == .connecting) {
-                return;
+            if (callback) |cb| cb(self);
+
+            // Wait before the next attempt; the first retry after losing an
+            // established connection is immediate.
+            attempts += 1;
+            if (attempts > 1) {
+                const delay_ms = self.calculateReconnectDelay(attempts - 1);
+                log.debug("Waiting {}ms before reconnection attempt {}", .{ delay_ms, attempts });
+                try zio.sleep(.fromMilliseconds(delay_ms));
             }
-
-            self.status = .reconnecting;
-            self.status_cond.broadcast(self.io);
-
-            if (self.options.callbacks.disconnected_cb) |cb| {
-                callback = cb;
-            }
-
-            // TODO delay
         }
     }
 
@@ -973,18 +1017,31 @@ pub const Connection = struct {
         return stream;
     }
 
-    fn runConnection(self: *Self) !void {
-        self.reconnect_requested = .{};
-
+    fn runConnection(self: *Self, attempts: *u32) !void {
         const server = try self.selectNextServer();
 
         var stream = try self.establishConnection(server);
         defer stream.close();
 
-        var reader_task = try zio.spawn(readerLoop, .{ self, &stream });
+        var exit_signal: ExitSignal = .{};
+
+        {
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
+            self.exit_signal = &exit_signal;
+        }
+        defer {
+            // Runs after both tasks below are joined, so nothing can signal
+            // through a stale pointer.
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            self.exit_signal = null;
+        }
+
+        var reader_task = try zio.spawn(readerLoop, .{ self, &stream, &exit_signal });
         defer reader_task.cancel();
 
-        var flusher_task = try zio.spawn(flusherLoop, .{ self, &stream });
+        var flusher_task = try zio.spawn(flusherLoop, .{ self, &stream, &exit_signal });
         defer flusher_task.cancel();
 
         var was_reconnect = false;
@@ -1001,6 +1058,8 @@ pub const Connection = struct {
         self.status_cond.broadcast(self.io);
         self.mutex.unlock(self.io);
 
+        attempts.* = 0;
+
         log.info("Connected successfully to {s}", .{server.parsed_url.full_url});
 
         // Invoke reconnected callback if this is a reconnection
@@ -1014,33 +1073,39 @@ pub const Connection = struct {
 
         try self.pending_buffer.moveToBuffer(&self.write_buffer);
 
-        const result = try zio.select(.{
-            .reader = &reader_task,
-            .flusher = &flusher_task,
-            .reconnect = &self.reconnect_requested,
-        });
-        switch (result) {
-            .reader => |res| {
-                res catch |err| {
+        try exit_signal.event.wait(self.io);
+
+        switch (exit_signal.reason.load(.acquire)) {
+            .none => unreachable, // the event is only set by signal()
+            .reader_done => {
+                if (exit_signal.err) |err| {
                     log.err("Error in reader loop: {}", .{err});
                     return err;
-                };
+                }
                 return;
             },
-            .flusher => |res| {
-                res catch |err| {
+            .flusher_done => {
+                if (exit_signal.err) |err| {
                     log.err("Error in flusher loop: {}", .{err});
                     return err;
-                };
+                }
                 return;
             },
-            .reconnect => {
+            .reconnect_requested => {
                 log.info("Reconnect requested", .{});
             },
         }
     }
 
-    fn readerLoop(self: *Self, stream: *zio.net.Stream) !void {
+    fn readerLoop(self: *Self, stream: *zio.net.Stream, exit: *ExitSignal) void {
+        if (self.runReader(stream)) |_| {
+            exit.signal(self.io, .reader_done, null);
+        } else |err| {
+            exit.signal(self.io, .reader_done, err);
+        }
+    }
+
+    fn runReader(self: *Self, stream: *zio.net.Stream) !void {
         log.debug("Reader loop started", .{});
         defer {
             log.debug("Reader loop exited", .{});
@@ -1062,17 +1127,22 @@ pub const Connection = struct {
         }
     }
 
-    fn flusherLoop(self: *Self, stream: *zio.net.Stream) !void {
+    fn flusherLoop(self: *Self, stream: *zio.net.Stream, exit: *ExitSignal) void {
+        if (self.runFlusher(stream)) |_| {
+            exit.signal(self.io, .flusher_done, null);
+        } else |err| {
+            exit.signal(self.io, .flusher_done, err);
+        }
+    }
+
+    fn runFlusher(self: *Self, stream: *zio.net.Stream) !void {
         log.debug("Flusher loop started", .{});
         defer {
             log.debug("Flusher loop stopped", .{});
         }
 
         while (true) {
-            self.flusherIteration(stream) catch |err| {
-                log.err("Flusher loop error: {}", .{err});
-                return;
-            };
+            try self.flusherIteration(stream);
 
             if (self.drain_state.load(.acquire) == .draining_pubs) {
                 self.sendDrainPing();
