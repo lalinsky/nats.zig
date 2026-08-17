@@ -307,6 +307,85 @@ test "jwt without signing seed fails before connecting" {
     try std.testing.expectError(error.MissingNKeySeed, result);
 }
 
+// Public key derived from nkey_seed above; authorized by nkey.conf.
+const nkey_public = "UDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTPSQF";
+
+const FixtureSigner = struct {
+    fn sign(nonce: []const u8) anyerror![64]u8 {
+        var kp = try nats.nkeys.SeedKeyPair.fromSeed(nkey_seed);
+        defer kp.wipe();
+        return kp.sign(nonce);
+    }
+};
+
+test "nkey sign callback authentication" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .nkey = nkey_public,
+        .nkey_sign_cb = FixtureSigner.sign,
+    };
+
+    const conn = try utils.createConnection(io, .nkey_auth, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.nkey.callback", "callback authenticated");
+    try conn.flush();
+}
+
+test "sign callback without public key fails before connecting" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .nkey_sign_cb = FixtureSigner.sign,
+    };
+
+    const result = utils.createConnection(io, .unknown, opts);
+    try std.testing.expectError(error.MissingNKey, result);
+}
+
+const FlippingTokenHandler = struct {
+    var calls: std.atomic.Value(u32) = .init(0);
+
+    fn getToken() []const u8 {
+        const n = calls.fetchAdd(1, .monotonic);
+        return if (n == 0) "test_token_123" else "wrong_token";
+    }
+};
+
+test "reconnection gives up after repeated auth errors" {
+    const io = std.testing.io;
+
+    FlippingTokenHandler.calls.store(0, .monotonic);
+
+    // The first handshake authenticates; every later one presents a bad
+    // token. After two identical auth errors from the same server the
+    // client must stop reconnecting instead of burning all 60 attempts.
+    const opts = nats.ConnectionOptions{
+        .token_handler = FlippingTokenHandler.getToken,
+        .reconnect = .{
+            .allow_reconnect = true,
+            .reconnect_wait = .fromMilliseconds(100),
+        },
+    };
+
+    const conn = try utils.createConnection(io, .token_auth, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.reconnect();
+
+    const start = std.Io.Timestamp.now(io, .awake);
+    while (conn.status != .connection_failed) {
+        if (start.untilNow(io, .awake).nanoseconds >= 10 * std.time.ns_per_s) {
+            return error.GiveUpTimeout;
+        }
+        try io.sleep(.fromMilliseconds(50), .awake);
+    }
+
+    // Initial connect plus exactly two rejected reconnect handshakes.
+    try std.testing.expectEqual(@as(u32, 3), FlippingTokenHandler.calls.load(.monotonic));
+}
+
 test "no authentication options against auth server" {
     const io = std.testing.io;
 

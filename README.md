@@ -270,6 +270,26 @@ var nc2 = nats.Connection.init(init.gpa, init.io, .{
 });
 ```
 
+To keep the seed out of the client process entirely, provide the public key
+and a signing callback instead of the seed:
+
+```zig
+fn signNonce(nonce: []const u8) anyerror![64]u8 {
+    // Delegate to an agent, HSM, or other external signer.
+    return external_signer.sign(nonce);
+}
+
+var nc = nats.Connection.init(init.gpa, init.io, .{
+    .nkey = "UDXU4RCSJNZOIQHZNWXHXORDPRTGNJAHAHFRGZNEEJCPQTT2M7NLCNF4",
+    .nkey_sign_cb = signNonce,
+});
+```
+
+If a server rejects the client's credentials with the same authentication
+error twice in a row, the client stops reconnecting to it instead of
+exhausting the reconnect budget; reconnect-time authentication errors are
+also reported through the `error_cb` callback.
+
 ## Selecting the I/O Backend
 
 The examples above use `init.io`, the threaded I/O implementation from the stdlib. This is suitable for development
