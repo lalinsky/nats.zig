@@ -69,7 +69,7 @@ pub const JetStreamMessage = struct {
         try self.sendAck(.nak, null);
     }
 
-    /// Negative acknowledge with delay - request redelivery after specified duration (in milliseconds)
+    /// Negative acknowledge with delay - request redelivery after `delay`.
     pub fn nakWithDelay(self: *JetStreamMessage, delay: Io.Duration) !void {
         try self.sendAck(.nak, delay);
     }

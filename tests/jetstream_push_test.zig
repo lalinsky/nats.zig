@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
+const xsync = @import("xsync");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
@@ -23,15 +24,20 @@ test "basic push subscription" {
     defer stream_info.deinit();
 
     // Message counter for testing
-    var message_count: u32 = 0;
+    const HandlerContext = struct {
+        count: std.atomic.Value(u32) = .init(0),
+        called: xsync.Event = .init,
+    };
+    var handler_context: HandlerContext = .{};
 
     // Define message handler
     const MessageHandler = struct {
-        fn handle(js_msg: *nats.JetStreamMessage, counter: *u32) void {
+        fn handle(js_msg: *nats.JetStreamMessage, context: *HandlerContext) void {
             defer js_msg.deinit();
-            counter.* += 1;
+            const count = context.count.fetchAdd(1, .release) + 1;
+            context.called.set(std.testing.io);
 
-            log.info("Received message #{d}: {s}", .{ counter.*, js_msg.msg.data });
+            log.info("Received message #{d}: {s}", .{ count, js_msg.msg.data });
 
             // Acknowledge the message
             js_msg.ack() catch |err| {
@@ -41,7 +47,7 @@ test "basic push subscription" {
     };
 
     // Subscribe to push consumer (deliver_subject auto-generated, ack_policy defaults to .explicit)
-    var push_sub = try js.subscribe("orders.*", MessageHandler.handle, .{&message_count}, .{
+    var push_sub = try js.subscribe("orders.*", MessageHandler.handle, .{&handler_context}, .{
         .stream = "TEST_PUSH_STREAM",
         .durable = "test_push_consumer",
         .config = .{
@@ -55,10 +61,10 @@ test "basic push subscription" {
     try conn.publish("orders.new", "Order #2");
     try conn.publish("orders.update", "Order Update");
 
-    // Wait a bit for messages to be processed
-    try io.sleep(.fromMilliseconds(100), .awake);
+    try handler_context.called.waitTimeout(io, utils.ioTimeout(.fromSeconds(5)));
 
     // Verify messages were received
+    const message_count = handler_context.count.load(.acquire);
     try testing.expect(message_count > 0);
     log.info("Total messages processed: {d}", .{message_count});
 }
@@ -80,25 +86,31 @@ test "push subscription with flow control" {
     var stream_info = try js.addStream(stream_config);
     defer stream_info.deinit();
 
-    var processed_count: u32 = 0;
+    const HandlerContext = struct {
+        count: std.atomic.Value(u32) = .init(0),
+        called: xsync.Event = .init,
+        io: std.Io,
+    };
+    var handler_context: HandlerContext = .{ .io = io };
 
     const TaskHandler = struct {
-        fn handle(js_msg: *nats.JetStreamMessage, handler_io: std.Io, counter: *u32) void {
+        fn handle(js_msg: *nats.JetStreamMessage, context: *HandlerContext) void {
             defer js_msg.deinit();
-            counter.* += 1;
+            _ = context.count.fetchAdd(1, .release);
 
             // Simulate some processing time
-            handler_io.sleep(.fromMilliseconds(10), .awake) catch {};
+            context.io.sleep(.fromMilliseconds(10), .awake) catch {};
 
             // Acknowledge successful processing
             js_msg.ack() catch |err| {
                 log.err("Failed to ack task: {}", .{err});
             };
+            context.called.set(std.testing.io);
         }
     };
 
     // Subscribe with flow control enabled (deliver_subject auto-generated)
-    var push_sub = try js.subscribe("tasks.*", TaskHandler.handle, .{ io, &processed_count }, .{
+    var push_sub = try js.subscribe("tasks.*", TaskHandler.handle, .{&handler_context}, .{
         .stream = "TEST_PUSH_FC_STREAM",
         .durable = "task_processor",
         .config = .{
@@ -117,9 +129,9 @@ test "push subscription with flow control" {
         try conn.publish("tasks.new", task_data);
     }
 
-    // Allow time for processing
-    try io.sleep(.fromMilliseconds(200), .awake);
+    try handler_context.called.waitTimeout(io, utils.ioTimeout(.fromSeconds(5)));
 
+    const processed_count = handler_context.count.load(.acquire);
     try testing.expect(processed_count > 0);
     log.info("Processed {d} tasks with flow control", .{processed_count});
 }

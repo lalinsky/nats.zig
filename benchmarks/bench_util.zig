@@ -89,8 +89,21 @@ pub fn setupSignals() !void {
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
 }
 
+pub const BenchConnection = struct {
+    allocator: std.mem.Allocator,
+    runtime: *zio.Runtime,
+    conn: *nats.Connection,
+
+    pub fn deinit(self: *BenchConnection) void {
+        self.conn.deinit();
+        self.allocator.destroy(self.conn);
+        self.runtime.deinit();
+        self.allocator.destroy(self);
+    }
+};
+
 // Connect to NATS server
-pub fn connect(allocator: std.mem.Allocator, url: ?[]const u8) !*nats.Connection {
+pub fn connect(allocator: std.mem.Allocator, url: ?[]const u8) !*BenchConnection {
     // Create zio runtime
     const rt = try zio.Runtime.init(allocator, .{});
     errdefer rt.deinit();
@@ -99,6 +112,7 @@ pub fn connect(allocator: std.mem.Allocator, url: ?[]const u8) !*nats.Connection
     errdefer allocator.destroy(conn);
 
     conn.* = nats.Connection.init(allocator, rt.io(), .{});
+    errdefer conn.deinit();
 
     const connect_url = url orelse "nats://localhost:4222";
     conn.connect(connect_url) catch |err| {
@@ -107,12 +121,7 @@ pub fn connect(allocator: std.mem.Allocator, url: ?[]const u8) !*nats.Connection
         return err;
     };
 
-    return conn;
-}
-
-// Common cleanup
-pub fn cleanup(conn: *nats.Connection) void {
-    const allocator = conn.allocator;
-    conn.deinit();
-    allocator.destroy(conn);
+    const result = try allocator.create(BenchConnection);
+    result.* = .{ .allocator = allocator, .runtime = rt, .conn = conn };
+    return result;
 }

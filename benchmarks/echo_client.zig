@@ -22,10 +22,11 @@ pub fn main() !void {
     // Initialize statistics
 
     // Creates a connection to the default NATS URL
-    var conn = bench_util.connect(allocator, null) catch |err| {
+    const client = bench_util.connect(allocator, null) catch |err| {
         return err;
     };
-    defer bench_util.cleanup(conn);
+    defer client.deinit();
+    const conn = client.conn;
 
     var stats = bench_util.BenchStats.init(conn.io);
 
