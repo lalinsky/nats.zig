@@ -515,8 +515,8 @@ pub const PullSubscription = struct {
                     // Timeout occurred
                     batch_complete = true;
                 },
-                error.Canceled => {
-                    // Propagate cancellation
+                error.Canceled, error.ConnectionClosed => {
+                    // Propagate cancellation and closed connections
                     return err;
                 },
             }

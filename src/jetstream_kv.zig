@@ -682,7 +682,7 @@ pub const KV = struct {
         // Collect unique keys - use completion marker to know when done
         while (true) {
             var maybe_entry = watcher.next(.fromSeconds(5)) catch |err| {
-                if (err == error.Timeout or err == error.QueueEmpty) {
+                if (err == error.Timeout) {
                     break;
                 }
                 return err;
@@ -753,7 +753,7 @@ pub const KV = struct {
         // Collect unique keys - use completion marker to know when done
         while (true) {
             var maybe_entry = watcher.next(.fromSeconds(5)) catch |err| {
-                if (err == error.Timeout or err == error.QueueEmpty) {
+                if (err == error.Timeout) {
                     break;
                 }
                 return err;

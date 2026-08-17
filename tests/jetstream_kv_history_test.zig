@@ -205,5 +205,5 @@ test "KV watch basic functionality" {
 
     // After completion marker, should timeout on further attempts
     const result = watcher.next(.fromSeconds(1));
-    try testing.expect(result == error.Timeout or result == error.QueueEmpty);
+    try testing.expect(result == error.Timeout);
 }
