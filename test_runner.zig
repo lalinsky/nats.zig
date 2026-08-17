@@ -120,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
     const test_count = blk: {
         var count: usize = 0;
         for (builtin.test_functions) |t| {
-            if (isSetup(t) or isTeardown(t)) continue;
+            if (isSetup(t) or isTeardown(t) or isPerTestSetup(t)) continue;
             const is_unnamed_test = isUnnamed(t);
             if (env.filters.items.len > 0) {
                 if (is_unnamed_test) continue;
@@ -146,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
     var test_index: usize = 0;
 
     for (builtin.test_functions) |t| {
-        if (isSetup(t) or isTeardown(t)) {
+        if (isSetup(t) or isTeardown(t) or isPerTestSetup(t)) {
             continue;
         }
 
@@ -188,6 +188,17 @@ pub fn main(init: std.process.Init) !void {
         current_test = friendly_name;
         std.testing.allocator_instance = .{};
         std.testing.io_instance = .init(gpa, .{});
+
+        // Run per-test setup functions (e.g. the e2e health gate; tests that
+        // restart servers rely on this running again before the next test)
+        for (builtin.test_functions) |setup_t| {
+            if (isPerTestSetup(setup_t)) {
+                setup_t.func() catch |err| {
+                    Printer.status(.fail, "\nper-test setup \"{s}\" failed: {}\n", .{ setup_t.name, err });
+                    return err;
+                };
+            }
+        }
 
         if (env.do_log_capture) {
             log_buffer.clearRetainingCapacity();
@@ -473,6 +484,10 @@ fn isUnnamed(t: std.builtin.TestFn) bool {
 
 fn isSetup(t: std.builtin.TestFn) bool {
     return std.mem.endsWith(u8, t.name, "tests:beforeAll");
+}
+
+fn isPerTestSetup(t: std.builtin.TestFn) bool {
+    return std.mem.endsWith(u8, t.name, "tests:beforeEach");
 }
 
 fn isTeardown(t: std.builtin.TestFn) bool {

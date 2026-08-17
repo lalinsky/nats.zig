@@ -160,7 +160,9 @@ pub const ServerPool = struct {
     pub fn shuffle(self: *ServerPool, io: std.Io, offset: usize) void {
         if (self.servers.count() <= offset + 1) return;
 
-        var prng = std.Random.DefaultPrng.init(@intCast(std.Io.Timestamp.now(io, .awake).nanoseconds));
+        var seed: u64 = undefined;
+        io.random(std.mem.asBytes(&seed));
+        var prng = std.Random.DefaultPrng.init(seed);
         const random = prng.random();
 
         // Shuffle the underlying entries directly
