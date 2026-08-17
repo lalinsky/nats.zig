@@ -12,10 +12,12 @@
 // limitations under the License.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const net = Io.net;
 
 pub const ConnectError = net.HostName.ValidateError || net.HostName.ConnectError || Io.ConcurrentError;
+pub const SetKeepAliveError = std.posix.SetSockOptError;
 
 const connect_options: net.IpAddress.ConnectOptions = .{ .mode = .stream, .protocol = .tcp };
 
@@ -71,7 +73,9 @@ pub fn tcpConnectToHost(io: Io, host: []const u8, port: u16) ConnectError!net.St
 
 /// Enable or disable SO_KEEPALIVE. There is no socket-options API in std.Io,
 /// so this goes through the raw socket handle.
-pub fn setKeepAlive(socket: net.Socket, enabled: bool) std.posix.SetSockOptError!void {
+pub fn setKeepAlive(socket: net.Socket, enabled: bool) SetKeepAliveError!void {
+    if (builtin.os.tag == .windows) return;
+
     const value: c_int = @intFromBool(enabled);
     try std.posix.setsockopt(socket.handle, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&value));
 }
