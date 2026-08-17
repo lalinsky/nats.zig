@@ -1,20 +1,11 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
 
-pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
+pub fn main(init: std.process.Init) !void {
     std.debug.print("Publishes a message on subject 'help'\n", .{});
 
-    // Initialize zio runtime
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     // Creates a connection to the default NATS URL
-    var conn = nats.Connection.init(allocator, rt.io(), .{});
+    var conn = nats.Connection.init(init.gpa, init.io, .{});
     defer conn.deinit();
 
     conn.connect("nats://localhost:4222") catch |err| {

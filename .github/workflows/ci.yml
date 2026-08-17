@@ -33,4 +33,5 @@ jobs:
       run: zig build examples
 
     - name: Build benchmarks
-      run: zig build benchmarks
+      run: zig build
+      working-directory: benchmarks
