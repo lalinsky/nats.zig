@@ -200,7 +200,7 @@ pub const ResponseManager = struct {
         log.debug("Cleaned up request map entry with rid: {d}", .{handle.rid});
     }
 
-    pub fn waitForResponse(self: *ResponseManager, handle: RequestHandle, timeout: Io.Duration) !*Message {
+    pub fn waitForResponse(self: *ResponseManager, handle: RequestHandle, timeout: Io.Timeout) !*Message {
         try self.pending_mutex.lock(self.io);
         defer self.pending_mutex.unlock(self.io);
 
@@ -259,10 +259,10 @@ pub const ResponseManager = struct {
         /// Stall timeout: max time to wait between subsequent messages.
         /// After the first message, if no new messages arrive within this
         /// time, collection stops
-        stall: ?Io.Duration = null,
+        stall: ?Io.Timeout = null,
     };
 
-    pub fn waitForMultiResponse(self: *ResponseManager, handle: RequestHandle, timeout: Io.Duration, options: WaitForMultiResponseOptions) !MessageList {
+    pub fn waitForMultiResponse(self: *ResponseManager, handle: RequestHandle, timeout: Io.Timeout, options: WaitForMultiResponseOptions) !MessageList {
         try self.pending_mutex.lock(self.io);
         defer self.pending_mutex.unlock(self.io);
 

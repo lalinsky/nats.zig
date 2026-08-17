@@ -28,7 +28,7 @@ test "autounsubscribe sync basic functionality" {
     // Should receive exactly 3 messages
     var received_count: u32 = 0;
     for (0..3) |_| {
-        const msg = try sub.nextMsg(.fromSeconds(1));
+        const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
         defer msg.deinit();
         received_count += 1;
     }
@@ -36,7 +36,7 @@ test "autounsubscribe sync basic functionality" {
     try std.testing.expectEqual(@as(u32, 3), received_count);
 
     // Fourth message should timeout (subscription auto-unsubscribed)
-    try std.testing.expectError(error.Timeout, sub.nextMsg(.fromMilliseconds(100)));
+    try std.testing.expectError(error.Timeout, sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }));
 }
 
 test "autounsubscribe async basic functionality" {
@@ -112,7 +112,7 @@ test "autounsubscribe error conditions" {
     try conn.publish("error.test", "first message");
     try conn.flush();
 
-    const msg = try sub.nextMsg(.fromSeconds(1));
+    const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
     defer msg.deinit();
 
     // Now try to set autounsubscribe to 1 (should fail since we already received 1)
@@ -138,21 +138,21 @@ test "autounsubscribe delivered message counter" {
     try conn.publish("counter.test", "message 1");
     try conn.flush();
 
-    const msg1 = try sub.nextMsg(.fromSeconds(1));
+    const msg1 = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
     defer msg1.deinit();
     try std.testing.expectEqual(@as(u64, 1), sub.delivered_msgs.load(.acquire));
 
     try conn.publish("counter.test", "message 2");
     try conn.flush();
 
-    const msg2 = try sub.nextMsg(.fromSeconds(1));
+    const msg2 = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
     defer msg2.deinit();
     try std.testing.expectEqual(@as(u64, 2), sub.delivered_msgs.load(.acquire));
 
     // Third message should timeout due to autounsubscribe
     try conn.publish("counter.test", "message 3");
     try conn.flush();
-    try std.testing.expectError(error.Timeout, sub.nextMsg(.fromMilliseconds(100)));
+    try std.testing.expectError(error.Timeout, sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }));
 }
 
 const ReconnectTracker = struct {
@@ -200,7 +200,7 @@ test "autounsubscribe with reconnection" {
 
     // Receive the 3 messages
     for (0..3) |_| {
-        const msg = try sub.nextMsg(.fromSeconds(1));
+        const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
         defer msg.deinit();
     }
 
@@ -230,7 +230,7 @@ test "autounsubscribe with reconnection" {
     // Should receive exactly 2 more messages (5 total - 3 already received = 2 remaining)
     var received_after_reconnect: u32 = 0;
     for (0..2) |_| {
-        const msg = try sub.nextMsg(.fromSeconds(1));
+        const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
         defer msg.deinit();
         received_after_reconnect += 1;
     }
@@ -239,5 +239,5 @@ test "autounsubscribe with reconnection" {
     try std.testing.expectEqual(@as(u64, 5), sub.delivered_msgs.load(.acquire));
 
     // Next message should timeout (autounsubscribe limit reached)
-    try std.testing.expectError(error.Timeout, sub.nextMsg(.fromMilliseconds(500)));
+    try std.testing.expectError(error.Timeout, sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } }));
 }

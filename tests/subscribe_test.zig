@@ -16,7 +16,7 @@ test "subscribeSync smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try sub.nextMsg(.fromSeconds(1));
+    const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test", msg.subject);
@@ -33,11 +33,64 @@ test "queueSubscribeSync smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try sub.nextMsg(.fromSeconds(1));
+    const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test", msg.subject);
     try std.testing.expectEqualStrings("Hello world!", msg.data);
+}
+
+test "sync receive API" {
+    var conn = try utils.createDefaultConnection(std.testing.io);
+    defer utils.closeConnection(conn);
+
+    const sub = try conn.subscribeSync("receive.api");
+    defer sub.deinit();
+
+    try std.testing.expect(sub.tryNextMsg() == null);
+
+    try conn.publish("receive.api", "one");
+    try conn.flush();
+
+    const first = try sub.nextMsg();
+    defer first.deinit();
+    try std.testing.expectEqualStrings("one", first.data);
+
+    try std.testing.expectError(
+        error.Timeout,
+        sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } }),
+    );
+}
+
+test "sync batch receive API" {
+    var conn = try utils.createDefaultConnection(std.testing.io);
+    defer utils.closeConnection(conn);
+
+    const sub = try conn.subscribeSync("receive.batch");
+    defer sub.deinit();
+
+    try conn.publish("receive.batch", "one");
+    try conn.publish("receive.batch", "two");
+    try conn.publish("receive.batch", "three");
+    try conn.flush();
+
+    var messages: [5]*Message = undefined;
+    const count = try sub.nextMsgBatchTimeout(
+        &messages,
+        .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } },
+    );
+    defer for (messages[0..count]) |msg| msg.deinit();
+
+    try std.testing.expectEqual(3, count);
+    try std.testing.expectEqualStrings("one", messages[0].data);
+    try std.testing.expectEqualStrings("two", messages[1].data);
+    try std.testing.expectEqualStrings("three", messages[2].data);
+
+    try std.testing.expectEqual(0, sub.tryNextMsgBatch(&messages));
+    try std.testing.expectEqual(
+        0,
+        try sub.nextMsgBatchTimeout(messages[0..0], .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } }),
+    );
 }
 
 const MessageCollector = struct {
