@@ -88,6 +88,7 @@ pub const ObjectResult = @import("jetstream_objstore.zig").ObjectResult;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("net_util.zig");
     _ = @import("jetstream.zig");
     _ = @import("jetstream_message.zig");
     _ = @import("jetstream_kv.zig");
