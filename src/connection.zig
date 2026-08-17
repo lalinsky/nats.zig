@@ -1178,11 +1178,11 @@ pub const Connection = struct {
         // Try to gather data from buffer first
         var slices: [16][]const u8 = undefined;
         const gather = self.write_buffer.gatherReadSlices(&slices, self.options.timeout) catch |err| switch (err) {
-            error.QueueEmpty => {
+            error.WouldBlock => {
                 // No data to write
                 return;
             },
-            error.QueueClosed => return error.QueueClosed,
+            error.Closed => return error.Closed,
             error.Canceled => return error.Canceled,
         };
 
@@ -1232,7 +1232,7 @@ pub const Connection = struct {
             // For async subscriptions, the handler fiber will pick it up
             s.messages.push(message) catch |err| {
                 switch (err) {
-                    error.QueueClosed => {
+                    error.Closed => {
                         // Queue is closed; drop gracefully.
                         log.debug("Queue closed for sid {d}; dropping message", .{message.sid});
                         // Undo the pending counters since queue is closed

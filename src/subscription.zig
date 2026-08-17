@@ -114,7 +114,7 @@ pub const Subscription = struct {
         while (true) {
             // Wait for a message with timeout (allows periodic checking)
             const msg = self.messages.pop(.fromMilliseconds(100)) catch |err| {
-                if (err == error.QueueClosed or err == error.Canceled) {
+                if (err == error.Closed or err == error.Canceled) {
                     log.debug("Subscription {} queue closed, stopping handler", .{self.sid});
                     break;
                 }
@@ -280,8 +280,9 @@ pub const Subscription = struct {
     }
 
     /// Wait for the next message. `.zero` is non-blocking, `.max` waits
-    /// forever.
-    pub fn nextMsg(self: *Subscription, timeout: Io.Duration) (Io.Cancelable || error{Timeout})!*Message {
+    /// forever. Returns `error.ConnectionClosed` once the subscription's
+    /// queue has been closed and drained.
+    pub fn nextMsg(self: *Subscription, timeout: Io.Duration) (Io.Cancelable || error{ Timeout, ConnectionClosed })!*Message {
         // Check if subscription has reached autounsubscribe limit
         const max = self.max_msgs.load(.acquire);
         if (max > 0 and self.delivered_msgs.load(.acquire) >= max) {
@@ -289,8 +290,8 @@ pub const Subscription = struct {
         }
 
         const msg = self.messages.pop(timeout) catch |err| switch (err) {
-            error.QueueEmpty => return error.Timeout,
-            error.QueueClosed => return error.Timeout, // TODO: this should be mapped to ConnectionClosed
+            error.WouldBlock => return error.Timeout,
+            error.Closed => return error.ConnectionClosed,
             error.Canceled => return error.Canceled,
         };
 

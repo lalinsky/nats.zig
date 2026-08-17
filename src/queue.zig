@@ -20,12 +20,12 @@ const Allocator = std.mem.Allocator;
 const io_util = @import("io_util.zig");
 
 const PopError = error{
-    QueueEmpty,
-    QueueClosed,
+    WouldBlock,
+    Closed,
 };
 
 const PushError = error{
-    QueueClosed,
+    Closed,
     ChunkLimitExceeded,
     OutOfMemory,
 };
@@ -249,7 +249,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             defer self.mutex.unlock(self.io);
 
             if (self.is_closed) {
-                return PushError.QueueClosed;
+                return PushError.Closed;
             }
 
             // Check size limit before adding (overflow-safe)
@@ -278,7 +278,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             defer self.mutex.unlock(self.io);
 
             if (self.is_closed) {
-                return PushError.QueueClosed;
+                return PushError.Closed;
             }
 
             // Check size limit before adding (overflow-safe)
@@ -322,10 +322,10 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             // Fast path for non-blocking (zero timeout)
             if (timeout.nanoseconds == 0) {
                 if (self.is_closed and self.items_available == 0) {
-                    return PopError.QueueClosed;
+                    return PopError.Closed;
                 }
                 if (self.items_available == 0) {
-                    return PopError.QueueEmpty;
+                    return PopError.WouldBlock;
                 }
                 return;
             } else if (timeout.nanoseconds == Io.Duration.max.nanoseconds) {
@@ -335,7 +335,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 }
 
                 if (self.is_closed and self.items_available == 0) {
-                    return PopError.QueueClosed;
+                    return PopError.Closed;
                 }
                 return;
             } else {
@@ -345,9 +345,9 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 while (self.items_available == 0 and !self.is_closed) {
                     if (io_util.expired(self.io, deadline)) {
                         if (self.is_closed and self.items_available == 0) {
-                            return PopError.QueueClosed;
+                            return PopError.Closed;
                         }
-                        return PopError.QueueEmpty;
+                        return PopError.WouldBlock;
                     }
 
                     self.data_cond.waitTimeout(self.io, &self.mutex, deadline) catch |err| switch (err) {
@@ -357,7 +357,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 }
 
                 if (self.is_closed and self.items_available == 0) {
-                    return PopError.QueueClosed;
+                    return PopError.Closed;
                 }
                 return;
             }
@@ -370,7 +370,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
             try self.waitForDataInternal(timeout);
 
-            return self.popLocked() orelse PopError.QueueEmpty;
+            return self.popLocked() orelse PopError.WouldBlock;
         }
 
         /// Pop the next available item; assumes the mutex is held.
@@ -410,7 +410,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
             try self.waitForDataInternal(timeout);
 
-            return self.getSliceLocked() orelse PopError.QueueEmpty;
+            return self.getSliceLocked() orelse PopError.WouldBlock;
         }
 
         /// Get a readable slice if data is available; assumes the mutex is held.
@@ -635,7 +635,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             defer self.queue.mutex.unlock(self.queue.io);
 
             if (self.queue.is_closed) {
-                return PushError.QueueClosed;
+                return PushError.Closed;
             }
 
             // Calculate total size needed
@@ -809,7 +809,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
 
             // Use direct fields (don't call methods that relock).
             if (self.queue.items_available == 0) return;
-            if (dest.queue.is_closed) return PushError.QueueClosed;
+            if (dest.queue.is_closed) return PushError.Closed;
 
             // Count chunks to enforce dest.max_chunks if needed.
             var moved_chunk_count: usize = 0;
@@ -867,12 +867,12 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         }
 
         /// Wait for more data to become available with timeout
-        pub fn waitForMoreData(self: *Self, timeout: Io.Duration) (Io.Cancelable || error{QueueClosed})!void {
+        pub fn waitForMoreData(self: *Self, timeout: Io.Duration) (Io.Cancelable || error{Closed})!void {
             try self.queue.mutex.lock(self.queue.io);
             defer self.queue.mutex.unlock(self.queue.io);
 
             if (self.queue.is_closed) {
-                return error.QueueClosed;
+                return error.Closed;
             }
 
             const initial_data = self.queue.items_available;
@@ -889,7 +889,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
 
             // Check if closed after waiting
             if (self.queue.is_closed) {
-                return error.QueueClosed;
+                return error.Closed;
             }
         }
     };
@@ -1025,8 +1025,8 @@ test "queue close functionality" {
     queue.close();
 
     // Should not be able to push after closing
-    try std.testing.expectError(PushError.QueueClosed, queue.push(3));
-    try std.testing.expectError(PushError.QueueClosed, queue.pushSlice(&[_]i32{ 4, 5 }));
+    try std.testing.expectError(PushError.Closed, queue.push(3));
+    try std.testing.expectError(PushError.Closed, queue.pushSlice(&[_]i32{ 4, 5 }));
 
     // Should still be able to read existing data
     try std.testing.expectEqual(@as(i32, 1), try queue.pop(.fromMilliseconds(1000)));
@@ -1070,7 +1070,7 @@ test "blocking pop handles queue closure" {
 
     try group.wait();
 
-    try std.testing.expectEqual(error.QueueClosed, pop_result.?);
+    try std.testing.expectEqual(error.Closed, pop_result.?);
 }
 
 test "getSlice handles queue closure with indefinite wait" {
@@ -1107,7 +1107,7 @@ test "getSlice handles queue closure with indefinite wait" {
 
     try group.wait();
 
-    try std.testing.expectEqual(error.QueueClosed, get_result.?);
+    try std.testing.expectEqual(error.Closed, get_result.?);
 }
 
 test "buffer close functionality" {
@@ -1127,7 +1127,7 @@ test "buffer close functionality" {
     buffer.close();
 
     // Should not be able to append after closing
-    try std.testing.expectError(PushError.QueueClosed, buffer.append(" World"));
+    try std.testing.expectError(PushError.Closed, buffer.append(" World"));
 
     // Should still be able to read existing data
     var view_opt = buffer.tryGetSlice();
@@ -1295,8 +1295,8 @@ test "queue close wakes readers" {
 
     queue.close();
 
-    try std.testing.expectError(PopError.QueueClosed, queue.pop(.zero));
-    try std.testing.expectError(PushError.QueueClosed, queue.push(42));
+    try std.testing.expectError(PopError.Closed, queue.pop(.zero));
+    try std.testing.expectError(PushError.Closed, queue.push(42));
 }
 
 test "ConcurrentWriteBuffer waitForData smoke test" {
@@ -1333,8 +1333,8 @@ test "ConcurrentWriteBuffer waitForData with closed buffer" {
     // Close the buffer
     buffer.close();
 
-    // waitForData should return QueueClosed error
-    try std.testing.expectError(error.QueueClosed, buffer.waitForData(.fromMilliseconds(1000)));
+    // waitForData should return Closed error
+    try std.testing.expectError(error.Closed, buffer.waitForData(.fromMilliseconds(1000)));
 }
 
 test "ConcurrentWriteBuffer waitForMoreData smoke test" {
@@ -1371,8 +1371,8 @@ test "ConcurrentWriteBuffer waitForMoreData with closed buffer" {
     // Close the buffer
     buffer.close();
 
-    // waitForMoreData should return QueueClosed error
-    try std.testing.expectError(error.QueueClosed, buffer.waitForMoreData(.fromMilliseconds(1)));
+    // waitForMoreData should return Closed error
+    try std.testing.expectError(error.Closed, buffer.waitForMoreData(.fromMilliseconds(1)));
 }
 
 test "VectorGather thread safety validation" {
@@ -1411,9 +1411,9 @@ test "VectorGather blocking behavior" {
     var buffer = Buffer.init(allocator, rt.io(), .{});
     defer buffer.deinit();
 
-    // Should return QueueEmpty immediately when no data (non-blocking)
+    // Should return WouldBlock immediately when no data (non-blocking)
     var slices: [4][]const u8 = undefined;
-    try std.testing.expectError(PopError.QueueEmpty, buffer.gatherReadSlices(&slices, .zero));
+    try std.testing.expectError(PopError.WouldBlock, buffer.gatherReadSlices(&slices, .zero));
 
     // Add data and gather successfully
     try buffer.append("Hello, World!");
