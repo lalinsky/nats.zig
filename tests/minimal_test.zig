@@ -36,7 +36,7 @@ test "basic publish and subscribe" {
     try conn.flush();
 
     // Try to receive the message
-    var msg = sub.nextMsg(.fromMilliseconds(100)) catch return error.NoMessageReceived;
+    var msg = sub.nextMsgTimeout(.fromMilliseconds(100)) catch return error.NoMessageReceived;
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test.minimal", msg.subject);
