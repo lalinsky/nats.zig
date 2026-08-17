@@ -1,12 +1,8 @@
 # NATS.zig
 
 A Zig client library for NATS, built on top of Zig's standard library I/O interface (`std.Io`).
-It supports most of the functionality found in the official client libraries.
-
-The library was originally written for [zio](https://github.com/lalinsky/zio), and later ported to `std.Io`.
-It's still recommended to use it with zio's implementation of the `std.Io` interface (see
-[Selecting the I/O Backend](#selecting-the-io-backend)), but it works with any implementation,
-like `std.Io.Threaded`.
+It supports most of the functionality found in the official client libraries, and works with any
+`std.Io` implementation (see [Selecting the I/O Backend](#selecting-the-io-backend)).
 
 ## Installation
 
