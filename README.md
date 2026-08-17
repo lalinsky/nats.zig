@@ -226,6 +226,9 @@ const std = @import("std");
 const zio = @import("zio");
 const nats = @import("nats");
 
+// Route std.log and std.debug.print through zio, so they don't block the event loop
+pub const std_options_debug_io = zio.debug_io;
+
 pub fn main(init: std.process.Init) !void {
     var rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
