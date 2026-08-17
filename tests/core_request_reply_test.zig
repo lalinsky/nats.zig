@@ -366,7 +366,7 @@ test "requestMany with stall timeout" {
     const Responder = struct {
         fn run(task_io: std.Io, connection: *nats.Connection, sub: *nats.Subscription) void {
             // Wait for the request message
-            const request_msg = sub.nextMsg(.fromSeconds(1)) catch return;
+            const request_msg = sub.nextMsgTimeout(.fromSeconds(1)) catch return;
             defer request_msg.deinit();
 
             const reply_subject = request_msg.reply orelse return;

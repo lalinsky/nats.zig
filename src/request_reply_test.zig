@@ -67,7 +67,7 @@ test "subscription timeout" {
 
     // Test immediate timeout (should return null)
     const start = std.time.nanoTimestamp();
-    const result = sub.nextMsg(1); // 1ms
+    const result = sub.nextMsgTimeout(1); // 1ms
     const duration = std.time.nanoTimestamp() - start;
 
     try std.testing.expectEqual(@as(?*Message, null), result);

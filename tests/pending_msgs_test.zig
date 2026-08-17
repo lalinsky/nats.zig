@@ -50,7 +50,7 @@ test "pending_msgs counter sync subscription" {
     try std.testing.expect(sub.pending_bytes.load(.acquire) == msg1_data.len + msg2_data.len);
 
     // Consume one message
-    var msg1 = try sub.nextMsg(.fromSeconds(1));
+    var msg1 = try sub.nextMsgTimeout(.fromSeconds(1));
     defer msg1.deinit();
 
     // Should have 1 pending message and bytes for second message
@@ -58,7 +58,7 @@ test "pending_msgs counter sync subscription" {
     try std.testing.expect(sub.pending_bytes.load(.acquire) == msg2_data.len);
 
     // Consume second message
-    var msg2 = try sub.nextMsg(.fromSeconds(1));
+    var msg2 = try sub.nextMsgTimeout(.fromSeconds(1));
     defer msg2.deinit();
 
     // Should have 0 pending messages and bytes
