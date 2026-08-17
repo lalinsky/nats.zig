@@ -3,7 +3,7 @@ const nats = @import("nats");
 const zio = @import("zio");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -14,7 +14,7 @@ pub fn main() !void {
     defer rt.deinit();
 
     // Creates a connection to the default NATS URL
-    var conn = nats.Connection.init(allocator, .{});
+    var conn = nats.Connection.init(allocator, rt.io(), .{});
     defer conn.deinit();
 
     conn.connect("nats://localhost:4222") catch |err| {

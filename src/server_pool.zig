@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const zio = @import("zio");
 const ArrayList = std.ArrayList;
 const StringArrayHashMapUnmanaged = std.StringArrayHashMapUnmanaged;
 const Url = @import("url.zig").Url;
@@ -160,7 +161,7 @@ pub const ServerPool = struct {
     pub fn shuffle(self: *ServerPool, offset: usize) void {
         if (self.servers.count() <= offset + 1) return;
 
-        var prng = std.rand.DefaultPrng.init(@bitCast(std.time.nanoTimestamp()));
+        var prng = std.Random.DefaultPrng.init(@intCast(zio.Timestamp.now(.monotonic).toNanoseconds()));
         const random = prng.random();
 
         // Shuffle the underlying entries directly
@@ -176,7 +177,7 @@ pub const ServerPool = struct {
 };
 
 test "server pool basic operations" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -203,7 +204,7 @@ test "server pool basic operations" {
 }
 
 test "server pool duplicate prevention" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -230,7 +231,7 @@ test "server pool duplicate prevention" {
 }
 
 test "server removal on max reconnects" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

@@ -13,6 +13,9 @@
 
 const std = @import("std");
 const zio = @import("zio");
+const xsync = @import("xsync");
+const Io = std.Io;
+const msTimeout = @import("io_util.zig").msTimeout;
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const RefCounter = @import("ref_counter.zig").RefCounter;
@@ -64,7 +67,7 @@ pub const Subscription = struct {
 
     // Drain state
     draining: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    drain_complete: zio.ResetEvent = .init,
+    drain_complete: xsync.Event = .init,
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
@@ -83,7 +86,7 @@ pub const Subscription = struct {
             .sid = sid,
             .subject = subject_copy,
             .queue = queue_group_copy,
-            .messages = MessageQueue.init(nc.allocator, .{}),
+            .messages = MessageQueue.init(nc.allocator, nc.io, .{}),
             .handler = handler,
         };
 
@@ -226,9 +229,9 @@ pub const Subscription = struct {
 
         if (timeout_ms == 0) {
             // No timeout - wait indefinitely
-            try self.drain_complete.wait();
+            try self.drain_complete.wait(self.nc.io);
         } else {
-            try self.drain_complete.timedWait(.fromMilliseconds(timeout_ms));
+            try self.drain_complete.waitTimeout(self.nc.io, msTimeout(timeout_ms));
         }
     }
 
@@ -258,7 +261,7 @@ pub const Subscription = struct {
         self.max_msgs.store(max, .release);
     }
 
-    pub fn nextMsg(self: *Subscription, timeout_ms: u64) (zio.Cancelable || error{Timeout})!*Message {
+    pub fn nextMsg(self: *Subscription, timeout_ms: u64) (Io.Cancelable || error{Timeout})!*Message {
         // Check if subscription has reached autounsubscribe limit
         const max = self.max_msgs.load(.acquire);
         if (max > 0 and self.delivered_msgs.load(.acquire) >= max) {
@@ -339,7 +342,7 @@ pub fn decrementPending(sub: *Subscription, msg_size: usize) void {
     // Check if drain is complete (we just decremented from 1 to 0)
     if (sub.draining.load(.acquire) and remaining_msgs == 1) {
         log.debug("Subscription {d} drain completed", .{sub.sid});
-        sub.drain_complete.set();
+        sub.drain_complete.set(sub.nc.io);
         sub.nc.notifySubscriptionDrainComplete();
     }
 }

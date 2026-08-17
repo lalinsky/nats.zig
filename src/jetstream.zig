@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const zio = @import("zio");
+const xsync = @import("xsync");
 const message_mod = @import("message.zig");
 const Message = message_mod.Message;
 const MessageList = message_mod.MessageList;
@@ -32,11 +33,11 @@ const log = @import("log.zig").log;
 
 // Helper function to replace jsonStringifyAlloc
 fn jsonStringifyAlloc(allocator: std.mem.Allocator, value: anytype, options: std.json.Stringify.Options) ![]u8 {
-    var buffer = std.ArrayList(u8){};
-    defer buffer.deinit(allocator);
+    var buffer: std.Io.Writer.Allocating = .init(allocator);
+    defer buffer.deinit();
 
-    try std.fmt.format(buffer.writer(allocator), "{f}", .{std.json.fmt(value, options)});
-    return buffer.toOwnedSlice(allocator);
+    try buffer.writer.print("{f}", .{std.json.fmt(value, options)});
+    return buffer.toOwnedSlice();
 }
 
 // Re-export JetStream message types
@@ -419,7 +420,7 @@ pub const PullSubscription = struct {
     /// Fetch ID counter for unique reply subjects
     fetch_id_counter: u64 = 0,
     /// Mutex for fiber safety
-    mutex: zio.Mutex = .{},
+    mutex: xsync.Mutex = .init,
 
     pub fn deinit(self: *PullSubscription) void {
         self.consumer_info.deinit();
@@ -432,8 +433,8 @@ pub const PullSubscription = struct {
     pub fn fetch(self: *PullSubscription, batch: usize, timeout_ms: u64) !MessageBatch {
         if (batch == 0) return error.InvalidBatchSize;
 
-        try self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.js.nc.io);
+        defer self.mutex.unlock(self.js.nc.io);
 
         // Generate unique fetch ID and reply subject
         self.fetch_id_counter += 1;
@@ -461,7 +462,7 @@ pub const PullSubscription = struct {
         try self.js.nc.publishRequest(api_subject, reply_subject, request_json);
 
         // Collect messages
-        var messages = std.ArrayList(*JetStreamMessage){};
+        var messages = std.ArrayList(*JetStreamMessage).empty;
         defer messages.deinit(self.js.nc.allocator);
 
         var batch_complete = false;

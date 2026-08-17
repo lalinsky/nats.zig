@@ -60,9 +60,9 @@ const CallbackTracker = struct {
         try self.mutex.lock();
         defer self.mutex.unlock();
 
-        var timer = try std.time.Timer.start();
+        var timer = zio.Stopwatch.start();
         while (self.disconnected_called == 0) {
-            if (timer.read() >= timeout_ms * std.time.ns_per_ms) {
+            if (timer.read().toNanoseconds() >= timeout_ms * std.time.ns_per_ms) {
                 return error.DisconnectTimeout;
             }
             self.cond.timedWait(&self.mutex, .fromMilliseconds(100)) catch {};
@@ -73,9 +73,9 @@ const CallbackTracker = struct {
         try self.mutex.lock();
         defer self.mutex.unlock();
 
-        var timer = try std.time.Timer.start();
+        var timer = zio.Stopwatch.start();
         while (self.reconnected_called == 0) {
-            if (timer.read() >= timeout_ms * std.time.ns_per_ms) {
+            if (timer.read().toNanoseconds() >= timeout_ms * std.time.ns_per_ms) {
                 return error.ReconnectionTimeout;
             }
             self.cond.timedWait(&self.mutex, .fromMilliseconds(100)) catch {};
@@ -89,7 +89,7 @@ test "basic reconnection when server stops" {
 
     tracker.reset();
 
-    const nc = try utils.createConnection(.node1, .{
+    const nc = try utils.createConnection(rt.io(), .node1, .{
         .trace = true,
         .reconnect = .{
             .allow_reconnect = true,
@@ -131,7 +131,7 @@ test "manual reconnection with nc.reconnect()" {
 
     tracker.reset();
 
-    const nc = try utils.createConnection(.node1, .{
+    const nc = try utils.createConnection(rt.io(), .node1, .{
         .trace = true,
         .reconnect = .{
             .allow_reconnect = true,
@@ -193,7 +193,7 @@ test "reconnect() errors when disabled" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const nc = try utils.createConnection(.node1, .{
+    const nc = try utils.createConnection(rt.io(), .node1, .{
         .reconnect = .{
             .allow_reconnect = false,
         },
@@ -208,7 +208,7 @@ test "reconnect() errors when connection closed" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const nc = try utils.createConnection(.node1, .{});
+    const nc = try utils.createConnection(rt.io(), .node1, .{});
     defer utils.closeConnection(nc);
 
     nc.close();

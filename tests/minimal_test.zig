@@ -9,7 +9,7 @@ test "connect" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 }
 
@@ -17,7 +17,7 @@ test "connect wrong port" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = utils.createConnectionWrongPort() catch return;
+    const conn = utils.createConnectionWrongPort(rt.io()) catch return;
     defer utils.closeConnection(conn);
 
     try std.testing.expect(false);
@@ -27,7 +27,7 @@ test "basic publish and subscribe" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -50,7 +50,7 @@ test "async subscribe" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     // Message handler function

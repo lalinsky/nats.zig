@@ -8,7 +8,7 @@ test "autounsubscribe sync basic functionality" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("auto.test");
@@ -44,10 +44,10 @@ test "autounsubscribe async basic functionality" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
-    var messages_received = std.ArrayList(*Message){};
+    var messages_received = std.ArrayList(*Message).empty;
     defer {
         for (messages_received.items) |msg| {
             msg.deinit();
@@ -85,9 +85,9 @@ test "autounsubscribe async basic functionality" {
     try conn.flush();
 
     // Wait for message processing with bounded wait loop
-    const deadline_ms = std.time.milliTimestamp() + 1000;
+    var wait_timer = zio.Stopwatch.start();
     var count: usize = 0;
-    while (std.time.milliTimestamp() < deadline_ms) {
+    while (wait_timer.read().toMilliseconds() < 1000) {
         try ctx.mutex.lock();
         count = messages_received.items.len;
         ctx.mutex.unlock();
@@ -102,7 +102,7 @@ test "autounsubscribe error conditions" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("error.test");
@@ -126,7 +126,7 @@ test "autounsubscribe delivered message counter" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("counter.test");
@@ -182,7 +182,7 @@ test "autounsubscribe with reconnection" {
 
     ReconnectTracker.reset();
 
-    const conn = try utils.createConnection(.node1, .{
+    const conn = try utils.createConnection(rt.io(), .node1, .{
         .reconnect = .{
             .allow_reconnect = true,
             .reconnect_wait_ms = 100,
@@ -221,9 +221,9 @@ test "autounsubscribe with reconnection" {
     try conn.reconnect();
 
     // Wait for reconnection to complete
-    var timer = try std.time.Timer.start();
+    var timer = zio.Stopwatch.start();
     while (ReconnectTracker.reconnected_called == 0) {
-        if (timer.read() >= 5000 * std.time.ns_per_ms) {
+        if (timer.read().toNanoseconds() >= 5000 * std.time.ns_per_ms) {
             return error.ReconnectionTimeout;
         }
         try rt.sleep(.fromMilliseconds(10));

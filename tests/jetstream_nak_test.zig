@@ -10,7 +10,7 @@ test "NAK redelivery with delivery count verification" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -35,8 +35,8 @@ test "NAK redelivery with delivery count verification" {
 
         fn init(allocator: std.mem.Allocator) @This() {
             return .{
-                .messages = std.ArrayList([]const u8){},
-                .delivery_counts = std.ArrayList(u64){},
+                .messages = std.ArrayList([]const u8).empty,
+                .delivery_counts = std.ArrayList(u64).empty,
                 .allocator = allocator,
             };
         }
@@ -152,7 +152,7 @@ test "NAK with max delivery limit" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -252,7 +252,7 @@ test "JetStream message metadata parsing" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -347,7 +347,7 @@ test "NAK with delay redelivery timing" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -372,7 +372,7 @@ test "NAK with delay redelivery timing" {
 
         fn init(allocator: std.mem.Allocator) @This() {
             return .{
-                .delivery_times = std.ArrayList(i64){},
+                .delivery_times = std.ArrayList(i64).empty,
                 .allocator = allocator,
             };
         }
@@ -393,7 +393,7 @@ test "NAK with delay redelivery timing" {
             data.mutex.lockUncancelable();
             defer data.mutex.unlock();
 
-            const current_time = std.time.milliTimestamp();
+            const current_time: i64 = @intCast(@divTrunc(zio.Timestamp.now(.monotonic).toNanoseconds(), std.time.ns_per_ms));
             data.delivery_times.append(data.allocator, current_time) catch return;
 
             const delivery_count = js_msg.metadata.num_delivered;
@@ -469,7 +469,7 @@ test "NAK with zero delay behaves like regular NAK" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

@@ -78,6 +78,7 @@ pub const Result = @import("result.zig").Result;
 pub const ObjectStore = @import("jetstream_objstore.zig").ObjectStore;
 pub const ObjectStoreManager = @import("jetstream_objstore.zig").ObjectStoreManager;
 pub const ObjectMeta = @import("jetstream_objstore.zig").ObjectMeta;
+pub const SliceReader = @import("jetstream_objstore.zig").SliceReader;
 pub const ObjectInfo = @import("jetstream_objstore.zig").ObjectInfo;
 pub const ObjectStoreConfig = @import("jetstream_objstore.zig").ObjectStoreConfig;
 pub const ObjectStoreError = @import("jetstream_objstore.zig").ObjectStoreError;

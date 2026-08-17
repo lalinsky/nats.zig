@@ -14,6 +14,8 @@
 
 const std = @import("std");
 const zio = @import("zio");
+const xsync = @import("xsync");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 
@@ -205,7 +207,7 @@ pub const Message = struct {
 
             const result = try self.headers.getOrPut(arena_allocator, owned_key);
             if (!result.found_existing) {
-                result.value_ptr.* = .{};
+                result.value_ptr.* = .empty;
             }
 
             try result.value_ptr.append(arena_allocator, owned_value);
@@ -223,7 +225,7 @@ pub const Message = struct {
         const owned_key = try arena_allocator.dupe(u8, key);
         const owned_value = try arena_allocator.dupe(u8, value);
 
-        var values: ArrayListUnmanaged([]const u8) = .{};
+        var values: ArrayListUnmanaged([]const u8) = .empty;
         try values.append(arena_allocator, owned_value);
 
         try self.headers.put(arena_allocator, owned_key, values);
@@ -316,22 +318,24 @@ pub const Message = struct {
 
 pub const MessagePool = struct {
     allocator: std.mem.Allocator,
+    io: Io,
     messages: MessageList = .{},
-    mutex: zio.Mutex = .{},
+    mutex: xsync.Mutex = .init,
     max_size: usize = 100,
     max_arena_size: usize = 1024 * 1024,
 
     pub const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator) MessagePool {
+    pub fn init(allocator: std.mem.Allocator, io: Io) MessagePool {
         return .{
             .allocator = allocator,
+            .io = io,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.mutex.lockUncancelable();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         while (self.messages.pop()) |msg| {
             msg.pool = null;
@@ -341,8 +345,8 @@ pub const MessagePool = struct {
     }
 
     pub fn acquire(self: *Self) !*Message {
-        try self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.messages.pop()) |msg| {
             return msg;
@@ -357,8 +361,8 @@ pub const MessagePool = struct {
     }
 
     pub fn release(self: *Self, msg: *Message) void {
-        self.mutex.lockUncancelable();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.messages.len < self.max_size) {
             msg.reset();

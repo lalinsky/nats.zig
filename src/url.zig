@@ -166,7 +166,7 @@ pub const Url = struct {
 };
 
 test "url parsing without scheme" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -180,7 +180,7 @@ test "url parsing without scheme" {
 }
 
 test "url parsing with scheme" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -193,7 +193,7 @@ test "url parsing with scheme" {
 }
 
 test "url parsing with user info" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -208,7 +208,7 @@ test "url parsing with user info" {
 }
 
 test "url parsing discovered servers" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

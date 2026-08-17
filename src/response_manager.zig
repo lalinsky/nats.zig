@@ -13,6 +13,9 @@
 
 const std = @import("std");
 const zio = @import("zio");
+const xsync = @import("xsync");
+const Io = std.Io;
+const nsTimeout = @import("io_util.zig").nsTimeout;
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const MessageList = @import("message.zig").MessageList;
@@ -49,6 +52,7 @@ const INBOX_PREFIX_LEN = INBOX_BASE_PREFIX_LEN + nuid.NUID_TOTAL_LEN + 1; // "_I
 
 pub const ResponseManager = struct {
     allocator: Allocator,
+    io: Io,
 
     resp_sub_prefix_buf: [INBOX_PREFIX_LEN]u8 = undefined,
     resp_sub_prefix: []u8 = &.{},
@@ -60,8 +64,8 @@ pub const ResponseManager = struct {
     // "thundering herd" effects with many concurrent requests, we can optimize by
     // storing per-request condition variables in the pending_responses map and
     // signaling only the specific waiting fiber. This trades memory for CPU efficiency.
-    pending_mutex: zio.Mutex = .{},
-    pending_condition: zio.Condition = .{},
+    pending_mutex: xsync.Mutex = .init,
+    pending_condition: xsync.Condition = .init,
     is_closed: bool = false,
 
     // Map of rid -> result
@@ -70,16 +74,17 @@ pub const ResponseManager = struct {
     // Request ID generation state (simple counter)
     rid_counter: u64 = 0,
 
-    pub fn init(allocator: Allocator) ResponseManager {
+    pub fn init(allocator: Allocator, io: Io) ResponseManager {
         return ResponseManager{
             .allocator = allocator,
+            .io = io,
         };
     }
 
     pub fn deinit(self: *ResponseManager) void {
         // Signal shutdown and wake up all waiters
-        self.pending_mutex.lockUncancelable();
-        defer self.pending_mutex.unlock();
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
 
         // Clean up the response subscription if it exists
         if (self.resp_mux) |sub| {
@@ -88,7 +93,7 @@ pub const ResponseManager = struct {
         }
 
         self.is_closed = true;
-        self.pending_condition.broadcast(); // Wake up all waiters
+        self.pending_condition.broadcast(self.io); // Wake up all waiters
 
         // Clean up any remaining pending responses
         if (self.pending_responses.count() > 0) {
@@ -114,8 +119,8 @@ pub const ResponseManager = struct {
     }
 
     pub fn ensureInitialized(self: *ResponseManager, connection: *Connection) !void {
-        try self.pending_mutex.lock();
-        defer self.pending_mutex.unlock();
+        try self.pending_mutex.lock(self.io);
+        defer self.pending_mutex.unlock(self.io);
 
         // Already initialized by another thread
         if (self.resp_mux != null) return;
@@ -136,8 +141,8 @@ pub const ResponseManager = struct {
     }
 
     pub fn createRequest(self: *ResponseManager) !RequestHandle {
-        try self.pending_mutex.lock();
-        defer self.pending_mutex.unlock();
+        try self.pending_mutex.lock(self.io);
+        defer self.pending_mutex.unlock(self.io);
 
         if (self.is_closed) return error.ConnectionClosed;
 
@@ -150,8 +155,8 @@ pub const ResponseManager = struct {
     }
 
     pub fn createMultiRequest(self: *ResponseManager) !RequestHandle {
-        try self.pending_mutex.lock();
-        defer self.pending_mutex.unlock();
+        try self.pending_mutex.lock(self.io);
+        defer self.pending_mutex.unlock(self.io);
 
         if (self.is_closed) return error.ConnectionClosed;
 
@@ -183,12 +188,12 @@ pub const ResponseManager = struct {
         }
 
         self.pending_responses.removeByPtr(entry.key_ptr);
-        self.pending_condition.broadcast();
+        self.pending_condition.broadcast(self.io);
     }
 
     pub fn cleanupRequest(self: *ResponseManager, handle: RequestHandle) void {
-        self.pending_mutex.lockUncancelable();
-        defer self.pending_mutex.unlock();
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
 
         const entry = self.pending_responses.getEntry(handle.rid) orelse return;
         self.cleanupRequestInternal(entry);
@@ -197,12 +202,12 @@ pub const ResponseManager = struct {
     }
 
     pub fn waitForResponse(self: *ResponseManager, handle: RequestHandle, timeout_ns: u64) !*Message {
-        try self.pending_mutex.lock();
-        defer self.pending_mutex.unlock();
+        try self.pending_mutex.lock(self.io);
+        defer self.pending_mutex.unlock(self.io);
 
         if (self.is_closed) return error.ConnectionClosed;
 
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = zio.Stopwatch.start();
         while (true) {
             // Look up entry fresh each iteration - previous pointers may be invalid after timedWait
             const entry = self.pending_responses.getEntry(handle.rid) orelse {
@@ -229,7 +234,7 @@ pub const ResponseManager = struct {
                 return error.ConnectionClosed;
             }
 
-            const elapsed = timer.read();
+            const elapsed = timer.read().toNanoseconds();
             if (elapsed >= timeout_ns) {
                 cleanup = true;
                 return error.Timeout;
@@ -237,7 +242,7 @@ pub const ResponseManager = struct {
 
             // After this call, any entry pointers become invalid due to potential HashMap modifications
             cleanup = false;
-            self.pending_condition.timedWait(&self.pending_mutex, .fromNanoseconds(timeout_ns - elapsed)) catch {};
+            self.pending_condition.waitTimeout(self.io, &self.pending_mutex, nsTimeout(timeout_ns - elapsed)) catch {};
         }
     }
 
@@ -256,8 +261,8 @@ pub const ResponseManager = struct {
     };
 
     pub fn waitForMultiResponse(self: *ResponseManager, handle: RequestHandle, timeout_ns: u64, options: WaitForMultiResponseOptions) !MessageList {
-        try self.pending_mutex.lock();
-        defer self.pending_mutex.unlock();
+        try self.pending_mutex.lock(self.io);
+        defer self.pending_mutex.unlock(self.io);
 
         if (self.is_closed) return error.ConnectionClosed;
 
@@ -270,7 +275,7 @@ pub const ResponseManager = struct {
             }
         }
 
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = zio.Stopwatch.start();
         while (true) {
             // Look up entry fresh each iteration - previous pointers may be invalid after timedWait
             const entry = self.pending_responses.getEntry(handle.rid) orelse {
@@ -323,7 +328,7 @@ pub const ResponseManager = struct {
                 return error.ConnectionClosed;
             }
 
-            const elapsed = timer.read();
+            const elapsed = timer.read().toNanoseconds();
             if (elapsed >= timeout_ns) {
                 cleanup = true;
                 if (msgs.len > 0) {
@@ -341,7 +346,7 @@ pub const ResponseManager = struct {
             }
 
             // After this call, any entry pointers become invalid due to potential HashMap modifications
-            self.pending_condition.timedWait(&self.pending_mutex, .fromNanoseconds(wait_timeout_ns)) catch {
+            self.pending_condition.waitTimeout(self.io, &self.pending_mutex, nsTimeout(wait_timeout_ns)) catch {
                 // Timeout occurred - return what we have collected so far
                 cleanup = true;
                 if (msgs.len > 0) {
@@ -366,8 +371,8 @@ pub const ResponseManager = struct {
             return;
         };
 
-        try self.pending_mutex.lock();
-        defer self.pending_mutex.unlock();
+        try self.pending_mutex.lock(self.io);
+        defer self.pending_mutex.unlock(self.io);
 
         // Don't process responses after shutdown
         if (self.is_closed) return;
@@ -392,7 +397,7 @@ pub const ResponseManager = struct {
             },
         }
 
-        self.pending_condition.broadcast(); // Wake up waiting fibers
+        self.pending_condition.broadcast(self.io); // Wake up waiting fibers
     }
 
     fn extractRid(self: *ResponseManager, subject: []const u8) ?u64 {
@@ -416,7 +421,7 @@ test "response manager basic functionality" {
     const rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
 
-    var manager = ResponseManager.init(allocator);
+    var manager = ResponseManager.init(allocator, rt.io());
     defer manager.deinit();
 
     // Test that we can create request handles with different rids
@@ -438,16 +443,16 @@ test "request handle timeout functionality" {
     const rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
 
-    var manager = ResponseManager.init(allocator);
+    var manager = ResponseManager.init(allocator, rt.io());
     defer manager.deinit();
 
     const handle = try manager.createRequest();
     defer manager.cleanupRequest(handle);
 
     // Test timeout behavior
-    const start = std.time.nanoTimestamp();
+    var timer = zio.Stopwatch.start();
     const result = manager.waitForResponse(handle, 1_000_000); // 1ms timeout
-    const duration = std.time.nanoTimestamp() - start;
+    const duration = timer.read().toNanoseconds();
 
     try testing.expectError(error.Timeout, result);
     try testing.expect(duration >= 1_000_000); // At least 1ms passed
@@ -460,7 +465,7 @@ test "multi-response request creation and timeout" {
     const rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
 
-    var manager = ResponseManager.init(allocator);
+    var manager = ResponseManager.init(allocator, rt.io());
     defer manager.deinit();
 
     // Test that we can create multi-response request handles
