@@ -382,6 +382,8 @@ pub const Connection = struct {
     pub fn connect(self: *Self, url: []const u8) !void {
         errdefer self.close();
 
+        try io_util.ensureAwakeClock(self.io);
+
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -1019,6 +1021,8 @@ pub const Connection = struct {
         // Reset ping/pong counters for fresh connection
         self.outgoing_pings = 0;
         self.incoming_pongs = 0;
+        self.pings_out.store(0, .monotonic);
+        self.ping_time = io_util.now(self.io);
 
         // Initialize handshake state
         self.handshake_state = .waiting_for_info;

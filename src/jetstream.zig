@@ -471,7 +471,8 @@ pub const PullSubscription = struct {
 
         // Collect messages until batch is complete or timeout
         while (!batch_complete and messages.items.len < request.batch) {
-            if (self.inbox_subscription.nextMsg(.{ .nanoseconds = timeout.nanoseconds * 2 })) |raw_msg| {
+            const wait: Io.Duration = .{ .nanoseconds = timeout.nanoseconds *| 2 };
+            if (self.inbox_subscription.nextMsg(wait)) |raw_msg| {
                 log.debug("Message: subject={s}, reply={s}, data='{s}'", .{ raw_msg.subject, raw_msg.reply orelse "none", raw_msg.data });
                 // JetStream messages arrive with original subjects and ACK reply subjects
                 // The timestamp in the ACK subject ensures messages belong to this fetch request
