@@ -90,7 +90,9 @@ test "idle connection sends keep-alive pings" {
     defer utils.closeConnection(nc);
 
     // Stay completely idle: no publishes, no inbound traffic. The
-    // keep-alive timer alone must produce PINGs.
+    // keep-alive timer alone must produce PINGs. Note this polls
+    // outgoing_pings, the monotonic count of PINGs sent, not pings_out,
+    // the outstanding count that PONG processing resets.
     const start = std.Io.Timestamp.now(io, .awake);
     while (true) {
         if (start.untilNow(io, .awake).nanoseconds > 5 * std.time.ns_per_s) {
