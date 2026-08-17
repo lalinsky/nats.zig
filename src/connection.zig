@@ -1015,9 +1015,6 @@ pub const Connection = struct {
         self.handshake_error = null;
         self.handshake_cond.broadcast(self.io);
 
-        // Unfreeze write buffer now that we have a working socket
-        self.write_buffer.unfreeze();
-
         return stream;
     }
 
@@ -1173,10 +1170,6 @@ pub const Connection = struct {
         const gather = self.write_buffer.gatherReadSlices(&slices, self.options.timeout) catch |err| switch (err) {
             error.QueueEmpty => {
                 // No data to write
-                return;
-            },
-            error.BufferFrozen => {
-                // Buffer frozen during reconnection
                 return;
             },
             error.QueueClosed => return error.QueueClosed,
