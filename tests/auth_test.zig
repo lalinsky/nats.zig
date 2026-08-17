@@ -91,6 +91,301 @@ test "token authentication failure" {
     }
 }
 
+test "user password authentication success" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .user = "test_user",
+        .password = "test_password",
+    };
+
+    const conn = try utils.createConnection(io, .user_pass, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.userpass", "authenticated message");
+    try conn.flush();
+}
+
+test "user password authentication failure" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .user = "test_user",
+        .password = "wrong_password",
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+    };
+
+    const result = utils.createConnection(io, .user_pass, opts);
+
+    if (result) |conn| {
+        defer utils.closeConnection(conn);
+        try std.testing.expect(false);
+    } else |err| {
+        try std.testing.expect(err == nats.ProtocolError.AuthorizationViolation);
+    }
+}
+
+test "url credentials authentication" {
+    const io = std.testing.io;
+
+    const conn = try utils.createConnectionWithUrl(
+        io,
+        "nats://test_user:test_password@127.0.0.1:14227",
+        .{},
+    );
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.urlcreds", "url authenticated");
+    try conn.flush();
+}
+
+test "url credentials take precedence over options" {
+    const io = std.testing.io;
+
+    // The URL credentials are valid, the options ones are not; the URL
+    // must win, matching the C client's precedence.
+    const opts = nats.ConnectionOptions{
+        .user = "test_user",
+        .password = "wrong_password",
+    };
+
+    const conn = try utils.createConnectionWithUrl(
+        io,
+        "nats://test_user:test_password@127.0.0.1:14227",
+        opts,
+    );
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.urlprecedence", "url wins");
+    try conn.flush();
+}
+
+test "url token authentication" {
+    const io = std.testing.io;
+
+    // A username without a password in the URL is treated as a token.
+    const conn = try utils.createConnectionWithUrl(
+        io,
+        "nats://test_token_123@127.0.0.1:14225",
+        .{},
+    );
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.urltoken", "token authenticated");
+    try conn.flush();
+}
+
+// Fixture seeds; the nkey server config (tests/configs/nkey.conf)
+// authorizes only the public key derived from the first one.
+const nkey_seed = "SUABCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEKPBU";
+const wrong_nkey_seed = "SUACEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIU6OY";
+
+test "nkey authentication success" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .nkey_seed = nkey_seed,
+    };
+
+    const conn = try utils.createConnection(io, .nkey_auth, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.nkey", "nkey authenticated");
+    try conn.flush();
+}
+
+test "nkey authentication failure with unauthorized key" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .nkey_seed = wrong_nkey_seed,
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+    };
+
+    const result = utils.createConnection(io, .nkey_auth, opts);
+
+    if (result) |conn| {
+        defer utils.closeConnection(conn);
+        try std.testing.expect(false);
+    } else |err| {
+        try std.testing.expect(err == nats.ProtocolError.AuthorizationViolation);
+    }
+}
+
+test "invalid nkey seed fails before connecting" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .nkey_seed = "SUANOTAVALIDSEED",
+    };
+
+    // Even the unused port works here: the seed is validated before dialing.
+    const result = utils.createConnection(io, .unknown, opts);
+    try std.testing.expectError(nats.nkeys.Error.InvalidSeed, result);
+}
+
+const test_creds_path = "tests/configs/TestUser.creds";
+
+test "jwt credentials file authentication" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .user_creds = test_creds_path,
+    };
+
+    const conn = try utils.createConnection(io, .jwt_auth, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.jwt", "jwt authenticated");
+    try conn.flush();
+}
+
+test "jwt inline with nkey seed authentication" {
+    const io = std.testing.io;
+
+    // Read and parse the fixture so the test exercises the inline
+    // user_jwt + nkey_seed combination.
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, test_creds_path, std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(content);
+    const credentials = try nats.creds.parse(content);
+
+    const opts = nats.ConnectionOptions{
+        .user_jwt = credentials.jwt,
+        .nkey_seed = credentials.seed,
+    };
+
+    const conn = try utils.createConnection(io, .jwt_auth, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.jwt.inline", "jwt inline authenticated");
+    try conn.flush();
+}
+
+test "jwt with mismatched signing key fails" {
+    const io = std.testing.io;
+
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, test_creds_path, std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(content);
+    const credentials = try nats.creds.parse(content);
+
+    // Valid JWT, but the nonce gets signed with an unrelated key.
+    const opts = nats.ConnectionOptions{
+        .user_jwt = credentials.jwt,
+        .nkey_seed = nkey_seed,
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+    };
+
+    const result = utils.createConnection(io, .jwt_auth, opts);
+
+    if (result) |conn| {
+        defer utils.closeConnection(conn);
+        try std.testing.expect(false);
+    } else |err| {
+        try std.testing.expect(err == nats.ProtocolError.AuthorizationViolation);
+    }
+}
+
+test "missing credentials file fails before connecting" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .user_creds = "tests/configs/DoesNotExist.creds",
+    };
+
+    const result = utils.createConnection(io, .unknown, opts);
+    try std.testing.expectError(error.FileNotFound, result);
+}
+
+test "jwt without signing seed fails before connecting" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .user_jwt = "some.jwt.value",
+    };
+
+    const result = utils.createConnection(io, .unknown, opts);
+    try std.testing.expectError(error.MissingNKeySeed, result);
+}
+
+// Public key derived from nkey_seed above; authorized by nkey.conf.
+const nkey_public = "UDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTPSQF";
+
+const FixtureSigner = struct {
+    fn sign(nonce: []const u8) anyerror![64]u8 {
+        var kp = try nats.nkeys.SeedKeyPair.fromSeed(nkey_seed);
+        defer kp.wipe();
+        return kp.sign(nonce);
+    }
+};
+
+test "nkey sign callback authentication" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .nkey = nkey_public,
+        .nkey_sign_cb = FixtureSigner.sign,
+    };
+
+    const conn = try utils.createConnection(io, .nkey_auth, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.nkey.callback", "callback authenticated");
+    try conn.flush();
+}
+
+test "sign callback without public key fails before connecting" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .nkey_sign_cb = FixtureSigner.sign,
+    };
+
+    const result = utils.createConnection(io, .unknown, opts);
+    try std.testing.expectError(error.MissingNKey, result);
+}
+
+const FlippingTokenHandler = struct {
+    var calls: std.atomic.Value(u32) = .init(0);
+
+    fn getToken() []const u8 {
+        const n = calls.fetchAdd(1, .monotonic);
+        return if (n == 0) "test_token_123" else "wrong_token";
+    }
+};
+
+test "reconnection gives up after repeated auth errors" {
+    const io = std.testing.io;
+
+    FlippingTokenHandler.calls.store(0, .monotonic);
+
+    // The first handshake authenticates; every later one presents a bad
+    // token. After two identical auth errors from the same server the
+    // client must stop reconnecting instead of burning all 60 attempts.
+    const opts = nats.ConnectionOptions{
+        .token_handler = FlippingTokenHandler.getToken,
+        .reconnect = .{
+            .allow_reconnect = true,
+            .reconnect_wait = .fromMilliseconds(100),
+        },
+    };
+
+    const conn = try utils.createConnection(io, .token_auth, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.reconnect();
+
+    const start = std.Io.Timestamp.now(io, .awake);
+    while (conn.status != .connection_failed) {
+        if (start.untilNow(io, .awake).nanoseconds >= 10 * std.time.ns_per_s) {
+            return error.GiveUpTimeout;
+        }
+        try io.sleep(.fromMilliseconds(50), .awake);
+    }
+
+    // Initial connect plus exactly two rejected reconnect handshakes.
+    try std.testing.expectEqual(@as(u32, 3), FlippingTokenHandler.calls.load(.monotonic));
+}
+
 test "no authentication options against auth server" {
     const io = std.testing.io;
 

@@ -26,6 +26,9 @@ pub const Node = enum(u16) {
     node3 = 14224,
     token_auth = 14225,
     unknown = 14226,
+    user_pass = 14227,
+    nkey_auth = 14228,
+    jwt_auth = 14229,
 };
 
 pub fn createConnection(io: std.Io, node: Node, opts: nats.ConnectionOptions) !*nats.Connection {
@@ -33,6 +36,10 @@ pub fn createConnection(io: std.Io, node: Node, opts: nats.ConnectionOptions) !*
     const url = try std.fmt.allocPrint(std.testing.allocator, "nats://127.0.0.1:{d}", .{port});
     defer std.testing.allocator.free(url);
 
+    return createConnectionWithUrl(io, url, opts);
+}
+
+pub fn createConnectionWithUrl(io: std.Io, url: []const u8, opts: nats.ConnectionOptions) !*nats.Connection {
     var conn = try std.testing.allocator.create(nats.Connection);
     errdefer std.testing.allocator.destroy(conn);
 
@@ -115,7 +122,7 @@ pub fn waitForHealthyServices(allocator: std.mem.Allocator, timeout: std.Io.Dura
 /// port accepting connections; probe the real thing so a test never starts
 /// against a server that is still coming up.
 fn allServerPortsOpen(io: std.Io) bool {
-    for ([_]Node{ .node1, .node2, .node3, .token_auth }) |node| {
+    for ([_]Node{ .node1, .node2, .node3, .token_auth, .user_pass, .nkey_auth, .jwt_auth }) |node| {
         const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(@intFromEnum(node)) };
         const stream = address.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch return false;
         stream.close(io);
