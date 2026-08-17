@@ -55,6 +55,27 @@ pub const SliceReader = struct {
 // Default chunk size (128KB)
 const DEFAULT_CHUNK_SIZE: u32 = 128 * 1024;
 
+// Digest format per ADR-20: "SHA-256=<base64url of the hash>". The base64
+// alphabet is URL-safe *with* padding, matching base64.URLEncoding in the
+// reference Go client.
+const digest_prefix = "SHA-256=";
+const base64url = std.base64.url_safe;
+const digest_text_len = digest_prefix.len + base64url.Encoder.calcSize(std.crypto.hash.sha2.Sha256.digest_length);
+
+fn digestText(hash: [std.crypto.hash.sha2.Sha256.digest_length]u8, out: *[digest_text_len]u8) []const u8 {
+    @memcpy(out[0..digest_prefix.len], digest_prefix);
+    _ = base64url.Encoder.encode(out[digest_prefix.len..], &hash);
+    return out;
+}
+
+/// Object names are unrestricted, so they are base64url-encoded (with
+/// padding) to form the meta message subject token, per ADR-20.
+fn encodeName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    const buf = try allocator.alloc(u8, base64url.Encoder.calcSize(name.len));
+    _ = base64url.Encoder.encode(buf, name);
+    return buf;
+}
+
 // Object Store-specific errors
 pub const ObjectStoreError = error{
     StoreNotFound,
@@ -64,10 +85,10 @@ pub const ObjectStoreError = error{
     BadRequest,
 };
 
-/// Object metadata options
+/// Object metadata options. Field names match the ADR-20 JSON schema.
 pub const ObjectMetaOptions = struct {
     /// Custom chunk size for this object
-    chunk_size: ?u32 = null,
+    max_chunk_size: ?u32 = null,
 };
 
 /// Object metadata structure
@@ -104,18 +125,30 @@ pub const ObjectInfo = struct {
     deleted: bool = false,
 };
 
-/// ObjectInfo for JSON serialization (excludes mtime)
+/// ObjectInfo for JSON serialization, matching the ADR-20 schema (mtime is
+/// never stored; it is taken from the message timestamp when reading).
+/// Official clients omit empty fields (a tombstone has no "digest" key), so
+/// everything that can be absent has a default, and parsing must ignore
+/// unknown fields ("mtime", "headers", "metadata", ...).
 const ObjectInfoJson = struct {
     name: []const u8,
     description: ?[]const u8 = null,
-    opts: ?ObjectMetaOptions = null,
+    options: ?ObjectMetaOptions = null,
     bucket: []const u8,
     nuid: []const u8,
-    size: u64,
-    chunks: u32,
-    digest: []const u8,
+    size: u64 = 0,
+    chunks: u32 = 0,
+    digest: []const u8 = "",
     deleted: bool = false,
 };
+
+// alloc_always: parsed strings must be copies owned by the caller's arena,
+// not slices into the transient message payload.
+const info_json_parse_options: std.json.ParseOptions = .{
+    .ignore_unknown_fields = true,
+    .allocate = .alloc_always,
+};
+const info_json_stringify_options: std.json.Stringify.Options = .{ .emit_null_optional_fields = false };
 
 /// Configuration for creating object stores
 pub const ObjectStoreConfig = struct {
@@ -123,8 +156,6 @@ pub const ObjectStoreConfig = struct {
     store_name: []const u8,
     /// Description of the store
     description: ?[]const u8 = null,
-    /// Maximum object size in bytes (-1 = unlimited)
-    max_object_size: i64 = -1,
     /// Maximum store size in bytes (-1 = unlimited)
     max_bytes: i64 = -1,
     /// Storage type
@@ -237,12 +268,10 @@ pub const ObjectResult = struct {
 
     /// Verify the complete object integrity
     pub fn verify(self: *ObjectResult) !void {
-        const calculated_digest = self.digest.finalResult();
-        var digest_hex: [64]u8 = undefined;
-        const hex_digest = std.fmt.bytesToHex(calculated_digest, .lower);
-        @memcpy(&digest_hex, &hex_digest);
+        var digest_buf: [digest_text_len]u8 = undefined;
+        const calculated = digestText(self.digest.finalResult(), &digest_buf);
 
-        if (!std.mem.eql(u8, &digest_hex, self.info.digest)) {
+        if (!std.mem.eql(u8, calculated, self.info.digest)) {
             return ObjectStoreError.DigestMismatch;
         }
     }
@@ -302,9 +331,35 @@ pub const ObjectStore = struct {
         self.allocator.free(self.meta_subject_prefix);
     }
 
-    /// Get the meta subject for an object name
+    /// Get the meta subject for an object name; the name is base64url
+    /// encoded per ADR-20 since object names are unrestricted.
     fn getMetaSubject(self: *ObjectStore, object_name: []const u8) ![]u8 {
-        return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.meta_subject_prefix, object_name });
+        const encoded_name = try encodeName(self.allocator, object_name);
+        defer self.allocator.free(encoded_name);
+        return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.meta_subject_prefix, encoded_name });
+    }
+
+    /// Purge all chunk messages belonging to an object id.
+    fn purgeChunks(self: *ObjectStore, object_nuid: []const u8) !void {
+        const chunk_subject = try self.getChunkSubject(object_nuid);
+        defer self.allocator.free(chunk_subject);
+
+        const result = try self.js.purgeStream(self.stream_name, .{ .filter = chunk_subject });
+        result.deinit();
+    }
+
+    /// Publish an ObjectInfo JSON to the meta subject with the rollup
+    /// header, so only the latest info message is retained per subject.
+    fn publishMetaJson(self: *ObjectStore, meta_subject: []const u8, info_json: []const u8) !void {
+        const msg = try self.js.nc.newMsg();
+        defer msg.deinit();
+
+        try msg.setSubject(meta_subject, true);
+        try msg.setPayload(info_json, true);
+        try msg.headerSet("Nats-Rollup", "sub");
+
+        const ack = try self.js.publishMsg(msg, .{});
+        ack.deinit();
     }
 
     /// Get the chunk subject for an object NUID
@@ -324,15 +379,36 @@ pub const ObjectStore = struct {
 
         const arena_allocator = arena.allocator();
 
-        // Generate unique identifier for this object - owned by arena
+        // Generate unique identifier for this object - owned by arena.
+        // A fresh nuid is used even when the name is re-used, so the new
+        // chunks go to a new subject.
         const object_nuid = try nuid.nextString(arena_allocator);
+
+        // Look up an existing object with this name (including a deleted
+        // one), so its chunks can be purged after a successful replace.
+        var existing_nuid: ?[]u8 = null;
+        defer if (existing_nuid) |n| self.allocator.free(n);
+        var existing_deleted = false;
+        if (self.infoIncludingDeleted(meta.name)) |existing| {
+            defer existing.deinit();
+            existing_nuid = try self.allocator.dupe(u8, existing.value.nuid);
+            existing_deleted = existing.value.deleted;
+        } else |err| {
+            if (err != ObjectStoreError.ObjectNotFound) return err;
+        }
+
+        // From here on, any failure must clean up the chunks already
+        // published under the new nuid.
+        errdefer self.purgeChunks(object_nuid) catch |purge_err| {
+            log.warn("Failed to clean up partial object upload: {}", .{purge_err});
+        };
 
         // Initialize digest calculation
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
-        // Determine chunk size (use meta.opts.chunk_size or store default)
+        // Determine chunk size (use meta option or store default)
         const chunk_size = if (meta.opts) |opts|
-            opts.chunk_size orelse self.chunk_size
+            opts.max_chunk_size orelse self.chunk_size
         else
             self.chunk_size;
 
@@ -365,9 +441,8 @@ pub const ObjectStore = struct {
         }
 
         // Create digest string - owned by arena
-        const digest_bytes = hasher.finalResult();
-        const hex_digest = std.fmt.bytesToHex(digest_bytes, .lower);
-        const digest_hex = try arena_allocator.dupe(u8, &hex_digest);
+        var digest_buf: [digest_text_len]u8 = undefined;
+        const digest = try arena_allocator.dupe(u8, digestText(hasher.finalResult(), &digest_buf));
 
         const obj_info = ObjectInfo{
             .name = try arena_allocator.dupe(u8, meta.name),
@@ -377,19 +452,28 @@ pub const ObjectStore = struct {
             .nuid = object_nuid,
             .size = total_size,
             .chunks = chunk_count,
-            .digest = digest_hex,
+            .digest = digest,
             .deleted = false,
         };
 
-        // Store metadata
+        // Store metadata (rolled up per subject)
         const info_json = try self.serializeObjectInfo(obj_info);
         defer self.allocator.free(info_json);
 
         const meta_subject = try self.getMetaSubject(meta.name);
         defer self.allocator.free(meta_subject);
 
-        const meta_ack = try self.js.publish(meta_subject, info_json, .{});
-        defer meta_ack.deinit();
+        try self.publishMetaJson(meta_subject, info_json);
+
+        // The object was replaced: purge the chunks of its predecessor
+        // (a deleted predecessor had its chunks purged already).
+        if (existing_nuid) |old_nuid| {
+            if (!existing_deleted) {
+                self.purgeChunks(old_nuid) catch |err| {
+                    log.warn("Failed to purge chunks of replaced object: {}", .{err});
+                };
+            }
+        }
 
         return Result(ObjectInfo){
             .arena = arena,
@@ -407,7 +491,7 @@ pub const ObjectStore = struct {
             .name = object_name,
             .description = null,
             .opts = ObjectMetaOptions{
-                .chunk_size = self.chunk_size,
+                .max_chunk_size = self.chunk_size,
             },
         };
 
@@ -437,13 +521,13 @@ pub const ObjectStore = struct {
         const arena_allocator = arena.allocator();
 
         // Parse object info JSON using arena allocator
-        const parsed = try std.json.parseFromSlice(ObjectInfoJson, arena_allocator, meta_msg.data, .{});
+        const parsed = try std.json.parseFromSlice(ObjectInfoJson, arena_allocator, meta_msg.data, info_json_parse_options);
 
         // Convert from JSON version to full ObjectInfo with proper string ownership
         const obj_info = ObjectInfo{
             .name = parsed.value.name,
             .description = parsed.value.description,
-            .opts = parsed.value.opts,
+            .opts = parsed.value.options,
             .bucket = parsed.value.bucket,
             .nuid = parsed.value.nuid,
             .size = parsed.value.size,
@@ -531,8 +615,19 @@ pub const ObjectStore = struct {
         };
     }
 
-    /// Get object metadata
+    /// Get object metadata. Deleted objects are treated as not found.
     pub fn info(self: *ObjectStore, object_name: []const u8) !Result(ObjectInfo) {
+        const result = try self.infoIncludingDeleted(object_name);
+        errdefer result.deinit();
+
+        if (result.value.deleted) {
+            return ObjectStoreError.ObjectNotFound;
+        }
+        return result;
+    }
+
+    /// Get object metadata, including tombstones of deleted objects.
+    fn infoIncludingDeleted(self: *ObjectStore, object_name: []const u8) !Result(ObjectInfo) {
         try validation.validateOSObjectName(object_name);
 
         const meta_subject = try self.getMetaSubject(object_name);
@@ -551,13 +646,13 @@ pub const ObjectStore = struct {
         const arena_allocator = arena.allocator();
 
         // Parse object info JSON using arena allocator
-        const parsed = try std.json.parseFromSlice(ObjectInfoJson, arena_allocator, meta_msg.data, .{});
+        const parsed = try std.json.parseFromSlice(ObjectInfoJson, arena_allocator, meta_msg.data, info_json_parse_options);
 
         // Convert from JSON version to full ObjectInfo with proper string ownership
         const obj_info = ObjectInfo{
             .name = parsed.value.name,
             .description = parsed.value.description,
-            .opts = parsed.value.opts,
+            .opts = parsed.value.options,
             .bucket = parsed.value.bucket,
             .nuid = parsed.value.nuid,
             .size = parsed.value.size,
@@ -576,26 +671,24 @@ pub const ObjectStore = struct {
         };
     }
 
-    /// Delete an object (marks as deleted)
+    /// Delete an object: write a rolled-up tombstone with zeroed instance
+    /// fields, then purge the object's chunks.
     pub fn delete(self: *ObjectStore, object_name: []const u8) !void {
-        // Get current metadata
+        // Get current metadata; a deleted object is reported as not found.
         const info_result = try self.info(object_name);
         defer info_result.deinit();
         const obj_info = info_result.value;
 
-        if (obj_info.deleted) {
-            return ObjectStoreError.ObjectNotFound;
-        }
-
-        // Create updated object info with deleted flag
+        // Tombstone per ADR-20: meta is kept, instance fields are zeroed.
         const updated_info = ObjectInfo{
-            .name = object_name,
+            .name = obj_info.name,
             .description = obj_info.description,
+            .opts = obj_info.opts,
             .bucket = self.store_name,
             .nuid = obj_info.nuid,
-            .size = obj_info.size,
-            .chunks = obj_info.chunks,
-            .digest = obj_info.digest,
+            .size = 0,
+            .chunks = 0,
+            .digest = "",
             .deleted = true,
         };
 
@@ -606,8 +699,10 @@ pub const ObjectStore = struct {
         const meta_subject = try self.getMetaSubject(object_name);
         defer self.allocator.free(meta_subject);
 
-        const result = try self.js.publish(meta_subject, info_json, .{});
-        defer result.deinit();
+        try self.publishMetaJson(meta_subject, info_json);
+
+        // Reclaim the object's data
+        try self.purgeChunks(obj_info.nuid);
     }
 
     /// List all objects in the store
@@ -653,7 +748,7 @@ pub const ObjectStore = struct {
             defer js_msg.deinit();
 
             // Parse metadata using temporary allocator
-            const parsed = try std.json.parseFromSlice(ObjectInfoJson, self.allocator, js_msg.msg.data, .{});
+            const parsed = try std.json.parseFromSlice(ObjectInfoJson, self.allocator, js_msg.msg.data, info_json_parse_options);
             defer parsed.deinit();
             const meta = parsed.value;
 
@@ -662,7 +757,7 @@ pub const ObjectStore = struct {
                 const obj_info = ObjectInfo{
                     .name = try arena_allocator.dupe(u8, meta.name),
                     .description = if (meta.description) |desc| try arena_allocator.dupe(u8, desc) else null,
-                    .opts = meta.opts,
+                    .opts = meta.options,
                     .bucket = try arena_allocator.dupe(u8, meta.bucket),
                     .nuid = try arena_allocator.dupe(u8, meta.nuid),
                     .size = meta.size,
@@ -693,7 +788,7 @@ pub const ObjectStore = struct {
         const json_info = ObjectInfoJson{
             .name = obj_info.name,
             .description = obj_info.description,
-            .opts = obj_info.opts,
+            .options = obj_info.opts,
             .bucket = obj_info.bucket,
             .nuid = obj_info.nuid,
             .size = obj_info.size,
@@ -701,7 +796,7 @@ pub const ObjectStore = struct {
             .digest = obj_info.digest,
             .deleted = obj_info.deleted,
         };
-        return jsonStringifyAlloc(self.allocator, json_info, .{});
+        return jsonStringifyAlloc(self.allocator, json_info, info_json_stringify_options);
     }
 };
 
@@ -735,7 +830,6 @@ pub const ObjectStoreManager = struct {
             .description = config.description,
             .subjects = &.{ chunk_subject, meta_subject },
             .retention = .limits,
-            .max_msg_size = @intCast(config.max_object_size),
             .max_bytes = config.max_bytes,
             .storage = switch (config.storage) {
                 .file => .file,
@@ -786,10 +880,8 @@ test "validation delegates to validation.zig" {
     try std.testing.expectError(error.InvalidOSBucketName, validation.validateOSBucketName("foo bar"));
     try std.testing.expectError(error.InvalidOSBucketName, validation.validateOSBucketName("foo.bar"));
 
+    // Object names are unrestricted per ADR-20; only empty is invalid.
     try validation.validateOSObjectName("valid-object/name_123.txt");
+    try validation.validateOSObjectName("any name with spaces & symbols!");
     try std.testing.expectError(error.InvalidOSObjectName, validation.validateOSObjectName(""));
-    try std.testing.expectError(error.InvalidOSObjectName, validation.validateOSObjectName("/starts-with-slash"));
-    try std.testing.expectError(error.InvalidOSObjectName, validation.validateOSObjectName("ends-with-slash/"));
-    try std.testing.expectError(error.InvalidOSObjectName, validation.validateOSObjectName(".starts-with-dot"));
-    try std.testing.expectError(error.InvalidOSObjectName, validation.validateOSObjectName("ends-with-dot."));
 }

@@ -171,13 +171,13 @@ test "ObjectStore delete operations" {
     // Delete object
     try objstore.delete(object_name);
 
-    // Verify object is deleted
+    // Verify object is deleted; per ADR-20, deleted objects are treated
+    // as not found by both get and info.
     try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.getBytes(object_name));
+    try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.info(object_name));
 
-    // Info should show deleted status
-    const info_result = try objstore.info(object_name);
-    defer info_result.deinit();
-    try testing.expect(info_result.value.deleted);
+    // Deleting a deleted object reports not found as well.
+    try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.delete(object_name));
 }
 
 test "ObjectStore list operations" {
@@ -261,16 +261,13 @@ test "ObjectStore validation" {
     try testing.expectError(error.InvalidOSBucketName, nats.validateOSBucketName("invalid space"));
     try testing.expectError(error.InvalidOSBucketName, nats.validateOSBucketName("invalid.dot"));
 
-    // Test object name validation
+    // Object names are unrestricted per ADR-20; only empty is invalid.
     try testing.expectError(error.InvalidOSObjectName, nats.validateOSObjectName(""));
-    try testing.expectError(error.InvalidOSObjectName, nats.validateOSObjectName("/starts-with-slash"));
-    try testing.expectError(error.InvalidOSObjectName, nats.validateOSObjectName("ends-with-slash/"));
-    try testing.expectError(error.InvalidOSObjectName, nats.validateOSObjectName(".starts-with-dot"));
-    try testing.expectError(error.InvalidOSObjectName, nats.validateOSObjectName("ends-with-dot."));
 
     // Valid names should pass
     try nats.validateOSBucketName("valid-store_name123");
     try nats.validateOSObjectName("valid-object/name_123.txt");
+    try nats.validateOSObjectName("any name, even with spaces & symbols!");
 }
 
 test "ObjectStore error handling" {
@@ -302,4 +299,107 @@ test "ObjectStore error handling" {
 
     // Try to delete non-existent object
     try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.delete("nonexistent.txt"));
+}
+
+test "ObjectStore wire format matches ADR-20" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    const js = conn.jetstream(.{});
+
+    const store_name = try utils.generateUniqueName(testing.allocator, "wirestore");
+    defer testing.allocator.free(store_name);
+
+    var objstore_manager = js.objectStoreManager();
+    var objstore = try objstore_manager.createStore(.{
+        .store_name = store_name,
+        .chunk_size = 8,
+    });
+    defer objstore.deinit();
+
+    // A name that is not subject-safe, so it must be base64url-encoded.
+    const object_name = "dir/some file.txt";
+    const content = "hello object store wire format"; // 30 bytes -> 4 chunks of 8
+
+    var put_result = try objstore.putBytes(object_name, content);
+    defer put_result.deinit();
+
+    // The meta message must live on $O.<bucket>.M.<base64url(name)>,
+    // fetched here through the raw stream API, not the ObjectStore API.
+    var name_buf: [64]u8 = undefined;
+    const encoded_name = std.base64.url_safe.Encoder.encode(&name_buf, object_name);
+    const meta_subject = try std.fmt.allocPrint(testing.allocator, "$O.{s}.M.{s}", .{ store_name, encoded_name });
+    defer testing.allocator.free(meta_subject);
+    const stream_name = try std.fmt.allocPrint(testing.allocator, "OBJ_{s}", .{store_name});
+    defer testing.allocator.free(stream_name);
+
+    {
+        const meta_msg = try js.getMsg(stream_name, .{ .last_by_subj = meta_subject, .direct = true });
+        defer meta_msg.deinit();
+
+        // The raw JSON must follow the ADR-20 schema.
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, meta_msg.data, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+
+        try testing.expect(obj.get("opts") == null); // pre-ADR schema must be gone
+        try testing.expectEqual(@as(i64, 4), obj.get("chunks").?.integer);
+        try testing.expectEqual(@as(i64, content.len), obj.get("size").?.integer);
+
+        const options = obj.get("options").?.object;
+        try testing.expectEqual(@as(i64, 8), options.get("max_chunk_size").?.integer);
+
+        // Digest: "SHA-256=" + padded base64url of the SHA-256 hash.
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(content, &hash, .{});
+        var digest_value_buf: [64]u8 = undefined;
+        const digest_value = std.base64.url_safe.Encoder.encode(&digest_value_buf, &hash);
+        const expected_digest = try std.fmt.allocPrint(testing.allocator, "SHA-256={s}", .{digest_value});
+        defer testing.allocator.free(expected_digest);
+        try testing.expectEqualStrings(expected_digest, obj.get("digest").?.string);
+    }
+
+    // 4 chunks + 1 meta message in the stream.
+    {
+        const si = try js.getStreamInfo(stream_name);
+        defer si.deinit();
+        try testing.expectEqual(@as(u64, 5), si.value.state.messages);
+    }
+
+    // Replace the object: the meta message rolls up and the previous
+    // object's chunks are purged, leaving 1 new chunk + 1 meta.
+    var put2_result = try objstore.putBytes(object_name, "xy");
+    defer put2_result.deinit();
+
+    {
+        const si = try js.getStreamInfo(stream_name);
+        defer si.deinit();
+        try testing.expectEqual(@as(u64, 2), si.value.state.messages);
+    }
+
+    // Delete: rolled-up tombstone with zeroed instance fields, chunks purged.
+    try objstore.delete(object_name);
+
+    {
+        const tomb_msg = try js.getMsg(stream_name, .{ .last_by_subj = meta_subject, .direct = true });
+        defer tomb_msg.deinit();
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, tomb_msg.data, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+
+        try testing.expectEqual(true, obj.get("deleted").?.bool);
+        try testing.expectEqual(@as(i64, 0), obj.get("size").?.integer);
+        try testing.expectEqual(@as(i64, 0), obj.get("chunks").?.integer);
+    }
+
+    {
+        const si = try js.getStreamInfo(stream_name);
+        defer si.deinit();
+        try testing.expectEqual(@as(u64, 1), si.value.state.messages);
+    }
+
+    try objstore_manager.deleteStore(store_name);
 }
