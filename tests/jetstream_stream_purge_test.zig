@@ -20,12 +20,11 @@ test "purge stream" {
     defer stream_info.deinit();
 
     // Publish some messages to the stream
-    try conn.publish("test.purge.msg1", "First message");
-    try conn.publish("test.purge.msg2", "Second message");
-    try conn.publish("test.purge.msg3", "Third message");
+    try utils.jsPublish(&js, "test.purge.msg1", "First message");
+    try utils.jsPublish(&js, "test.purge.msg2", "Second message");
+    try utils.jsPublish(&js, "test.purge.msg3", "Third message");
 
     // Flush to ensure messages are sent to the server
-    try conn.flush();
 
     // Test basic purge (purge all messages)
     var purge_result = try js.purgeStream("TEST_PURGE_STREAM", .{});
@@ -53,12 +52,11 @@ test "purge stream with filter" {
     defer stream_info.deinit();
 
     // Publish messages with different subjects
-    try conn.publish("test.filter.keep", "Keep this message");
-    try conn.publish("test.filter.purge", "Purge this message");
-    try conn.publish("test.filter.purge", "Purge this message too");
+    try utils.jsPublish(&js, "test.filter.keep", "Keep this message");
+    try utils.jsPublish(&js, "test.filter.purge", "Purge this message");
+    try utils.jsPublish(&js, "test.filter.purge", "Purge this message too");
 
     // Flush to ensure messages are sent to the server
-    try conn.flush();
 
     // Test purge with filter (only purge messages with "purge" subject)
     var purge_result = try js.purgeStream("TEST_PURGE_FILTER_STREAM", .{
@@ -88,13 +86,12 @@ test "purge stream with sequence limit" {
     defer stream_info.deinit();
 
     // Publish messages
-    try conn.publish("test.seq.msg", "Message 1");
-    try conn.publish("test.seq.msg", "Message 2");
-    try conn.publish("test.seq.msg", "Message 3");
-    try conn.publish("test.seq.msg", "Message 4");
+    try utils.jsPublish(&js, "test.seq.msg", "Message 1");
+    try utils.jsPublish(&js, "test.seq.msg", "Message 2");
+    try utils.jsPublish(&js, "test.seq.msg", "Message 3");
+    try utils.jsPublish(&js, "test.seq.msg", "Message 4");
 
     // Flush to ensure messages are sent to the server
-    try conn.flush();
 
     // Test purge up to sequence 3 (should purge messages 1 and 2)
     var purge_result = try js.purgeStream("TEST_PURGE_SEQ_STREAM", .{
@@ -123,14 +120,13 @@ test "purge stream with keep parameter" {
     defer stream_info.deinit();
 
     // Publish messages
-    try conn.publish("test.keep.msg", "Message 1");
-    try conn.publish("test.keep.msg", "Message 2");
-    try conn.publish("test.keep.msg", "Message 3");
-    try conn.publish("test.keep.msg", "Message 4");
-    try conn.publish("test.keep.msg", "Message 5");
+    try utils.jsPublish(&js, "test.keep.msg", "Message 1");
+    try utils.jsPublish(&js, "test.keep.msg", "Message 2");
+    try utils.jsPublish(&js, "test.keep.msg", "Message 3");
+    try utils.jsPublish(&js, "test.keep.msg", "Message 4");
+    try utils.jsPublish(&js, "test.keep.msg", "Message 5");
 
     // Flush to ensure messages are sent to the server
-    try conn.flush();
 
     // Test purge with keep=2 (should keep the 2 most recent messages)
     var purge_result = try js.purgeStream("TEST_PURGE_KEEP_STREAM", .{

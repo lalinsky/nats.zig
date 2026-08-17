@@ -26,10 +26,9 @@ test "delete message" {
     defer stream_info.deinit();
 
     // Publish test messages
-    try conn.publish(subject, "Message 1");
-    try conn.publish(subject, "Message 2");
-    try conn.publish(subject, "Message 3");
-    try conn.flush();
+    try utils.jsPublish(&js, subject, "Message 1");
+    try utils.jsPublish(&js, subject, "Message 2");
+    try utils.jsPublish(&js, subject, "Message 3");
 
     // Verify message exists before deletion
     const msg2_before = try js.getMsg(stream_name, .{ .seq = 2 });
@@ -77,10 +76,9 @@ test "erase message" {
     defer stream_info.deinit();
 
     // Publish test messages
-    try conn.publish(subject, "Message 1");
-    try conn.publish(subject, "Message 2");
-    try conn.publish(subject, "Message 3");
-    try conn.flush();
+    try utils.jsPublish(&js, subject, "Message 1");
+    try utils.jsPublish(&js, subject, "Message 2");
+    try utils.jsPublish(&js, subject, "Message 3");
 
     // Verify message exists before erasure
     const msg2_before = try js.getMsg(stream_name, .{ .seq = 2 });
@@ -128,11 +126,10 @@ test "delete vs erase message behavior" {
     defer stream_info.deinit();
 
     // Publish test messages
-    try conn.publish(subject, "Message 1");
-    try conn.publish(subject, "Message 2");
-    try conn.publish(subject, "Message 3");
-    try conn.publish(subject, "Message 4");
-    try conn.flush();
+    try utils.jsPublish(&js, subject, "Message 1");
+    try utils.jsPublish(&js, subject, "Message 2");
+    try utils.jsPublish(&js, subject, "Message 3");
+    try utils.jsPublish(&js, subject, "Message 4");
 
     // Test deleteMsg (marks as deleted, doesn't erase from storage)
     const deleted = try js.deleteMsg(stream_name, 2);
@@ -186,8 +183,7 @@ test "delete message error cases" {
     defer stream_info.deinit();
 
     // Publish one message
-    try conn.publish(subject, "Test message");
-    try conn.flush();
+    try utils.jsPublish(&js, subject, "Test message");
 
     // Test deleting non-existent message
     const delete_nonexistent_msg = js.deleteMsg(stream_name, 999);
