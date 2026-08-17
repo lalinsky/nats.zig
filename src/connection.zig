@@ -1185,7 +1185,25 @@ pub const Connection = struct {
             }
         }
 
-        try exit_signal.event.wait(self.io);
+        // Wait for the connection to end, waking up on the keep-alive
+        // interval to send PINGs. The manager task is otherwise idle while
+        // the connection is up, so it doubles as the heartbeat timer; this
+        // is the only path that sends keep-alive PINGs, so an idle or
+        // half-open connection is detected even when nothing is received.
+        if (self.options.ping_interval.nanoseconds == 0) {
+            try exit_signal.event.wait(self.io);
+        } else {
+            while (true) {
+                exit_signal.event.waitTimeout(self.io, .{ .duration = .{ .raw = self.options.ping_interval, .clock = .awake } }) catch |err| switch (err) {
+                    error.Timeout => {
+                        try self.checkAndSendPing();
+                        continue;
+                    },
+                    error.Canceled => |e| return e,
+                };
+                break;
+            }
+        }
 
         switch (exit_signal.reason.load(.acquire)) {
             .none => unreachable, // the event is only set by signal()
@@ -1244,8 +1262,6 @@ pub const Connection = struct {
             log.debug("Read {} bytes: {s}", .{ data.len, data });
             try self.parser.parse(self, data);
             reader.toss(data.len);
-
-            try self.checkAndSendPing();
         }
     }
 
