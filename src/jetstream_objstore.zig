@@ -32,12 +32,25 @@ const log = @import("log.zig").log;
 
 // Helper function to replace std.json.stringifyAlloc
 fn jsonStringifyAlloc(allocator: std.mem.Allocator, value: anytype, options: std.json.Stringify.Options) ![]u8 {
-    var buffer = std.ArrayList(u8){};
-    defer buffer.deinit(allocator);
+    var buffer: std.Io.Writer.Allocating = .init(allocator);
+    defer buffer.deinit();
 
-    try std.fmt.format(buffer.writer(allocator), "{f}", .{std.json.fmt(value, options)});
-    return buffer.toOwnedSlice(allocator);
+    try buffer.writer.print("{f}", .{std.json.fmt(value, options)});
+    return buffer.toOwnedSlice();
 }
+
+/// Simple reader over a byte slice, usable with `ObjectStore.put`.
+pub const SliceReader = struct {
+    data: []const u8,
+    pos: usize = 0,
+
+    pub fn read(self: *SliceReader, buffer: []u8) error{}!usize {
+        const n = @min(buffer.len, self.data.len - self.pos);
+        @memcpy(buffer[0..n], self.data[self.pos..][0..n]);
+        self.pos += n;
+        return n;
+    }
+};
 
 // Default chunk size (128KB)
 const DEFAULT_CHUNK_SIZE: u32 = 128 * 1024;
@@ -84,7 +97,7 @@ pub const ObjectInfo = struct {
     /// Number of chunks
     chunks: u32,
     /// Last modified time (from message timestamp, not stored in JSON)
-    mtime: u64 = 0,
+    mtime: std.Io.Timestamp = .zero,
     /// SHA-256 digest hex string
     digest: []const u8,
     /// True if object is deleted
@@ -178,8 +191,8 @@ pub const ObjectResult = struct {
             }
 
             // Get next chunk from subscription
-            const timeout_ms = sub.js.nc.options.timeout_ms;
-            const js_msg = try sub.nextMsg(timeout_ms);
+            const request_timeout = sub.js.nc.options.timeout;
+            const js_msg = try sub.nextMsg(request_timeout);
 
             // Store the message pointer and reset position
             self.current_msg = js_msg;
@@ -386,8 +399,8 @@ pub const ObjectStore = struct {
 
     /// Put bytes as an object into the store (convenience method)
     pub fn putBytes(self: *ObjectStore, object_name: []const u8, data: []const u8) !Result(ObjectInfo) {
-        // Create a fixed buffer stream from the data
-        var stream = std.io.fixedBufferStream(data);
+        // Create a slice reader from the data
+        var stream = SliceReader{ .data = data };
 
         // Create ObjectMeta with store's default chunk size
         const meta = ObjectMeta{
@@ -399,7 +412,7 @@ pub const ObjectStore = struct {
         };
 
         // Use the primary put() method with the stream reader
-        return self.put(meta, stream.reader());
+        return self.put(meta, &stream);
     }
 
     /// Primary get method that returns a streaming result
@@ -629,9 +642,9 @@ pub const ObjectStore = struct {
         var objects = try std.ArrayList(ObjectInfo).initCapacity(arena_allocator, 64);
 
         // Collect all objects (including deleted ones, to be filtered later)
-        const timeout_ms = self.js.nc.options.timeout_ms;
+        const request_timeout = self.js.nc.options.timeout;
         while (true) {
-            const js_msg = sub.nextMsg(timeout_ms) catch |err| {
+            const js_msg = sub.nextMsg(request_timeout) catch |err| {
                 if (err == error.Timeout) {
                     break;
                 }

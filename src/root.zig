@@ -78,6 +78,7 @@ pub const Result = @import("result.zig").Result;
 pub const ObjectStore = @import("jetstream_objstore.zig").ObjectStore;
 pub const ObjectStoreManager = @import("jetstream_objstore.zig").ObjectStoreManager;
 pub const ObjectMeta = @import("jetstream_objstore.zig").ObjectMeta;
+pub const SliceReader = @import("jetstream_objstore.zig").SliceReader;
 pub const ObjectInfo = @import("jetstream_objstore.zig").ObjectInfo;
 pub const ObjectStoreConfig = @import("jetstream_objstore.zig").ObjectStoreConfig;
 pub const ObjectStoreError = @import("jetstream_objstore.zig").ObjectStoreError;
@@ -87,6 +88,7 @@ pub const ObjectResult = @import("jetstream_objstore.zig").ObjectResult;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("net_util.zig");
     _ = @import("jetstream.zig");
     _ = @import("jetstream_message.zig");
     _ = @import("jetstream_kv.zig");

@@ -147,20 +147,20 @@ test "Message header encoding" {
     try msg.headerSet("Content-Type", "application/json");
     try msg.headerSet("X-Custom", "value");
 
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
 
-    try msg.encodeHeaders(buf.writer(allocator));
+    try msg.encodeHeaders(&buf.writer);
 
     // Should start with NATS/1.0
-    try testing.expect(std.mem.startsWith(u8, buf.items, "NATS/1.0\r\n"));
+    try testing.expect(std.mem.startsWith(u8, buf.written(), "NATS/1.0\r\n"));
 
     // Should contain headers
-    try testing.expect(std.mem.indexOf(u8, buf.items, "Content-Type: application/json\r\n") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "X-Custom: value\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "Content-Type: application/json\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "X-Custom: value\r\n") != null);
 
     // Should end with double CRLF
-    try testing.expect(std.mem.endsWith(u8, buf.items, "\r\n\r\n"));
+    try testing.expect(std.mem.endsWith(u8, buf.written(), "\r\n\r\n"));
 }
 
 test "Message status field and header parsing" {
@@ -196,20 +196,20 @@ test "Message status field and header parsing" {
     try testing.expectEqualStrings("test", custom_header.?);
 
     // Test encoding - Status header should be first line
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
 
-    try msg.encodeHeaders(buf.writer(allocator));
+    try msg.encodeHeaders(&buf.writer);
 
     // Should start with the full status line
-    try testing.expect(std.mem.startsWith(u8, buf.items, "NATS/1.0 503 No Responders\r\n"));
+    try testing.expect(std.mem.startsWith(u8, buf.written(), "NATS/1.0 503 No Responders\r\n"));
 
     // Should contain other headers
-    try testing.expect(std.mem.indexOf(u8, buf.items, "X-Custom: test\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "X-Custom: test\r\n") != null);
 
     // Should NOT contain Status or Description as regular headers
-    try testing.expect(std.mem.indexOf(u8, buf.items, "Status: 503\r\n") == null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "Description: No Responders\r\n") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "Status: 503\r\n") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "Description: No Responders\r\n") == null);
 }
 
 test "Message memory patterns" {

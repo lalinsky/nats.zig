@@ -13,7 +13,10 @@
 // limitations under the License.
 
 const std = @import("std");
-const Mutex = std.Thread.Mutex;
+
+fn randomBytes(buffer: []u8) void {
+    std.Io.Threaded.global_single_threaded.io().random(buffer);
+}
 
 /// NUID (NATS Unique Identifier) implementation
 /// Uses 12 bytes of crypto-generated prefix + 10 bytes of sequential data
@@ -40,7 +43,7 @@ const Nuid = struct {
     fn randomizePrefix(self: *Nuid) void {
         // Generate a random number up to MAX_PREFIX and encode it in base36
         var random_bytes: [8]u8 = undefined;
-        std.crypto.random.bytes(&random_bytes);
+        randomBytes(&random_bytes);
 
         const random_val = std.mem.readInt(u64, &random_bytes, .little) % MAX_PREFIX;
         encodeBase36(random_val, self.prefix[0..]);
@@ -49,7 +52,7 @@ const Nuid = struct {
     fn resetSequence(self: *Nuid) void {
         // Generate random sequence start and increment
         var random_bytes: [16]u8 = undefined;
-        std.crypto.random.bytes(&random_bytes);
+        randomBytes(&random_bytes);
 
         const inc_random = std.mem.readInt(u64, random_bytes[0..8], .little);
         self.increment = MIN_INCREMENT + (inc_random % (MAX_INCREMENT - MIN_INCREMENT + 1));
@@ -79,19 +82,19 @@ const Nuid = struct {
 
 /// Thread-safe global NUID instance
 const GlobalNuid = struct {
-    mutex: Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     nuid: Nuid = .{},
 
     fn reset(self: *GlobalNuid) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
 
         self.nuid = .{};
     }
 
     fn next(self: *GlobalNuid, buffer: *[NUID_TOTAL_LEN]u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
 
         self.nuid.next(buffer);
     }

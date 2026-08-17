@@ -12,7 +12,9 @@
 // limitations under the License.
 
 const std = @import("std");
-const zio = @import("zio");
+const xsync = @import("xsync");
+const Io = std.Io;
+const io_util = @import("io_util.zig");
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const RefCounter = @import("ref_counter.zig").RefCounter;
@@ -51,8 +53,8 @@ pub const Subscription = struct {
     // Callback support
     handler: ?MsgHandler = null,
 
-    // Handler fiber group (for async subscriptions only)
-    handler_group: zio.Group = .init,
+    // Handler task group (for async subscriptions only)
+    handler_group: Io.Group = .init,
 
     // Track pending messages and bytes for both sync and async subscriptions
     pending_msgs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -64,7 +66,7 @@ pub const Subscription = struct {
 
     // Drain state
     draining: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    drain_complete: zio.ResetEvent = .init,
+    drain_complete: xsync.Event = .init,
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
@@ -83,7 +85,7 @@ pub const Subscription = struct {
             .sid = sid,
             .subject = subject_copy,
             .queue = queue_group_copy,
-            .messages = MessageQueue.init(nc.allocator, .{}),
+            .messages = MessageQueue.init(nc.allocator, nc.io, .{}),
             .handler = handler,
         };
 
@@ -101,7 +103,7 @@ pub const Subscription = struct {
     pub fn startHandler(self: *Subscription) !void {
         if (self.handler == null) return; // Sync subscription, no handler fiber needed
 
-        try self.handler_group.spawn(handlerLoop, .{self});
+        try self.handler_group.concurrent(self.nc.io, handlerLoop, .{self});
     }
 
     /// Handler fiber loop - waits for messages and calls the handler
@@ -110,8 +112,8 @@ pub const Subscription = struct {
 
         while (true) {
             // Wait for a message with timeout (allows periodic checking)
-            const msg = self.messages.pop(100) catch |err| {
-                if (err == error.QueueClosed or err == error.Canceled) {
+            const msg = self.messages.pop(.fromMilliseconds(100)) catch |err| {
+                if (err == error.Closed or err == error.Canceled) {
                     log.debug("Subscription {} queue closed, stopping handler", .{self.sid});
                     break;
                 }
@@ -127,9 +129,14 @@ pub const Subscription = struct {
             const message_data_len = msg.data.len;
 
             // Call the handler
+            var canceled = false;
             if (self.handler) |handler| {
                 handler.call(msg) catch |err| {
-                    log.err("Message handler failed for subscription {}: {}", .{ self.sid, err });
+                    if (err == error.Canceled) {
+                        canceled = true;
+                    } else {
+                        log.err("Message handler failed for subscription {}: {}", .{ self.sid, err });
+                    }
                 };
             } else {
                 // No handler - shouldn't happen for async subscriptions
@@ -139,6 +146,11 @@ pub const Subscription = struct {
 
             // Decrement pending counters after handler completes
             decrementPending(self, message_data_len);
+
+            if (canceled) {
+                log.debug("Handler fiber for subscription {} canceled, stopping", .{self.sid});
+                break;
+            }
 
             // Check if we've reached autounsubscribe limit
             if (max > 0 and delivered >= max) {
@@ -159,8 +171,8 @@ pub const Subscription = struct {
     }
 
     fn destroy(self: *Subscription) void {
-        // Cancel handler fiber group and wait for completion
-        self.handler_group.cancel();
+        // Cancel handler task group and wait for completion
+        self.handler_group.cancel(self.nc.io);
 
         self.nc.allocator.free(self.subject);
 
@@ -205,9 +217,15 @@ pub const Subscription = struct {
 
         // Send UNSUB to server
         self.nc.unsubscribeInternal(self.sid, null) catch |err| {
-            // Even with this failing, once we set draining to true,
-            // messages will be dropped, so it's OK to continue
-            log.err("Failed to send UNSUB for sid {d}: {}", .{ self.sid, err });
+            if (err == error.Canceled) {
+                // This is a void-returning path; re-arm the cancelation so
+                // the caller's next cancelation point still observes it.
+                self.nc.io.recancel();
+            } else {
+                // Even with this failing, once we set draining to true,
+                // messages will be dropped, so it's OK to continue
+                log.err("Failed to send UNSUB for sid {d}: {}", .{ self.sid, err });
+            }
         };
     }
 
@@ -219,16 +237,17 @@ pub const Subscription = struct {
         return self.draining.load(.acquire) and self.drain_complete.isSet();
     }
 
-    pub fn waitForDrainCompletion(self: *Subscription, timeout_ms: u64) !void {
+    /// Wait for the subscription drain to finish. A null timeout waits
+    /// indefinitely.
+    pub fn waitForDrainCompletion(self: *Subscription, timeout: ?Io.Duration) !void {
         if (!self.draining.load(.acquire)) {
             return error.NotDraining;
         }
 
-        if (timeout_ms == 0) {
-            // No timeout - wait indefinitely
-            try self.drain_complete.wait();
+        if (timeout) |t| {
+            try self.drain_complete.waitTimeout(self.nc.io, io_util.timeout(t));
         } else {
-            try self.drain_complete.timedWait(.fromMilliseconds(timeout_ms));
+            try self.drain_complete.wait(self.nc.io);
         }
     }
 
@@ -241,7 +260,7 @@ pub const Subscription = struct {
 
     /// Issues an automatic unsubscribe that is processed by the server when 'max' messages have been received.
     /// This can be useful when sending a request to an unknown number of subscribers.
-    pub fn autoUnsubscribe(self: *Subscription, max: u64) AutoUnsubscribeError!void {
+    pub fn autoUnsubscribe(self: *Subscription, max: u64) (Io.Cancelable || AutoUnsubscribeError)!void {
         if (max == 0) return AutoUnsubscribeError.InvalidMax;
 
         const current_delivered = self.delivered_msgs.load(.acquire);
@@ -250,7 +269,8 @@ pub const Subscription = struct {
         }
 
         // Send protocol message to server first
-        self.nc.unsubscribeInternal(self.sid, max) catch {
+        self.nc.unsubscribeInternal(self.sid, max) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
             return AutoUnsubscribeError.SendFailed;
         };
 
@@ -258,17 +278,19 @@ pub const Subscription = struct {
         self.max_msgs.store(max, .release);
     }
 
-    pub fn nextMsg(self: *Subscription, timeout_ms: u64) (zio.Cancelable || error{Timeout})!*Message {
+    /// Wait for the next message. `.zero` is non-blocking, `.max` waits
+    /// forever. Returns `error.ConnectionClosed` once the subscription's
+    /// queue has been closed and drained.
+    pub fn nextMsg(self: *Subscription, timeout: Io.Duration) (Io.Cancelable || error{ Timeout, ConnectionClosed })!*Message {
         // Check if subscription has reached autounsubscribe limit
         const max = self.max_msgs.load(.acquire);
         if (max > 0 and self.delivered_msgs.load(.acquire) >= max) {
             return error.Timeout; // Consistent with "no more messages" semantics
         }
 
-        const msg = self.messages.pop(timeout_ms) catch |err| switch (err) {
-            error.BufferFrozen => return error.Timeout,
-            error.QueueEmpty => return error.Timeout,
-            error.QueueClosed => return error.Timeout, // TODO: this should be mapped to ConnectionClosed
+        const msg = self.messages.pop(timeout) catch |err| switch (err) {
+            error.WouldBlock => return error.Timeout,
+            error.Closed => return error.ConnectionClosed,
             error.Canceled => return error.Canceled,
         };
 
@@ -339,7 +361,7 @@ pub fn decrementPending(sub: *Subscription, msg_size: usize) void {
     // Check if drain is complete (we just decremented from 1 to 0)
     if (sub.draining.load(.acquire) and remaining_msgs == 1) {
         log.debug("Subscription {d} drain completed", .{sub.sid});
-        sub.drain_complete.set();
+        sub.drain_complete.set(sub.nc.io);
         sub.nc.notifySubscriptionDrainComplete();
     }
 }

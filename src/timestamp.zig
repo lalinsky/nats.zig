@@ -12,10 +12,11 @@
 // limitations under the License.
 
 const std = @import("std");
+const Io = std.Io;
 
-/// Parse ISO 8601 timestamp to nanoseconds since Unix epoch
-/// Format: "2025-09-05T05:36:18.039840444Z"
-pub fn parseTimestamp(timestamp_str: []const u8) !u64 {
+/// Parse ISO 8601 timestamp to an `std.Io.Timestamp` (nanoseconds since the
+/// Unix epoch). Format: "2025-09-05T05:36:18.039840444Z"
+pub fn parseTimestamp(timestamp_str: []const u8) !Io.Timestamp {
     // Simple ISO 8601 parser for the format used by NATS
     // "2025-09-05T05:36:18.039840444Z"
     if (timestamp_str.len < 20) return error.InvalidTimestamp;
@@ -65,7 +66,7 @@ pub fn parseTimestamp(timestamp_str: []const u8) !u64 {
     const total_seconds = days_since_epoch * 24 * 3600 + seconds_today;
     const total_nanos = total_seconds * std.time.ns_per_s + @as(u64, nanoseconds);
 
-    return total_nanos;
+    return .{ .nanoseconds = total_nanos };
 }
 
 /// Helper function to calculate days since Unix epoch (1970-01-01)
@@ -121,7 +122,7 @@ test "parseTimestamp basic format" {
     const expected_seconds = expected_days * 24 * 3600 + 5 * 3600 + 36 * 60 + 18;
     const expected_nanos = expected_seconds * std.time.ns_per_s;
 
-    try std.testing.expectEqual(expected_nanos, timestamp);
+    try std.testing.expectEqual(expected_nanos, timestamp.nanoseconds);
 }
 
 test "parseTimestamp with nanoseconds" {
@@ -132,7 +133,7 @@ test "parseTimestamp with nanoseconds" {
     const expected_seconds = expected_days * 24 * 3600 + 5 * 3600 + 36 * 60 + 18;
     const expected_nanos = expected_seconds * std.time.ns_per_s + 39840444; // .039840444 seconds in nanos
 
-    try std.testing.expectEqual(expected_nanos, timestamp);
+    try std.testing.expectEqual(expected_nanos, timestamp.nanoseconds);
 }
 
 test "parseTimestamp with partial nanoseconds" {
@@ -147,14 +148,14 @@ test "parseTimestamp with partial nanoseconds" {
 test "parseTimestamp Unix epoch" {
     // 1970-01-01T00:00:00Z should be exactly 0
     const timestamp = try parseTimestamp("1970-01-01T00:00:00Z");
-    try std.testing.expectEqual(@as(u64, 0), timestamp);
+    try std.testing.expectEqual(Io.Timestamp.zero, timestamp);
 }
 
 test "parseTimestamp Unix epoch plus one day" {
     // 1970-01-02T00:00:00Z should be exactly 1 day in nanoseconds
     const timestamp = try parseTimestamp("1970-01-02T00:00:00Z");
     const expected = 24 * 3600 * std.time.ns_per_s;
-    try std.testing.expectEqual(expected, timestamp);
+    try std.testing.expectEqual(expected, timestamp.nanoseconds);
 }
 
 test "parseTimestamp leap year handling" {
@@ -162,13 +163,13 @@ test "parseTimestamp leap year handling" {
     const timestamp = try parseTimestamp("2024-02-29T12:00:00Z");
 
     // Verify it doesn't crash and produces a reasonable result
-    try std.testing.expect(timestamp > 0);
+    try std.testing.expect(timestamp.nanoseconds > 0);
 
     // Test that Feb 28 and Mar 1 are exactly 1 day apart in a leap year
     const feb28 = try parseTimestamp("2024-02-28T00:00:00Z");
     const mar01 = try parseTimestamp("2024-03-01T00:00:00Z");
-    const expected_diff = 2 * 24 * 3600 * std.time.ns_per_s; // 2 days (28->29, 29->1)
-    try std.testing.expectEqual(expected_diff, mar01 - feb28);
+    const expected_diff: Io.Duration = .{ .nanoseconds = 2 * 24 * 3600 * std.time.ns_per_s }; // 2 days (28->29, 29->1)
+    try std.testing.expectEqual(expected_diff, feb28.durationTo(mar01));
 }
 
 test "parseTimestamp error cases" {

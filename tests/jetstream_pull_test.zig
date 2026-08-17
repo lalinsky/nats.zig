@@ -1,7 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 const Connection = nats.Connection;
 const JetStream = nats.JetStream;
@@ -12,11 +11,10 @@ const MessageBatch = nats.MessageBatch;
 const PullSubscription = nats.PullSubscription;
 
 test "JetStream pull consumer basic fetch" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
     // Use existing utility functions
-    const nc = try utils.createDefaultConnection();
+    const nc = try utils.createDefaultConnection(io);
     defer utils.closeConnection(nc);
 
     var js = nc.jetstream(.{});
@@ -48,7 +46,7 @@ test "JetStream pull consumer basic fetch" {
     try nc.flush();
 
     // Fetch the messages
-    var batch = try subscription.fetch(2, 1000);
+    var batch = try subscription.fetch(2, .fromSeconds(1));
     defer batch.deinit();
 
     // Verify we got the expected messages
@@ -64,7 +62,7 @@ test "JetStream pull consumer basic fetch" {
     try batch.messages[1].ack();
 
     // Fetch the messages
-    var batch2 = try subscription.fetch(2, 1000);
+    var batch2 = try subscription.fetch(2, .fromSeconds(1));
     defer batch2.deinit();
 
     // Verify we got the expected messages

@@ -157,10 +157,10 @@ pub const ServerPool = struct {
     }
 
     // Shuffle servers in pool (like C library's _shufflePool)
-    pub fn shuffle(self: *ServerPool, offset: usize) void {
+    pub fn shuffle(self: *ServerPool, io: std.Io, offset: usize) void {
         if (self.servers.count() <= offset + 1) return;
 
-        var prng = std.rand.DefaultPrng.init(@bitCast(std.time.nanoTimestamp()));
+        var prng = std.Random.DefaultPrng.init(@intCast(std.Io.Timestamp.now(io, .awake).nanoseconds));
         const random = prng.random();
 
         // Shuffle the underlying entries directly
@@ -176,7 +176,7 @@ pub const ServerPool = struct {
 };
 
 test "server pool basic operations" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -203,7 +203,7 @@ test "server pool basic operations" {
 }
 
 test "server pool duplicate prevention" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -230,7 +230,7 @@ test "server pool duplicate prevention" {
 }
 
 test "server removal on max reconnects" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

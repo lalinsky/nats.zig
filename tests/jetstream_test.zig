@@ -1,16 +1,14 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
 
 test "connect" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     const js = conn.jetstream(.{});
@@ -18,10 +16,9 @@ test "connect" {
 }
 
 test "get account info" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -34,10 +31,9 @@ test "get account info" {
 }
 
 test "add consumer" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -74,10 +70,9 @@ test "add consumer" {
 }
 
 test "list consumer names" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -125,10 +120,9 @@ test "list consumer names" {
 }
 
 test "list consumers" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -179,10 +173,9 @@ test "list consumers" {
 }
 
 test "get consumer info" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -224,10 +217,9 @@ test "get consumer info" {
 }
 
 test "delete consumer" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -288,12 +280,10 @@ test "delete consumer" {
 
 // // Test stream management functionality
 // test "jetstream stream creation and management" {
-//     const rt = try zio.Runtime.init(std.testing.allocator, .{});
-//     defer rt.deinit();
-//     const rt = try zio.Runtime.init(std.testing.allocator, .{});
-//     defer rt.deinit();
+//     const io = std.testing.io;
+//     const io = std.testing.io;
 
-//     const conn = try utils.createDefaultConnection();
+//     const conn = try utils.createDefaultConnection(io);
 //     defer utils.closeConnection(conn);
 
 //     // Create JetStream context
@@ -372,12 +362,10 @@ test "delete consumer" {
 // }
 
 // test "jetstream stream configuration options" {
-//     const rt = try zio.Runtime.init(std.testing.allocator, .{});
-//     defer rt.deinit();
-//     const rt = try zio.Runtime.init(std.testing.allocator, .{});
-//     defer rt.deinit();
+//     const io = std.testing.io;
+//     const io = std.testing.io;
 
-//     const conn = try utils.createDefaultConnection();
+//     const conn = try utils.createDefaultConnection(io);
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
@@ -444,10 +432,9 @@ test "delete consumer" {
 // }
 
 // test "jetstream stream operations" {
-//     const rt = try zio.Runtime.init(std.testing.allocator, .{});
-//     defer rt.deinit();
+//     const io = std.testing.io;
 
-//     const conn = try utils.createDefaultConnection();
+//     const conn = try utils.createDefaultConnection(io);
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
@@ -531,10 +518,9 @@ test "delete consumer" {
 // }
 
 // test "jetstream stream update" {
-//     const rt = try zio.Runtime.init(std.testing.allocator, .{});
-//     defer rt.deinit();
+//     const io = std.testing.io;
 
-//     const conn = try utils.createDefaultConnection();
+//     const conn = try utils.createDefaultConnection(io);
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
@@ -572,10 +558,9 @@ test "delete consumer" {
 // }
 
 // test "jetstream account info" {
-//     const rt = try zio.Runtime.init(std.testing.allocator, .{});
-//     defer rt.deinit();
+//     const io = std.testing.io;
 
-//     const conn = try utils.createDefaultConnection();
+//     const conn = try utils.createDefaultConnection(io);
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
@@ -596,10 +581,9 @@ test "delete consumer" {
 // }
 
 // test "jetstream error handling" {
-//     const rt = try zio.Runtime.init(std.testing.allocator, .{});
-//     defer rt.deinit();
+//     const io = std.testing.io;
 
-//     const conn = try utils.createDefaultConnection();
+//     const conn = try utils.createDefaultConnection(io);
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
@@ -624,10 +608,9 @@ test "delete consumer" {
 // }
 
 // test "jetstream concurrent stream operations" {
-//     const rt = try zio.Runtime.init(std.testing.allocator, .{});
-//     defer rt.deinit();
+//     const io = std.testing.io;
 
-//     const conn = try utils.createDefaultConnection();
+//     const conn = try utils.createDefaultConnection(io);
 //     defer utils.closeConnection(conn);
 
 //     var js = conn.jetstreamDefault();
@@ -684,10 +667,9 @@ test "delete consumer" {
 // }
 
 test "JetStream publish basic message" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -708,7 +690,7 @@ test "JetStream publish basic message" {
 
     // Wait for stream metadata to propagate across cluster nodes
     // TODO: Remove this delay once retry logic is implemented (see ADR-22)
-    try rt.sleep(.fromMilliseconds(100));
+    try io.sleep(.fromMilliseconds(100), .awake);
 
     // Publish a message using JetStream publish
     const test_data = "Hello JetStream!";
@@ -722,10 +704,9 @@ test "JetStream publish basic message" {
 }
 
 test "JetStream publish with message deduplication" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -767,10 +748,9 @@ test "JetStream publish with message deduplication" {
 }
 
 test "JetStream publish with expected sequence" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -805,10 +785,9 @@ test "JetStream publish with expected sequence" {
 }
 
 test "JetStream publish with expected last subject sequence" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -844,10 +823,9 @@ test "JetStream publish with expected last subject sequence" {
 }
 
 test "JetStream publishMsg with pre-constructed message" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

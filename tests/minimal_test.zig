@@ -1,33 +1,30 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
+const xsync = @import("xsync");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
 
 test "connect" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 }
 
 test "connect wrong port" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = utils.createConnectionWrongPort() catch return;
+    const conn = utils.createConnectionWrongPort(io) catch return;
     defer utils.closeConnection(conn);
 
     try std.testing.expect(false);
 }
 
 test "basic publish and subscribe" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -39,7 +36,7 @@ test "basic publish and subscribe" {
     try conn.flush();
 
     // Try to receive the message
-    var msg = sub.nextMsg(100) catch return error.NoMessageReceived;
+    var msg = sub.nextMsg(.fromMilliseconds(100)) catch return error.NoMessageReceived;
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test.minimal", msg.subject);
@@ -47,10 +44,9 @@ test "basic publish and subscribe" {
 }
 
 test "async subscribe" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Message handler function
@@ -58,10 +54,10 @@ test "async subscribe" {
         count: u32 = 0,
         data: []const u8 = "",
         subject: []const u8 = "",
-        called: zio.ResetEvent = .init,
+        called: xsync.Event = .init,
 
         fn handleMsg(msg: *nats.Message, self: *@This()) void {
-            defer self.called.set();
+            defer self.called.set(std.testing.io);
             defer msg.deinit();
             self.count += 1;
             self.data = std.testing.allocator.dupe(u8, msg.data) catch unreachable;
@@ -86,7 +82,7 @@ test "async subscribe" {
     try conn.flush();
 
     // Wait a bit for async processing
-    try handler.called.timedWait(.fromMilliseconds(100));
+    try handler.called.waitTimeout(std.testing.io, utils.ioTimeout(.fromMilliseconds(100)));
 
     // Check if message was received by handler
     try std.testing.expect(handler.count == 1);

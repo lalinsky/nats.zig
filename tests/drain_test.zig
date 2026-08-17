@@ -1,13 +1,12 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
+const xsync = @import("xsync");
 const utils = @import("utils.zig");
 
 test "subscription drain sync - immediate completion" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create sync subscription
@@ -26,14 +25,13 @@ test "subscription drain sync - immediate completion" {
     try std.testing.expect(sub.isDrainComplete());
 
     // Wait should return immediately
-    try sub.waitForDrainCompletion(1000);
+    try sub.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "subscription drain sync - with pending messages" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create sync subscription
@@ -50,7 +48,7 @@ test "subscription drain sync - with pending messages" {
     // Wait (up to 1s) for both messages to be counted as pending
     var waited: u64 = 0;
     while (sub.pending_msgs.load(.acquire) < 2 and waited < 1000) : (waited += 5) {
-        try rt.sleep(.fromMilliseconds(5));
+        try io.sleep(.fromMilliseconds(5), .awake);
     }
 
     // Should have pending messages
@@ -64,7 +62,7 @@ test "subscription drain sync - with pending messages" {
     try std.testing.expect(!sub.isDrainComplete());
 
     // Consume first message
-    var msg1 = try sub.nextMsg(1000);
+    var msg1 = try sub.nextMsg(.fromSeconds(1));
     defer msg1.deinit();
     try std.testing.expect(std.mem.eql(u8, msg1.data, msg1_data));
 
@@ -74,7 +72,7 @@ test "subscription drain sync - with pending messages" {
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 1);
 
     // Consume second message
-    var msg2 = try sub.nextMsg(1000);
+    var msg2 = try sub.nextMsg(.fromSeconds(1));
     defer msg2.deinit();
     try std.testing.expect(std.mem.eql(u8, msg2.data, msg2_data));
 
@@ -84,23 +82,22 @@ test "subscription drain sync - with pending messages" {
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 0);
 
     // Wait should return immediately
-    try sub.waitForDrainCompletion(1000);
+    try sub.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "subscription drain async - with callback processing" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var messages_processed: u32 = 0;
-    var processing_complete: zio.ResetEvent = .init;
+    var processing_complete: xsync.Event = .init;
 
     const TestContext = struct {
         processed_count_ptr: *u32,
-        completion_event_ptr: *zio.ResetEvent,
-        rt: *zio.Runtime,
+        completion_event_ptr: *xsync.Event,
+        io: std.Io,
     };
 
     const testHandler = struct {
@@ -108,11 +105,11 @@ test "subscription drain async - with callback processing" {
             defer msg.deinit();
 
             // Simulate some processing time
-            ctx.rt.sleep(.fromMilliseconds(5)) catch {};
+            ctx.io.sleep(.fromMilliseconds(5), .awake) catch {};
 
             ctx.processed_count_ptr.* += 1;
             if (ctx.processed_count_ptr.* == 3) {
-                ctx.completion_event_ptr.set();
+                ctx.completion_event_ptr.set(std.testing.io);
             }
         }
     }.handle;
@@ -121,7 +118,7 @@ test "subscription drain async - with callback processing" {
     const sub = try conn.subscribe("test.drain.async", testHandler, .{TestContext{
         .processed_count_ptr = &messages_processed,
         .completion_event_ptr = &processing_complete,
-        .rt = rt,
+        .io = io,
     }});
     defer sub.deinit();
 
@@ -132,7 +129,7 @@ test "subscription drain async - with callback processing" {
     try conn.flush();
 
     // Give messages time to arrive but not necessarily process
-    try rt.sleep(.fromMilliseconds(10));
+    try io.sleep(.fromMilliseconds(10), .awake);
 
     // Messages should have arrived (they may be processing or queued)
     // Note: pending count may be 0 if already processed, so we'll skip this check
@@ -145,22 +142,21 @@ test "subscription drain async - with callback processing" {
     try std.testing.expect(sub.isDraining());
 
     // Wait for drain completion
-    try sub.waitForDrainCompletion(5000); // 5 second timeout
+    try sub.waitForDrainCompletion(.fromSeconds(5)); // 5 second timeout
 
     // Should be complete
     try std.testing.expect(sub.isDrainComplete());
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 0);
 
     // Wait for all messages to be processed
-    try processing_complete.wait();
+    try processing_complete.wait(std.testing.io);
     try std.testing.expect(messages_processed == 3);
 }
 
 test "subscription drain blocks new messages" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create sync subscription
@@ -170,7 +166,7 @@ test "subscription drain blocks new messages" {
     // Publish initial message
     try conn.publish("test.drain.block", "before drain");
     try conn.flush();
-    try rt.sleep(.fromMilliseconds(10));
+    try io.sleep(.fromMilliseconds(10), .awake);
 
     // Should have 1 pending message
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 1);
@@ -182,13 +178,13 @@ test "subscription drain blocks new messages" {
     try conn.publish("test.drain.block", "after drain 1");
     try conn.publish("test.drain.block", "after drain 2");
     try conn.flush();
-    try rt.sleep(.fromMilliseconds(10));
+    try io.sleep(.fromMilliseconds(10), .awake);
 
     // Should still have only 1 pending message (new ones dropped)
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 1);
 
     // Consume the original message
-    var msg = try sub.nextMsg(1000);
+    var msg = try sub.nextMsg(.fromSeconds(1));
     defer msg.deinit();
     try std.testing.expect(std.mem.eql(u8, msg.data, "before drain"));
 
@@ -196,15 +192,14 @@ test "subscription drain blocks new messages" {
     try std.testing.expect(sub.isDrainComplete());
 
     // And no extra messages should be retrievable
-    const maybe = sub.nextMsg(50);
+    const maybe = sub.nextMsg(.fromMilliseconds(50));
     try std.testing.expectError(error.Timeout, maybe);
 }
 
 test "subscription drain timeout" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create sync subscription and leave one message unconsumed
@@ -216,35 +211,33 @@ test "subscription drain timeout" {
     // Wait briefly for arrival
     var waited: u64 = 0;
     while (sub.pending_msgs.load(.acquire) < 1 and waited < 200) : (waited += 5) {
-        try rt.sleep(.fromMilliseconds(5));
+        try io.sleep(.fromMilliseconds(5), .awake);
     }
     sub.drain();
 
     // waitForDrainCompletion should timeout
-    const result = sub.waitForDrainCompletion(100); // 100ms timeout
+    const result = sub.waitForDrainCompletion(.fromMilliseconds(100)); // 100ms timeout
     try std.testing.expectError(error.Timeout, result);
 }
 
 test "subscription drain not draining error" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("test.drain.not_draining");
     defer sub.deinit();
 
     // Should error if not draining
-    const result = sub.waitForDrainCompletion(100);
+    const result = sub.waitForDrainCompletion(.fromMilliseconds(100));
     try std.testing.expectError(error.NotDraining, result);
 }
 
 test "connection drain - no subscriptions" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Initially not draining
@@ -254,14 +247,13 @@ test "connection drain - no subscriptions" {
     try conn.drain();
 
     // Wait should return quickly as drain completes immediately
-    try conn.waitForDrainCompletion(1000);
+    try conn.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "connection drain - single subscription" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create subscription with pending messages
@@ -276,7 +268,7 @@ test "connection drain - single subscription" {
     // Wait for messages to arrive
     var waited: u64 = 0;
     while (sub.pending_msgs.load(.acquire) < 2 and waited < 1000) : (waited += 5) {
-        try rt.sleep(.fromMilliseconds(5));
+        try io.sleep(.fromMilliseconds(5), .awake);
     }
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 2);
 
@@ -289,20 +281,19 @@ test "connection drain - single subscription" {
     try std.testing.expect(!sub.isDrainComplete());
 
     // Consume messages to complete drain
-    var msg1 = try sub.nextMsg(1000);
+    var msg1 = try sub.nextMsg(.fromSeconds(1));
     defer msg1.deinit();
-    var msg2 = try sub.nextMsg(1000);
+    var msg2 = try sub.nextMsg(.fromSeconds(1));
     defer msg2.deinit();
 
     // Wait for connection drain completion
-    try conn.waitForDrainCompletion(1000);
+    try conn.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "connection drain - multiple subscriptions" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create multiple subscriptions
@@ -319,7 +310,7 @@ test "connection drain - multiple subscriptions" {
     // Wait for messages to arrive
     var waited: u64 = 0;
     while ((sub1.pending_msgs.load(.acquire) < 1 or sub2.pending_msgs.load(.acquire) < 1) and waited < 1000) : (waited += 5) {
-        try rt.sleep(.fromMilliseconds(5));
+        try io.sleep(.fromMilliseconds(5), .awake);
     }
     try std.testing.expect(sub1.pending_msgs.load(.acquire) == 1);
     try std.testing.expect(sub2.pending_msgs.load(.acquire) == 1);
@@ -333,7 +324,7 @@ test "connection drain - multiple subscriptions" {
     try std.testing.expect(sub2.isDraining());
 
     // Consume first subscription's message
-    var msg1 = try sub1.nextMsg(1000);
+    var msg1 = try sub1.nextMsg(.fromSeconds(1));
     defer msg1.deinit();
 
     // First subscription should be complete, but connection still draining
@@ -341,19 +332,18 @@ test "connection drain - multiple subscriptions" {
     try std.testing.expect(!sub2.isDrainComplete());
 
     // Consume second subscription's message
-    var msg2 = try sub2.nextMsg(1000);
+    var msg2 = try sub2.nextMsg(.fromSeconds(1));
     defer msg2.deinit();
 
     // Now both should be complete and connection drain should complete
     try std.testing.expect(sub2.isDrainComplete());
-    try conn.waitForDrainCompletion(1000);
+    try conn.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "connection drain - already draining" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // First drain call
@@ -362,17 +352,16 @@ test "connection drain - already draining" {
     // Second drain call should be a no-op (not error)
     try conn.drain();
 
-    try conn.waitForDrainCompletion(1000);
+    try conn.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "connection drain not draining error" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Should error if not draining
-    const result = conn.waitForDrainCompletion(100);
+    const result = conn.waitForDrainCompletion(.fromMilliseconds(100));
     try std.testing.expectError(error.NotDraining, result);
 }

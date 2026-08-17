@@ -1,16 +1,14 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
 
 test "basic push subscription" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -58,7 +56,7 @@ test "basic push subscription" {
     try conn.publish("orders.update", "Order Update");
 
     // Wait a bit for messages to be processed
-    try rt.sleep(.fromMilliseconds(100));
+    try io.sleep(.fromMilliseconds(100), .awake);
 
     // Verify messages were received
     try testing.expect(message_count > 0);
@@ -66,10 +64,9 @@ test "basic push subscription" {
 }
 
 test "push subscription with flow control" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -86,12 +83,12 @@ test "push subscription with flow control" {
     var processed_count: u32 = 0;
 
     const TaskHandler = struct {
-        fn handle(js_msg: *nats.JetStreamMessage, runtime: *zio.Runtime, counter: *u32) void {
+        fn handle(js_msg: *nats.JetStreamMessage, handler_io: std.Io, counter: *u32) void {
             defer js_msg.deinit();
             counter.* += 1;
 
             // Simulate some processing time
-            runtime.sleep(.fromMilliseconds(10)) catch {};
+            handler_io.sleep(.fromMilliseconds(10), .awake) catch {};
 
             // Acknowledge successful processing
             js_msg.ack() catch |err| {
@@ -101,7 +98,7 @@ test "push subscription with flow control" {
     };
 
     // Subscribe with flow control enabled (deliver_subject auto-generated)
-    var push_sub = try js.subscribe("tasks.*", TaskHandler.handle, .{ rt, &processed_count }, .{
+    var push_sub = try js.subscribe("tasks.*", TaskHandler.handle, .{ io, &processed_count }, .{
         .stream = "TEST_PUSH_FC_STREAM",
         .durable = "task_processor",
         .config = .{
@@ -121,17 +118,16 @@ test "push subscription with flow control" {
     }
 
     // Allow time for processing
-    try rt.sleep(.fromMilliseconds(200));
+    try io.sleep(.fromMilliseconds(200), .awake);
 
     try testing.expect(processed_count > 0);
     log.info("Processed {d} tasks with flow control", .{processed_count});
 }
 
 test "push subscription error handling" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
