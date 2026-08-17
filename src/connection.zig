@@ -1686,12 +1686,20 @@ pub const Connection = struct {
 
         const current_time = io_util.now(self.io);
         if (self.ping_time.durationTo(current_time).nanoseconds >= self.options.ping_interval.nanoseconds) {
-            _ = try self.sendPing(true);
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
+
+            // Count the PING as outstanding before it can be written:
+            // processPong resets the counter under the same mutex, so the
+            // PONG can never be processed ahead of the increment. Checking
+            // first also avoids queueing another PING onto a connection
+            // already deemed stale.
             const current_pings = self.pings_out.fetchAdd(1, .monotonic) + 1;
             if (self.options.max_pings_out > 0 and current_pings > self.options.max_pings_out) {
                 log.warn("Stale connection: {} unanswered PINGs", .{current_pings});
                 return error.StaleConnection;
             }
+            _ = try self.sendPing(false);
             self.ping_time = current_time;
         }
     }
