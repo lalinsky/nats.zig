@@ -185,7 +185,7 @@ test "KV watch basic functionality" {
     defer watcher.deinit();
 
     // Should get initial value (with timeout)
-    const maybe_entry = try watcher.next(.fromSeconds(1));
+    const maybe_entry = try watcher.next(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
     try testing.expect(maybe_entry != null); // Should not be the completion marker
     var entry = maybe_entry.?;
     defer entry.deinit();
@@ -195,10 +195,10 @@ test "KV watch basic functionality" {
     try testing.expect(entry.operation == .PUT);
 
     // Should get completion marker (null) indicating initial data is done
-    const completion_marker = try watcher.next(.fromSeconds(1));
+    const completion_marker = try watcher.next(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
     try testing.expect(completion_marker == null);
 
     // After completion marker, should timeout on further attempts
-    const result = watcher.next(.fromSeconds(1));
+    const result = watcher.next(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
     try testing.expect(result == error.Timeout);
 }

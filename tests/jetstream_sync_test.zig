@@ -34,7 +34,7 @@ test "JetStream synchronous subscription basic functionality" {
     try conn.publish("test.sync.message", test_message);
 
     // Wait for message using nextMsg
-    const js_msg = try sync_sub.nextMsg(.fromSeconds(5));
+    const js_msg = try sync_sub.nextMsg();
     defer js_msg.deinit(); // This cleans up everything via arena.deinit()
 
     // Verify message content
@@ -72,7 +72,7 @@ test "JetStream synchronous subscription timeout" {
 
     // Test timeout (should return error.Timeout after timeout)
     const start = std.Io.Timestamp.now(io, .awake);
-    const result = sync_sub.nextMsg(.fromMilliseconds(100)); // 100ms timeout
+    const result = sync_sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }); // 100ms timeout
     const duration = start.untilNow(io, .awake).toMilliseconds();
 
     try testing.expectError(error.Timeout, result);
@@ -113,7 +113,7 @@ test "JetStream synchronous subscription multiple messages" {
 
     // Receive and verify all messages
     for (messages, 0..) |expected, i| {
-        const js_msg = try sync_sub.nextMsg(.fromSeconds(5));
+        const js_msg = try sync_sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
         defer js_msg.deinit(); // This cleans up everything via arena.deinit()
 
         try testing.expectEqualStrings(expected, js_msg.msg.data);
@@ -154,7 +154,7 @@ test "JetStream synchronous queue subscription basic functionality" {
     try conn.publish("test.queue.sync.message", test_message);
 
     // Wait for message using nextMsg
-    const js_msg = try queue_sub.nextMsg(.fromSeconds(5));
+    const js_msg = try queue_sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
     defer js_msg.deinit();
 
     // Verify message content

@@ -18,8 +18,7 @@ const Allocator = std.mem.Allocator;
 
 const io_util = @import("io_util.zig");
 
-pub const PopError = error{
-    WouldBlock,
+pub const PopError = Io.Timeout.Error || error{
     Closed,
 };
 
@@ -315,61 +314,51 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         }
 
         /// Internal helper to wait for data availability with timeout handling.
-        /// A `.zero` timeout is non-blocking, `.max` waits indefinitely.
         /// Assumes mutex is already held.
-        fn waitForDataInternal(self: *Self, timeout: Io.Duration) (Io.Cancelable || PopError)!void {
-            // Fast path for non-blocking (zero timeout)
-            if (timeout.nanoseconds == 0) {
-                if (self.is_closed and self.items_available == 0) {
-                    return PopError.Closed;
-                }
-                if (self.items_available == 0) {
-                    return PopError.WouldBlock;
-                }
-                return;
-            } else if (timeout.nanoseconds == Io.Duration.max.nanoseconds) {
-                // Wait indefinitely
-                while (self.items_available == 0 and !self.is_closed) {
-                    try self.data_cond.wait(self.io, &self.mutex);
-                }
-
-                if (self.is_closed and self.items_available == 0) {
-                    return PopError.Closed;
-                }
-                return;
-            } else {
-                // Wait with timeout
-                const deadline = io_util.deadline(self.io, timeout);
-
-                while (self.items_available == 0 and !self.is_closed) {
-                    if (io_util.expired(self.io, deadline)) {
-                        if (self.is_closed and self.items_available == 0) {
-                            return PopError.Closed;
-                        }
-                        return PopError.WouldBlock;
+        fn waitForDataInternal(self: *Self, timeout: Io.Timeout) (Io.Cancelable || PopError)!void {
+            switch (timeout) {
+                .none => {
+                    while (self.items_available == 0 and !self.is_closed) {
+                        try self.data_cond.wait(self.io, &self.mutex);
                     }
 
-                    self.data_cond.waitTimeout(self.io, &self.mutex, deadline) catch |err| switch (err) {
-                        error.Canceled => return error.Canceled,
-                        error.Timeout => {}, // Continue loop to check conditions
-                    };
+                    if (self.is_closed and self.items_available == 0) {
+                        return PopError.Closed;
+                    }
+                    return;
+                },
+                .duration, .deadline => {},
+            }
+
+            const deadline_timeout = timeout.toDeadline(self.io);
+
+            while (self.items_available == 0 and !self.is_closed) {
+                if (io_util.expired(self.io, deadline_timeout)) {
+                    if (self.is_closed and self.items_available == 0) {
+                        return PopError.Closed;
+                    }
+                    return PopError.Timeout;
                 }
 
-                if (self.is_closed and self.items_available == 0) {
-                    return PopError.Closed;
-                }
-                return;
+                self.data_cond.waitTimeout(self.io, &self.mutex, deadline_timeout) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    error.Timeout => {}, // Continue loop to check conditions
+                };
+            }
+
+            if (self.is_closed and self.items_available == 0) {
+                return PopError.Closed;
             }
         }
 
-        /// Pop a single item with timeout (`.zero` = non-blocking, `.max` = wait forever)
-        pub fn pop(self: *Self, timeout: Io.Duration) (Io.Cancelable || PopError)!T {
+        /// Pop a single item, waiting according to `timeout`.
+        pub fn pop(self: *Self, timeout: Io.Timeout) (Io.Cancelable || PopError)!T {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
 
             try self.waitForDataInternal(timeout);
 
-            return self.popLocked() orelse PopError.WouldBlock;
+            return self.popLocked() orelse unreachable;
         }
 
         /// Pop the next available item; assumes the mutex is held.
@@ -402,14 +391,14 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             return self.popLocked();
         }
 
-        /// Get readable slice with timeout (`.zero` = non-blocking, `.max` = wait forever)
-        pub fn getSlice(self: *Self, timeout: Io.Duration) (Io.Cancelable || PopError)!View {
+        /// Get a readable slice, waiting according to `timeout`.
+        pub fn getSlice(self: *Self, timeout: Io.Timeout) (Io.Cancelable || PopError)!View {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
 
             try self.waitForDataInternal(timeout);
 
-            return self.getSliceLocked() orelse PopError.WouldBlock;
+            return self.getSliceLocked() orelse unreachable;
         }
 
         /// Get a readable slice if data is available; assumes the mutex is held.
@@ -695,7 +684,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         }
 
         /// Get readable byte slice with timeout
-        pub fn getSlice(self: *Self, timeout: Io.Duration) (Io.Cancelable || PopError)!Queue.View {
+        pub fn getSlice(self: *Self, timeout: Io.Timeout) (Io.Cancelable || PopError)!Queue.View {
             return self.queue.getSlice(timeout);
         }
 
@@ -714,8 +703,8 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.reset();
         }
 
-        /// Get multiple readable slices for vectored I/O with timeout (`.zero` = non-blocking)
-        pub fn gatherReadSlices(self: *Self, slices: [][]const u8, timeout: Io.Duration) (Io.Cancelable || PopError)!Gather {
+        /// Get multiple readable slices for vectored I/O, waiting according to `timeout`.
+        pub fn gatherReadSlices(self: *Self, slices: [][]const u8, timeout: Io.Timeout) (Io.Cancelable || PopError)!Gather {
             try self.queue.mutex.lock(self.queue.io);
             defer self.queue.mutex.unlock(self.queue.io);
 
@@ -857,8 +846,8 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.total_chunks -= moved_chunk_count;
         }
 
-        /// Wait for data to become available with timeout (`.zero` = non-blocking)
-        pub fn waitForData(self: *Self, timeout: Io.Duration) (Io.Cancelable || PopError)!void {
+        /// Wait for data to become available according to `timeout`.
+        pub fn waitForData(self: *Self, timeout: Io.Timeout) (Io.Cancelable || PopError)!void {
             try self.queue.mutex.lock(self.queue.io);
             defer self.queue.mutex.unlock(self.queue.io);
 
@@ -866,7 +855,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         }
 
         /// Wait for more data to become available with timeout
-        pub fn waitForMoreData(self: *Self, timeout: Io.Duration) (Io.Cancelable || error{Closed})!void {
+        pub fn waitForMoreData(self: *Self, timeout: Io.Timeout) (Io.Cancelable || PopError)!void {
             try self.queue.mutex.lock(self.queue.io);
             defer self.queue.mutex.unlock(self.queue.io);
 
@@ -875,15 +864,21 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             }
 
             const initial_data = self.queue.items_available;
-            const deadline = io_util.deadline(self.queue.io, timeout);
+            const deadline = timeout.toTimestamp(self.queue.io);
 
             while (self.queue.items_available <= initial_data and !self.queue.is_closed) {
-                if (io_util.expired(self.queue.io, deadline)) break;
+                if (deadline) |d| {
+                    if (io_util.expired(self.queue.io, .{ .deadline = d })) return error.Timeout;
+                }
 
-                self.queue.data_cond.waitTimeout(self.queue.io, &self.queue.mutex, deadline) catch |err| switch (err) {
-                    error.Canceled => return error.Canceled,
-                    error.Timeout => {}, // Continue loop
-                };
+                if (deadline) |d| {
+                    self.queue.data_cond.waitTimeout(self.queue.io, &self.queue.mutex, d) catch |err| switch (err) {
+                        error.Canceled => return error.Canceled,
+                        error.Timeout => {},
+                    };
+                } else {
+                    try self.queue.data_cond.wait(self.queue.io, &self.queue.mutex);
+                }
             }
 
             // Check if closed after waiting
@@ -907,7 +902,7 @@ test "generic queue with integers" {
     try queue.push(43);
 
     // Pop them
-    try std.testing.expectEqual(@as(i32, 42), try queue.pop(.fromMilliseconds(1000)));
+    try std.testing.expectEqual(@as(i32, 42), try queue.pop(.{ .duration = .{ .raw = .fromMilliseconds(1000), .clock = .awake } }));
     try std.testing.expectEqual(@as(i32, 43), queue.tryPop().?);
 
     // Should be empty
@@ -978,7 +973,7 @@ test "concurrent push and pop" {
 
         fn consumer(q: *Queue, s: *u64) void {
             for (0..100) |_| {
-                s.* += q.pop(.fromMilliseconds(1000)) catch return;
+                s.* += q.pop(.{ .duration = .{ .raw = .fromMilliseconds(1000), .clock = .awake } }) catch return;
             }
         }
     };
@@ -1014,7 +1009,7 @@ test "queue close functionality" {
     try std.testing.expectError(PushError.Closed, queue.pushSlice(&[_]i32{ 4, 5 }));
 
     // Should still be able to read existing data
-    try std.testing.expectEqual(@as(i32, 1), try queue.pop(.fromMilliseconds(1000)));
+    try std.testing.expectEqual(@as(i32, 1), try queue.pop(.{ .duration = .{ .raw = .fromMilliseconds(1000), .clock = .awake } }));
     try std.testing.expectEqual(@as(i32, 2), queue.tryPop().?);
 
     // Verify closed state
@@ -1037,7 +1032,7 @@ test "blocking pop handles queue closure" {
         }
 
         fn popper(q: *Queue, result: *?(Io.Cancelable || PopError)) void {
-            _ = q.pop(.fromMilliseconds(1000)) catch |err| {
+            _ = q.pop(.{ .duration = .{ .raw = .fromMilliseconds(1000), .clock = .awake } }) catch |err| {
                 result.* = err;
                 return;
             };
@@ -1071,7 +1066,7 @@ test "getSlice handles queue closure with indefinite wait" {
         }
 
         fn getter(q: *Queue, result: *?(Io.Cancelable || PopError)) void {
-            _ = q.getSlice(.max) catch |err| {
+            _ = q.getSlice(.none) catch |err| {
                 result.* = err;
                 return;
             };
@@ -1256,7 +1251,7 @@ test "queue close wakes readers" {
 
     queue.close();
 
-    try std.testing.expectError(PopError.Closed, queue.pop(.zero));
+    try std.testing.expectError(PopError.Closed, queue.pop(.{ .duration = .zero }));
     try std.testing.expectError(PushError.Closed, queue.push(42));
 }
 
@@ -1271,7 +1266,7 @@ test "ConcurrentWriteBuffer waitForData smoke test" {
     try buffer.append("Hello");
 
     // Should return immediately since data is available
-    try buffer.waitForData(.fromMilliseconds(1000));
+    try buffer.waitForData(.{ .duration = .{ .raw = .fromMilliseconds(1000), .clock = .awake } });
 
     // Verify data is still there
     try std.testing.expect(buffer.hasData());
@@ -1289,7 +1284,7 @@ test "ConcurrentWriteBuffer waitForData with closed buffer" {
     buffer.close();
 
     // waitForData should return Closed error
-    try std.testing.expectError(error.Closed, buffer.waitForData(.fromMilliseconds(1000)));
+    try std.testing.expectError(error.Closed, buffer.waitForData(.{ .duration = .{ .raw = .fromMilliseconds(1000), .clock = .awake } }));
 }
 
 test "ConcurrentWriteBuffer waitForMoreData smoke test" {
@@ -1303,7 +1298,7 @@ test "ConcurrentWriteBuffer waitForMoreData smoke test" {
     try buffer.append("Hello");
 
     // Wait for more data with short timeout (should timeout)
-    try buffer.waitForMoreData(.fromMilliseconds(1));
+    try std.testing.expectError(error.Timeout, buffer.waitForMoreData(.{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } }));
 
     // Should still work normally
     try std.testing.expect(buffer.hasData());
@@ -1321,7 +1316,7 @@ test "ConcurrentWriteBuffer waitForMoreData with closed buffer" {
     buffer.close();
 
     // waitForMoreData should return Closed error
-    try std.testing.expectError(error.Closed, buffer.waitForMoreData(.fromMilliseconds(1)));
+    try std.testing.expectError(error.Closed, buffer.waitForMoreData(.{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } }));
 }
 
 test "VectorGather thread safety validation" {
@@ -1334,7 +1329,7 @@ test "VectorGather thread safety validation" {
     try buffer.append("Hello, World!");
 
     var slices: [4][]const u8 = undefined;
-    const gather = try buffer.gatherReadSlices(&slices, .zero);
+    const gather = try buffer.gatherReadSlices(&slices, .{ .duration = .zero });
     try std.testing.expect(gather.slices.len > 0);
 
     // Should be able to consume gathered data normally
@@ -1354,13 +1349,13 @@ test "VectorGather blocking behavior" {
     var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
-    // Should return WouldBlock immediately when no data (non-blocking)
+    // A zero-duration blocking read should time out immediately when no data is available.
     var slices: [4][]const u8 = undefined;
-    try std.testing.expectError(PopError.WouldBlock, buffer.gatherReadSlices(&slices, .zero));
+    try std.testing.expectError(PopError.Timeout, buffer.gatherReadSlices(&slices, .{ .duration = .zero }));
 
     // Add data and gather successfully
     try buffer.append("Hello, World!");
-    const gather = try buffer.gatherReadSlices(&slices, .fromMilliseconds(1000));
+    const gather = try buffer.gatherReadSlices(&slices, .{ .duration = .{ .raw = .fromMilliseconds(1000), .clock = .awake } });
     try std.testing.expect(gather.slices.len > 0);
     try std.testing.expect(gather.total_bytes > 0);
 
@@ -1378,7 +1373,7 @@ test "VectorGather detects buffer reset between gather and consume" {
     try buffer.append("Hello, World!");
 
     var slices: [4][]const u8 = undefined;
-    const gather = try buffer.gatherReadSlices(&slices, .zero);
+    const gather = try buffer.gatherReadSlices(&slices, .{ .duration = .zero });
     try std.testing.expect(gather.slices.len > 0);
 
     // Reset the buffer which should increment reset_id
@@ -1398,12 +1393,12 @@ test "VectorGather detects concurrent consumer advancing buffer" {
     try buffer.append("Hello, World!");
 
     var slices: [4][]const u8 = undefined;
-    const gather = try buffer.gatherReadSlices(&slices, .zero);
+    const gather = try buffer.gatherReadSlices(&slices, .{ .duration = .zero });
     try std.testing.expect(gather.slices.len > 0);
     try std.testing.expect(gather.total_bytes > 0);
 
     // Simulate another consumer advancing the read position
-    var view = try buffer.getSlice(.zero);
+    var view = try buffer.getSlice(.{ .duration = .zero });
     view.consume(2); // Advance read_pos by 2 bytes
 
     // Now trying to consume with the original gather should fail with ConcurrentConsumer

@@ -73,7 +73,7 @@ test "token authentication failure" {
     // Test authentication failure with invalid token and short timeout
     const opts = nats.ConnectionOptions{
         .token = "invalid_token",
-        .timeout = .fromSeconds(2), // 2 second timeout
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
     };
 
     // This should fail with AuthFailed error

@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Waiting for messages...", .{});
 
     while (true) {
-        var msg = sub.nextMsg(.fromSeconds(1)) catch |err| {
+        var msg = sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } }) catch |err| {
             if (err == error.Timeout) continue;
             return err;
         };

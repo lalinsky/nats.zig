@@ -155,7 +155,7 @@ test "manual reconnection with nc.reconnect()" {
 
     // Verify message was received
     {
-        const msg = try sub.nextMsg(.fromSeconds(1));
+        const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
         defer msg.deinit();
         try testing.expectEqualStrings("before reconnect", msg.data);
     }
@@ -181,7 +181,7 @@ test "manual reconnection with nc.reconnect()" {
 
     // Verify subscription survived reconnection
     {
-        const msg = try sub.nextMsg(.fromSeconds(1));
+        const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
         defer msg.deinit();
         try testing.expectEqualStrings("after reconnect", msg.data);
     }

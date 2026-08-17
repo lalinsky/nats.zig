@@ -55,7 +55,7 @@ const sub = try nc.subscribeSync("hello");
 
 // Wait for message with 5 second timeout
 while (true) {
-    var msg = sub.nextMsg(.fromSeconds(5)) catch |err| {
+    var msg = sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch |err| {
         if (err == error.Timeout) continue;
         return err;
     };
@@ -63,6 +63,31 @@ while (true) {
 
     counter += 1;
     std.debug.print("Message #{d}: {s}\n", .{ counter, msg.data });
+}
+```
+
+Synchronous subscriptions also support indefinite, non-blocking, and batch
+receives:
+
+```zig
+const msg = try sub.nextMsg(); // wait indefinitely
+defer msg.deinit();
+
+if (sub.tryNextMsg()) |available| { // never blocks
+    defer available.deinit();
+}
+
+var batch: [64]*nats.Message = undefined;
+{
+    const count = try sub.nextMsgBatchTimeout(&batch, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    defer for (batch[0..count]) |batch_msg| batch_msg.deinit();
+    // Process batch[0..count].
+}
+
+{
+    const count = sub.tryNextMsgBatch(&batch);
+    defer for (batch[0..count]) |batch_msg| batch_msg.deinit();
+    // Process immediately available messages in batch[0..count].
 }
 ```
 

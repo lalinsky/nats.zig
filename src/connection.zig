@@ -242,7 +242,7 @@ const ExitSignal = struct {
 
 pub const ConnectionOptions = struct {
     name: ?[]const u8 = null,
-    timeout: Io.Duration = .fromMilliseconds(5000),
+    timeout: Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(5000), .clock = .awake } },
     verbose: bool = false,
     send_asap: bool = false,
     reconnect: ReconnectOptions = .{},
@@ -829,7 +829,7 @@ pub const Connection = struct {
         log.debug("Flush completed, received PONG for ping_id={}", .{our_ping_id});
     }
 
-    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout: Io.Duration) !*Message {
+    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout: Io.Timeout) !*Message {
         var msg = Message{
             .subject = subject,
             .data = data,
@@ -839,9 +839,9 @@ pub const Connection = struct {
         return self.requestMsg(&msg, timeout);
     }
 
-    pub fn requestMsg(self: *Self, msg: *Message, timeout: Io.Duration) !*Message {
+    pub fn requestMsg(self: *Self, msg: *Message, timeout: Io.Timeout) !*Message {
         if (self.options.trace) {
-            log.debug("Sending request message to {s} with timeout {f}", .{ msg.subject, timeout });
+            log.debug("Sending request message to {s} with timeout {any}", .{ msg.subject, timeout });
         }
 
         // Ensure response system is initialized (without mutex held)
@@ -872,7 +872,7 @@ pub const Connection = struct {
 
     pub const RequestManyOptions = ResponseManager.WaitForMultiResponseOptions;
 
-    pub fn requestMany(self: *Self, subject: []const u8, data: []const u8, timeout: Io.Duration, options: RequestManyOptions) !MessageList {
+    pub fn requestMany(self: *Self, subject: []const u8, data: []const u8, timeout: Io.Timeout, options: RequestManyOptions) !MessageList {
         var msg = Message{
             .subject = subject,
             .data = data,
@@ -882,9 +882,9 @@ pub const Connection = struct {
         return self.requestManyMsg(&msg, timeout, options);
     }
 
-    pub fn requestManyMsg(self: *Self, msg: *Message, timeout: Io.Duration, options: RequestManyOptions) !MessageList {
+    pub fn requestManyMsg(self: *Self, msg: *Message, timeout: Io.Timeout, options: RequestManyOptions) !MessageList {
         if (self.options.trace) {
-            log.debug("Sending request-many message to {s} with timeout {f}", .{ msg.subject, timeout });
+            log.debug("Sending request-many message to {s} with timeout {any}", .{ msg.subject, timeout });
         }
 
         // Ensure response system is initialized (without mutex held)
@@ -1182,7 +1182,7 @@ pub const Connection = struct {
         // Try to gather data from buffer first
         var slices: [16][]const u8 = undefined;
         const gather = self.write_buffer.gatherReadSlices(&slices, self.options.timeout) catch |err| switch (err) {
-            error.WouldBlock => {
+            error.Timeout => {
                 // No data to write
                 return;
             },
@@ -1666,9 +1666,8 @@ pub const Connection = struct {
         }
     }
 
-    /// Wait for the connection drain to finish. A null timeout waits
-    /// indefinitely.
-    pub fn waitForDrainCompletion(self: *Self, timeout: ?Io.Duration) !void {
+    /// Wait for the connection drain to finish.
+    pub fn waitForDrainCompletion(self: *Self, timeout: Io.Timeout) !void {
         const state = self.drain_state.load(.acquire);
         switch (state) {
             .not_draining => return error.NotDraining,
@@ -1676,10 +1675,10 @@ pub const Connection = struct {
             else => {},
         }
 
-        if (timeout) |t| {
-            try self.drain_completion.waitTimeout(self.io, io_util.timeout(t));
-        } else {
+        if (timeout == .none) {
             try self.drain_completion.wait(self.io);
+        } else {
+            try self.drain_completion.waitTimeout(self.io, timeout);
         }
     }
 
