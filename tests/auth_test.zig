@@ -224,6 +224,89 @@ test "invalid nkey seed fails before connecting" {
     try std.testing.expectError(nats.nkeys.Error.InvalidSeed, result);
 }
 
+const test_creds_path = "tests/configs/TestUser.creds";
+
+test "jwt credentials file authentication" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .user_creds = test_creds_path,
+    };
+
+    const conn = try utils.createConnection(io, .jwt_auth, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.jwt", "jwt authenticated");
+    try conn.flush();
+}
+
+test "jwt inline with nkey seed authentication" {
+    const io = std.testing.io;
+
+    // Read and parse the fixture so the test exercises the inline
+    // user_jwt + nkey_seed combination.
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, test_creds_path, std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(content);
+    const credentials = try nats.creds.parse(content);
+
+    const opts = nats.ConnectionOptions{
+        .user_jwt = credentials.jwt,
+        .nkey_seed = credentials.seed,
+    };
+
+    const conn = try utils.createConnection(io, .jwt_auth, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.jwt.inline", "jwt inline authenticated");
+    try conn.flush();
+}
+
+test "jwt with mismatched signing key fails" {
+    const io = std.testing.io;
+
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, test_creds_path, std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(content);
+    const credentials = try nats.creds.parse(content);
+
+    // Valid JWT, but the nonce gets signed with an unrelated key.
+    const opts = nats.ConnectionOptions{
+        .user_jwt = credentials.jwt,
+        .nkey_seed = nkey_seed,
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+    };
+
+    const result = utils.createConnection(io, .jwt_auth, opts);
+
+    if (result) |conn| {
+        defer utils.closeConnection(conn);
+        try std.testing.expect(false);
+    } else |err| {
+        try std.testing.expect(err == nats.ProtocolError.AuthorizationViolation);
+    }
+}
+
+test "missing credentials file fails before connecting" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .user_creds = "tests/configs/DoesNotExist.creds",
+    };
+
+    const result = utils.createConnection(io, .unknown, opts);
+    try std.testing.expectError(error.FileNotFound, result);
+}
+
+test "jwt without signing seed fails before connecting" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .user_jwt = "some.jwt.value",
+    };
+
+    const result = utils.createConnection(io, .unknown, opts);
+    try std.testing.expectError(error.MissingNKeySeed, result);
+}
+
 test "no authentication options against auth server" {
     const io = std.testing.io;
 
