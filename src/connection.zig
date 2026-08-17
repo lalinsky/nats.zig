@@ -288,8 +288,8 @@ pub const Connection = struct {
     handshake_error: ?anyerror = null,
     handshake_cond: xsync.Condition = .init,
 
-    // Connection manager fiber (owns reader/flusher tasks)
-    manager_task: zio.Group = .init,
+    // Connection manager task (owns reader/flusher tasks)
+    manager_task: Io.Group = .init,
 
     // Main connection mutex (protects most fields)
     mutex: xsync.Mutex = .init,
@@ -397,8 +397,8 @@ pub const Connection = struct {
 
         _ = try self.server_pool.addServer(url, false);
 
-        try self.manager_task.spawn(managerLoop, .{self});
-        errdefer self.manager_task.cancel();
+        try self.manager_task.concurrent(self.io, managerTask, .{self});
+        errdefer self.manager_task.cancel(self.io);
 
         while (true) {
             switch (self.status) {
@@ -437,7 +437,7 @@ pub const Connection = struct {
 
         log.info("Closing connection", .{});
 
-        self.manager_task.cancel();
+        self.manager_task.cancel(self.io);
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -904,6 +904,15 @@ pub const Connection = struct {
         return messages;
     }
 
+    /// Group task wrapper: `Io.Group` task return types must coerce to
+    /// `Cancelable!void`, so any other error is logged here.
+    fn managerTask(self: *Self) Io.Cancelable!void {
+        self.managerLoop() catch |err| {
+            if (err == error.Canceled) return error.Canceled;
+            log.err("Manager loop failed: {}", .{err});
+        };
+    }
+
     fn managerLoop(self: *Self) anyerror!void {
         log.debug("Manager loop started", .{});
         defer log.debug("Manager loop exited", .{});
@@ -964,7 +973,7 @@ pub const Connection = struct {
             if (attempts > 1) {
                 const delay_ms = self.calculateReconnectDelay(attempts - 1);
                 log.debug("Waiting {}ms before reconnection attempt {}", .{ delay_ms, attempts });
-                try zio.sleep(.fromMilliseconds(delay_ms));
+                try self.io.sleep(.fromMilliseconds(@intCast(delay_ms)), .awake);
             }
         }
     }
@@ -1038,11 +1047,11 @@ pub const Connection = struct {
             self.exit_signal = null;
         }
 
-        var reader_task = try zio.spawn(readerLoop, .{ self, &stream, &exit_signal });
-        defer reader_task.cancel();
+        var reader_task = try self.io.concurrent(readerLoop, .{ self, &stream, &exit_signal });
+        defer reader_task.cancel(self.io);
 
-        var flusher_task = try zio.spawn(flusherLoop, .{ self, &stream, &exit_signal });
-        defer flusher_task.cancel();
+        var flusher_task = try self.io.concurrent(flusherLoop, .{ self, &stream, &exit_signal });
+        defer flusher_task.cancel(self.io);
 
         var was_reconnect = false;
 
