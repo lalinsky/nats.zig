@@ -402,7 +402,7 @@ test "requestMany with stall timeout" {
     try std.testing.expectEqual(2, messages.len);
 }
 
-test "close connection with requests in flight" {
+test "close connection with responses in flight" {
     const io = std.testing.io;
 
     // Responder on its own connection, so replies keep flowing while the
@@ -414,7 +414,13 @@ test "close connection with requests in flight" {
         fn handle(msg: *nats.Message, conn: *nats.Connection) !void {
             defer msg.deinit();
             const reply_subject = msg.reply orelse return;
-            try conn.publish(reply_subject, msg.data);
+            // Send a burst of replies per request: the requester consumes
+            // the first one, and the surplus keeps the response handler
+            // acquiring pending_mutex (via the unknown-rid path) while the
+            // connection is torn down.
+            for (0..20) |_| {
+                try conn.publish(reply_subject, msg.data);
+            }
         }
     };
     const responder_sub = try responder_conn.subscribe("test.inflight.echo", EchoHandler.handle, .{responder_conn});
@@ -437,9 +443,9 @@ test "close connection with requests in flight" {
     };
 
     // Repeatedly tear down a connection while its response multiplexer is
-    // busy: replies queued before the reader stops are still dispatched by
-    // the response handler while ResponseManager.deinit runs. This used to
-    // be able to deadlock (deinit joined the handler while holding the
+    // busy: the surplus replies are still streaming in and being dispatched
+    // by the response handler while ResponseManager.deinit runs. This used
+    // to be able to deadlock (deinit joined the handler while holding the
     // mutex the handler needs).
     for (0..5) |_| {
         const conn = try utils.createDefaultConnection(io);
