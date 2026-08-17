@@ -156,19 +156,14 @@ test "autounsubscribe delivered message counter" {
 }
 
 const ReconnectTracker = struct {
-    var reconnected_called: u32 = 0;
-    var mutex: xsync.Mutex = .init;
+    var reconnected_called: std.atomic.Value(u32) = .init(0);
 
     fn reset() void {
-        mutex.lockUncancelable(std.testing.io);
-        defer mutex.unlock(std.testing.io);
-        reconnected_called = 0;
+        reconnected_called.store(0, .release);
     }
 
     fn reconnectedCallback(_: *nats.Connection) void {
-        mutex.lockUncancelable(std.testing.io);
-        defer mutex.unlock(std.testing.io);
-        reconnected_called += 1;
+        _ = reconnected_called.fetchAdd(1, .release);
     }
 };
 
@@ -217,7 +212,7 @@ test "autounsubscribe with reconnection" {
 
     // Wait for reconnection to complete
     const start = std.Io.Timestamp.now(io, .awake);
-    while (ReconnectTracker.reconnected_called == 0) {
+    while (ReconnectTracker.reconnected_called.load(.acquire) == 0) {
         if (start.untilNow(io, .awake).nanoseconds >= 5 * std.time.ns_per_s) {
             return error.ReconnectionTimeout;
         }
