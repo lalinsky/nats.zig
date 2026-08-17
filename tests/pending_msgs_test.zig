@@ -24,8 +24,8 @@ test "pending_msgs counter sync subscription" {
     try conn.flush();
 
     // Wait (up to 1s) for message to arrive
-    var waited_ms: u32 = 0;
-    while (waited_ms < 1000) : (waited_ms += 10) {
+    var attempts: u32 = 0;
+    while (attempts < 100) : (attempts += 1) {
         if (sub.pending_msgs.load(.acquire) == 1 and
             sub.pending_bytes.load(.acquire) == msg1_data.len) break;
         try rt.sleep(.fromMilliseconds(10));
@@ -40,8 +40,8 @@ test "pending_msgs counter sync subscription" {
     try conn.publish("test.pending.sync", msg2_data);
     try conn.flush();
 
-    waited_ms = 0;
-    while (waited_ms < 1000) : (waited_ms += 10) {
+    attempts = 0;
+    while (attempts < 100) : (attempts += 1) {
         if (sub.pending_msgs.load(.acquire) == 2 and
             sub.pending_bytes.load(.acquire) == msg1_data.len + msg2_data.len) break;
         try rt.sleep(.fromMilliseconds(10));
@@ -52,7 +52,7 @@ test "pending_msgs counter sync subscription" {
     try std.testing.expect(sub.pending_bytes.load(.acquire) == msg1_data.len + msg2_data.len);
 
     // Consume one message
-    var msg1 = try sub.nextMsg(1000);
+    var msg1 = try sub.nextMsg(.fromSeconds(1));
     defer msg1.deinit();
 
     // Should have 1 pending message and bytes for second message
@@ -60,7 +60,7 @@ test "pending_msgs counter sync subscription" {
     try std.testing.expect(sub.pending_bytes.load(.acquire) == msg2_data.len);
 
     // Consume second message
-    var msg2 = try sub.nextMsg(1000);
+    var msg2 = try sub.nextMsg(.fromSeconds(1));
     defer msg2.deinit();
 
     // Should have 0 pending messages and bytes

@@ -13,7 +13,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const zio = @import("zio");
 const ArrayList = std.ArrayList;
 const StringArrayHashMapUnmanaged = std.StringArrayHashMapUnmanaged;
 const Url = @import("url.zig").Url;
@@ -158,10 +157,10 @@ pub const ServerPool = struct {
     }
 
     // Shuffle servers in pool (like C library's _shufflePool)
-    pub fn shuffle(self: *ServerPool, offset: usize) void {
+    pub fn shuffle(self: *ServerPool, io: std.Io, offset: usize) void {
         if (self.servers.count() <= offset + 1) return;
 
-        var prng = std.Random.DefaultPrng.init(@intCast(zio.Timestamp.now(.monotonic).toNanoseconds()));
+        var prng = std.Random.DefaultPrng.init(@intCast(std.Io.Timestamp.now(io, .awake).nanoseconds));
         const random = prng.random();
 
         // Shuffle the underlying entries directly

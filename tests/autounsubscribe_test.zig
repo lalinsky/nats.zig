@@ -29,7 +29,7 @@ test "autounsubscribe sync basic functionality" {
     // Should receive exactly 3 messages
     var received_count: u32 = 0;
     for (0..3) |_| {
-        const msg = try sub.nextMsg(1000);
+        const msg = try sub.nextMsg(.fromSeconds(1));
         defer msg.deinit();
         received_count += 1;
     }
@@ -37,7 +37,7 @@ test "autounsubscribe sync basic functionality" {
     try std.testing.expectEqual(@as(u32, 3), received_count);
 
     // Fourth message should timeout (subscription auto-unsubscribed)
-    try std.testing.expectError(error.Timeout, sub.nextMsg(100));
+    try std.testing.expectError(error.Timeout, sub.nextMsg(.fromMilliseconds(100)));
 }
 
 test "autounsubscribe async basic functionality" {
@@ -85,9 +85,9 @@ test "autounsubscribe async basic functionality" {
     try conn.flush();
 
     // Wait for message processing with bounded wait loop
-    var wait_timer = zio.Stopwatch.start();
+    const wait_start = std.Io.Timestamp.now(rt.io(), .awake);
     var count: usize = 0;
-    while (wait_timer.read().toMilliseconds() < 1000) {
+    while (wait_start.untilNow(rt.io(), .awake).nanoseconds < std.time.ns_per_s) {
         try ctx.mutex.lock();
         count = messages_received.items.len;
         ctx.mutex.unlock();
@@ -115,7 +115,7 @@ test "autounsubscribe error conditions" {
     try conn.publish("error.test", "first message");
     try conn.flush();
 
-    const msg = try sub.nextMsg(1000);
+    const msg = try sub.nextMsg(.fromSeconds(1));
     defer msg.deinit();
 
     // Now try to set autounsubscribe to 1 (should fail since we already received 1)
@@ -142,21 +142,21 @@ test "autounsubscribe delivered message counter" {
     try conn.publish("counter.test", "message 1");
     try conn.flush();
 
-    const msg1 = try sub.nextMsg(1000);
+    const msg1 = try sub.nextMsg(.fromSeconds(1));
     defer msg1.deinit();
     try std.testing.expectEqual(@as(u64, 1), sub.delivered_msgs.load(.acquire));
 
     try conn.publish("counter.test", "message 2");
     try conn.flush();
 
-    const msg2 = try sub.nextMsg(1000);
+    const msg2 = try sub.nextMsg(.fromSeconds(1));
     defer msg2.deinit();
     try std.testing.expectEqual(@as(u64, 2), sub.delivered_msgs.load(.acquire));
 
     // Third message should timeout due to autounsubscribe
     try conn.publish("counter.test", "message 3");
     try conn.flush();
-    try std.testing.expectError(error.Timeout, sub.nextMsg(100));
+    try std.testing.expectError(error.Timeout, sub.nextMsg(.fromMilliseconds(100)));
 }
 
 const ReconnectTracker = struct {
@@ -185,7 +185,7 @@ test "autounsubscribe with reconnection" {
     const conn = try utils.createConnection(rt.io(), .node1, .{
         .reconnect = .{
             .allow_reconnect = true,
-            .reconnect_wait_ms = 100,
+            .reconnect_wait = .fromMilliseconds(100),
         },
         .callbacks = .{
             .reconnected_cb = ReconnectTracker.reconnectedCallback,
@@ -210,7 +210,7 @@ test "autounsubscribe with reconnection" {
 
     // Receive the 3 messages
     for (0..3) |_| {
-        const msg = try sub.nextMsg(1000);
+        const msg = try sub.nextMsg(.fromSeconds(1));
         defer msg.deinit();
     }
 
@@ -221,9 +221,9 @@ test "autounsubscribe with reconnection" {
     try conn.reconnect();
 
     // Wait for reconnection to complete
-    var timer = zio.Stopwatch.start();
+    const start = std.Io.Timestamp.now(rt.io(), .awake);
     while (ReconnectTracker.reconnected_called == 0) {
-        if (timer.read().toNanoseconds() >= 5000 * std.time.ns_per_ms) {
+        if (start.untilNow(rt.io(), .awake).nanoseconds >= 5 * std.time.ns_per_s) {
             return error.ReconnectionTimeout;
         }
         try rt.sleep(.fromMilliseconds(10));
@@ -240,7 +240,7 @@ test "autounsubscribe with reconnection" {
     // Should receive exactly 2 more messages (5 total - 3 already received = 2 remaining)
     var received_after_reconnect: u32 = 0;
     for (0..2) |_| {
-        const msg = try sub.nextMsg(1000);
+        const msg = try sub.nextMsg(.fromSeconds(1));
         defer msg.deinit();
         received_after_reconnect += 1;
     }
@@ -249,5 +249,5 @@ test "autounsubscribe with reconnection" {
     try std.testing.expectEqual(@as(u64, 5), sub.delivered_msgs.load(.acquire));
 
     // Next message should timeout (autounsubscribe limit reached)
-    try std.testing.expectError(error.Timeout, sub.nextMsg(500));
+    try std.testing.expectError(error.Timeout, sub.nextMsg(.fromMilliseconds(500)));
 }

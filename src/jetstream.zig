@@ -12,6 +12,7 @@
 // limitations under the License.
 
 const std = @import("std");
+const Io = std.Io;
 const zio = @import("zio");
 const xsync = @import("xsync");
 const message_mod = @import("message.zig");
@@ -46,7 +47,7 @@ pub const MsgMetadata = jetstream_message.MsgMetadata;
 pub const SequencePair = jetstream_message.SequencePair;
 
 const default_api_prefix = "$JS.API.";
-const default_request_timeout_ms = 5000;
+const default_request_timeout: Io.Duration = .fromMilliseconds(5000);
 
 // JetStream publish headers
 const MsgIdHdr = "Nats-Msg-Id";
@@ -381,7 +382,7 @@ pub const PublishOptions = struct {
     /// Expected last message ID
     expected_last_msg_id: ?[]const u8 = null,
     /// Message time-to-live in nanoseconds
-    msg_ttl: ?u64 = null,
+    msg_ttl: ?Io.Duration = null,
 };
 
 /// Batch of messages returned from fetch operation
@@ -430,7 +431,7 @@ pub const PullSubscription = struct {
     }
 
     /// Fetch a batch of messages from the pull consumer
-    pub fn fetch(self: *PullSubscription, batch: usize, timeout_ms: u64) !MessageBatch {
+    pub fn fetch(self: *PullSubscription, batch: usize, timeout: Io.Duration) !MessageBatch {
         if (batch == 0) return error.InvalidBatchSize;
 
         try self.mutex.lock(self.js.nc.io);
@@ -445,7 +446,7 @@ pub const PullSubscription = struct {
 
         const request = FetchRequest{
             .batch = batch,
-            .expires = timeout_ms * std.time.ns_per_ms,
+            .expires = @intCast(timeout.toNanoseconds()),
         };
 
         // Serialize the fetch request to JSON
@@ -470,7 +471,7 @@ pub const PullSubscription = struct {
 
         // Collect messages until batch is complete or timeout
         while (!batch_complete and messages.items.len < request.batch) {
-            if (self.inbox_subscription.nextMsg(timeout_ms * 2)) |raw_msg| {
+            if (self.inbox_subscription.nextMsg(.{ .nanoseconds = timeout.nanoseconds * 2 })) |raw_msg| {
                 log.debug("Message: subject={s}, reply={s}, data='{s}'", .{ raw_msg.subject, raw_msg.reply orelse "none", raw_msg.data });
                 // JetStream messages arrive with original subjects and ACK reply subjects
                 // The timestamp in the ACK subject ensures messages belong to this fetch request
@@ -553,9 +554,9 @@ pub const JetStreamSubscription = struct {
     }
 
     /// Get the next JetStream message synchronously (for sync subscriptions)
-    pub fn nextMsg(self: *JetStreamSubscription, timeout_ms: u64) !*JetStreamMessage {
+    pub fn nextMsg(self: *JetStreamSubscription, timeout: Io.Duration) !*JetStreamMessage {
         // Get the next message from the underlying subscription
-        const msg = try self.subscription.nextMsg(timeout_ms);
+        const msg = try self.subscription.nextMsg(timeout);
         errdefer msg.deinit();
 
         // Convert to JetStream message
@@ -588,7 +589,7 @@ pub const PullSubscribeOptions = struct {
 };
 
 pub const JetStreamOptions = struct {
-    request_timeout_ms: u64 = default_request_timeout_ms,
+    request_timeout: Io.Duration = default_request_timeout,
     // Add options here
 };
 
@@ -607,7 +608,7 @@ pub const JetStream = struct {
         const full_subject = try std.fmt.allocPrint(self.nc.allocator, "{s}{s}", .{ default_api_prefix, subject });
         defer self.nc.allocator.free(full_subject);
 
-        return try self.nc.request(full_subject, payload, self.opts.request_timeout_ms);
+        return try self.nc.request(full_subject, payload, self.opts.request_timeout);
     }
 
     /// Parse an error response from the server, if present.
@@ -1572,7 +1573,7 @@ pub const JetStream = struct {
         }
         if (options.msg_ttl) |ttl| {
             var buf: [256]u8 = undefined;
-            const ttl_str = try std.fmt.bufPrint(&buf, "{d}ns", .{ttl});
+            const ttl_str = try std.fmt.bufPrint(&buf, "{d}ns", .{ttl.toNanoseconds()});
             try msg.headerSet(MsgTTLHdr, ttl_str);
         }
 
@@ -1583,7 +1584,7 @@ pub const JetStream = struct {
         // - nats.go: 250ms backoff, 2 retries by default
         // - nats.c: Check their implementation
         // - nats.java: Check their implementation
-        const resp = self.nc.requestMsg(msg, self.opts.request_timeout_ms) catch |request_err| {
+        const resp = self.nc.requestMsg(msg, self.opts.request_timeout) catch |request_err| {
             return if (request_err == error.NoResponders) error.NoStreamResponse else request_err;
         };
 

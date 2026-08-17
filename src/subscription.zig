@@ -15,7 +15,7 @@ const std = @import("std");
 const zio = @import("zio");
 const xsync = @import("xsync");
 const Io = std.Io;
-const msTimeout = @import("io_util.zig").msTimeout;
+const io_util = @import("io_util.zig");
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const RefCounter = @import("ref_counter.zig").RefCounter;
@@ -113,7 +113,7 @@ pub const Subscription = struct {
 
         while (true) {
             // Wait for a message with timeout (allows periodic checking)
-            const msg = self.messages.pop(100) catch |err| {
+            const msg = self.messages.pop(.fromMilliseconds(100)) catch |err| {
                 if (err == error.QueueClosed or err == error.Canceled) {
                     log.debug("Subscription {} queue closed, stopping handler", .{self.sid});
                     break;
@@ -222,16 +222,17 @@ pub const Subscription = struct {
         return self.draining.load(.acquire) and self.drain_complete.isSet();
     }
 
-    pub fn waitForDrainCompletion(self: *Subscription, timeout_ms: u64) !void {
+    /// Wait for the subscription drain to finish. A null timeout waits
+    /// indefinitely.
+    pub fn waitForDrainCompletion(self: *Subscription, timeout: ?Io.Duration) !void {
         if (!self.draining.load(.acquire)) {
             return error.NotDraining;
         }
 
-        if (timeout_ms == 0) {
-            // No timeout - wait indefinitely
-            try self.drain_complete.wait(self.nc.io);
+        if (timeout) |t| {
+            try self.drain_complete.waitTimeout(self.nc.io, io_util.timeout(t));
         } else {
-            try self.drain_complete.waitTimeout(self.nc.io, msTimeout(timeout_ms));
+            try self.drain_complete.wait(self.nc.io);
         }
     }
 
@@ -261,14 +262,16 @@ pub const Subscription = struct {
         self.max_msgs.store(max, .release);
     }
 
-    pub fn nextMsg(self: *Subscription, timeout_ms: u64) (Io.Cancelable || error{Timeout})!*Message {
+    /// Wait for the next message. `.zero` is non-blocking, `.max` waits
+    /// forever.
+    pub fn nextMsg(self: *Subscription, timeout: Io.Duration) (Io.Cancelable || error{Timeout})!*Message {
         // Check if subscription has reached autounsubscribe limit
         const max = self.max_msgs.load(.acquire);
         if (max > 0 and self.delivered_msgs.load(.acquire) >= max) {
             return error.Timeout; // Consistent with "no more messages" semantics
         }
 
-        const msg = self.messages.pop(timeout_ms) catch |err| switch (err) {
+        const msg = self.messages.pop(timeout) catch |err| switch (err) {
             error.BufferFrozen => return error.Timeout,
             error.QueueEmpty => return error.Timeout,
             error.QueueClosed => return error.Timeout, // TODO: this should be mapped to ConnectionClosed

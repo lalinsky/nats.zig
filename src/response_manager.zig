@@ -15,7 +15,7 @@ const std = @import("std");
 const zio = @import("zio");
 const xsync = @import("xsync");
 const Io = std.Io;
-const nsTimeout = @import("io_util.zig").nsTimeout;
+const io_util = @import("io_util.zig");
 const Allocator = std.mem.Allocator;
 const Message = @import("message.zig").Message;
 const MessageList = @import("message.zig").MessageList;
@@ -201,13 +201,13 @@ pub const ResponseManager = struct {
         log.debug("Cleaned up request map entry with rid: {d}", .{handle.rid});
     }
 
-    pub fn waitForResponse(self: *ResponseManager, handle: RequestHandle, timeout_ns: u64) !*Message {
+    pub fn waitForResponse(self: *ResponseManager, handle: RequestHandle, timeout: Io.Duration) !*Message {
         try self.pending_mutex.lock(self.io);
         defer self.pending_mutex.unlock(self.io);
 
         if (self.is_closed) return error.ConnectionClosed;
 
-        var timer = zio.Stopwatch.start();
+        const deadline = io_util.deadline(self.io, timeout);
         while (true) {
             // Look up entry fresh each iteration - previous pointers may be invalid after timedWait
             const entry = self.pending_responses.getEntry(handle.rid) orelse {
@@ -234,15 +234,14 @@ pub const ResponseManager = struct {
                 return error.ConnectionClosed;
             }
 
-            const elapsed = timer.read().toNanoseconds();
-            if (elapsed >= timeout_ns) {
+            if (io_util.expired(self.io, deadline)) {
                 cleanup = true;
                 return error.Timeout;
             }
 
             // After this call, any entry pointers become invalid due to potential HashMap modifications
             cleanup = false;
-            self.pending_condition.waitTimeout(self.io, &self.pending_mutex, nsTimeout(timeout_ns - elapsed)) catch {};
+            self.pending_condition.waitTimeout(self.io, &self.pending_mutex, deadline) catch {};
         }
     }
 
@@ -253,14 +252,15 @@ pub const ResponseManager = struct {
 
         /// Sentinel function: return true to continue processing, false to stop (ADR-47)
         /// This follows ADR-47 specification (differs from Go implementation)
-        sentinelFn: ?fn (*Message) bool = null,
+        sentinelFn: ?*const fn (*Message) bool = null,
 
-        /// Stall timeout in milliseconds: max time to wait between subsequent messages
-        /// After first message, if no new messages arrive within this time, collection stops
-        stall_ms: ?u64 = null,
+        /// Stall timeout: max time to wait between subsequent messages.
+        /// After the first message, if no new messages arrive within this
+        /// time, collection stops
+        stall: ?Io.Duration = null,
     };
 
-    pub fn waitForMultiResponse(self: *ResponseManager, handle: RequestHandle, timeout_ns: u64, options: WaitForMultiResponseOptions) !MessageList {
+    pub fn waitForMultiResponse(self: *ResponseManager, handle: RequestHandle, timeout: Io.Duration, options: WaitForMultiResponseOptions) !MessageList {
         try self.pending_mutex.lock(self.io);
         defer self.pending_mutex.unlock(self.io);
 
@@ -275,7 +275,7 @@ pub const ResponseManager = struct {
             }
         }
 
-        var timer = zio.Stopwatch.start();
+        const deadline = io_util.deadline(self.io, timeout);
         while (true) {
             // Look up entry fresh each iteration - previous pointers may be invalid after timedWait
             const entry = self.pending_responses.getEntry(handle.rid) orelse {
@@ -328,8 +328,7 @@ pub const ResponseManager = struct {
                 return error.ConnectionClosed;
             }
 
-            const elapsed = timer.read().toNanoseconds();
-            if (elapsed >= timeout_ns) {
+            if (io_util.expired(self.io, deadline)) {
                 cleanup = true;
                 if (msgs.len > 0) {
                     return msgs;
@@ -337,16 +336,17 @@ pub const ResponseManager = struct {
                 return error.Timeout;
             }
 
-            // Calculate wait timeout: use stall timeout after first message, if configured
-            var wait_timeout_ns = timeout_ns - elapsed;
+            // Calculate the wait deadline: use the stall timeout after the
+            // first message, if configured
+            var wait_deadline = deadline;
             if (msgs.len > 0) {
-                if (options.stall_ms) |stall_ms| {
-                    wait_timeout_ns = @min(wait_timeout_ns, stall_ms * std.time.ns_per_ms);
+                if (options.stall) |stall| {
+                    wait_deadline = io_util.earlierDeadline(deadline, io_util.deadline(self.io, stall));
                 }
             }
 
             // After this call, any entry pointers become invalid due to potential HashMap modifications
-            self.pending_condition.waitTimeout(self.io, &self.pending_mutex, nsTimeout(wait_timeout_ns)) catch {
+            self.pending_condition.waitTimeout(self.io, &self.pending_mutex, wait_deadline) catch {
                 // Timeout occurred - return what we have collected so far
                 cleanup = true;
                 if (msgs.len > 0) {
@@ -450,9 +450,9 @@ test "request handle timeout functionality" {
     defer manager.cleanupRequest(handle);
 
     // Test timeout behavior
-    var timer = zio.Stopwatch.start();
-    const result = manager.waitForResponse(handle, 1_000_000); // 1ms timeout
-    const duration = timer.read().toNanoseconds();
+    const start = io_util.now(rt.io());
+    const result = manager.waitForResponse(handle, .fromMilliseconds(1)); // 1ms timeout
+    const duration = start.durationTo(io_util.now(rt.io())).nanoseconds;
 
     try testing.expectError(error.Timeout, result);
     try testing.expect(duration >= 1_000_000); // At least 1ms passed
@@ -473,6 +473,6 @@ test "multi-response request creation and timeout" {
     defer manager.cleanupRequest(handle);
 
     // Test timeout behavior for multi-response
-    const result = manager.waitForMultiResponse(handle, 1_000_000, .{}); // 1ms timeout
+    const result = manager.waitForMultiResponse(handle, .fromMilliseconds(1), .{}); // 1ms timeout
     try testing.expectError(error.Timeout, result);
 }

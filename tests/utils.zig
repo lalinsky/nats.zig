@@ -71,10 +71,11 @@ pub fn runDockerCompose(allocator: std.mem.Allocator, compose_args: []const []co
     defer allocator.free(result.stdout);
 }
 
-pub fn waitForHealthyServices(allocator: std.mem.Allocator, timeout_ms: i64) !void {
-    var timer = zio.Stopwatch.start();
+pub fn waitForHealthyServices(allocator: std.mem.Allocator, timeout: std.Io.Duration) !void {
+    const io = blockingIo();
+    const start = std.Io.Timestamp.now(io, .awake);
     while (true) {
-        if (timer.read().toMilliseconds() > @as(u64, @intCast(timeout_ms))) {
+        if (start.untilNow(io, .awake).nanoseconds > timeout.nanoseconds) {
             return error.ServicesNotHealthy;
         }
 
@@ -104,7 +105,7 @@ pub fn waitForHealthyServices(allocator: std.mem.Allocator, timeout_ms: i64) !vo
 var global_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 
 pub fn generateUniqueName(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
-    const timestamp = @divTrunc(zio.Timestamp.now(.realtime).toNanoseconds(), std.time.ns_per_us);
+    const timestamp = @divTrunc(std.Io.Timestamp.now(blockingIo(), .real).nanoseconds, std.time.ns_per_us);
     const counter = global_counter.fetchAdd(1, .monotonic);
 
     return std.fmt.allocPrint(allocator, "{s}_{d}_{d}", .{ prefix, timestamp, counter });

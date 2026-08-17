@@ -12,7 +12,8 @@
 // limitations under the License.
 
 const std = @import("std");
-const zio = @import("zio");
+const Io = std.Io;
+const io_util = @import("io_util.zig");
 const JetStream = @import("jetstream.zig").JetStream;
 const validation = @import("validation.zig");
 const StreamConfig = @import("jetstream.zig").StreamConfig;
@@ -102,8 +103,8 @@ pub const KVEntry = struct {
     key: []const u8,
     /// Value data
     value: []const u8,
-    /// Creation timestamp as integer
-    created: u64,
+    /// Creation timestamp (wall clock)
+    created: Io.Timestamp,
     /// Unique revision number
     revision: u64,
     /// Distance from latest (0=latest, 1=previous, etc.)
@@ -133,10 +134,10 @@ pub const KVStatus = struct {
     values: u64,
     /// History kept per key (1-64)
     history: u64,
-    /// TTL for entries in nanoseconds (0 = no TTL)
-    ttl: u64,
-    /// TTL for limit markers in nanoseconds (0 = not supported)
-    limit_marker_ttl: u64,
+    /// TTL for entries (`.zero` = no TTL)
+    ttl: Io.Duration,
+    /// TTL for limit markers (`.zero` = not supported)
+    limit_marker_ttl: Io.Duration,
     /// Whether data is compressed
     is_compressed: bool,
     /// Backend type (always "JetStream" for now)
@@ -153,10 +154,10 @@ pub const KVConfig = struct {
     description: ?[]const u8 = null,
     /// History to keep per key (1-64, default 1)
     history: u8 = 1,
-    /// TTL for entries in nanoseconds (0 = no TTL)
-    ttl: u64 = 0,
-    /// TTL for limit markers in nanoseconds (0 = disabled, requires >= 1s if enabled)
-    limit_marker_ttl: u64 = 0,
+    /// TTL for entries (`.zero` = no TTL)
+    ttl: Io.Duration = .zero,
+    /// TTL for limit markers (`.zero` = disabled, requires >= 1s if enabled)
+    limit_marker_ttl: Io.Duration = .zero,
     /// Maximum value size in bytes (-1 = unlimited)
     max_value_size: i32 = -1,
     /// Maximum bucket size in bytes (-1 = unlimited)
@@ -172,7 +173,7 @@ pub const KVConfig = struct {
 /// Options for Put operations
 pub const PutOptions = struct {
     /// Optional TTL for this specific entry (requires limit markers enabled)
-    ttl: ?u64 = null,
+    ttl: ?Io.Duration = null,
 };
 
 /// Options for Watch operations
@@ -240,19 +241,19 @@ pub const KVWatcher = struct {
     }
 
     /// Get the next entry from the watcher (returns null for completion marker, error.Timeout if no entry available)
-    pub fn next(self: *KVWatcher, timeout_ms: u64) !?KVEntry {
+    pub fn next(self: *KVWatcher, timeout: Io.Duration) !?KVEntry {
         // If we need to return the completion marker, do it now
         if (self.return_marker) {
             self.return_marker = false;
             return null;
         }
 
-        var timer = zio.Stopwatch.start();
-        var remaining_ns = timeout_ms * std.time.ns_per_ms;
+        const io = self.kv.js.nc.io;
+        const deadline = io_util.deadline(io, timeout);
         while (true) {
-            const remaining_ms = remaining_ns / std.time.ns_per_ms;
-            log.debug("nextMsg({})", .{remaining_ms});
-            var msg = try self.sub.nextMsg(remaining_ms);
+            const remaining = io_util.remaining(io, deadline) orelse return error.Timeout;
+            log.debug("nextMsg({f})", .{remaining});
+            var msg = try self.sub.nextMsg(remaining);
             var delete_msg = true;
             defer if (delete_msg) msg.deinit();
 
@@ -278,12 +279,6 @@ pub const KVWatcher = struct {
                 delete_msg = false;
                 return entry;
             }
-
-            const elapsed_ns = timer.lap().toNanoseconds();
-            if (elapsed_ns > remaining_ns) {
-                return error.Timeout;
-            }
-            remaining_ns -= elapsed_ns;
         }
     }
 };
@@ -366,10 +361,10 @@ pub const KV = struct {
             }
         }
 
-        // Parse timestamp from Nats-Time-Stamp header, fallback to 0 if not present
-        var created: u64 = 0;
+        // Parse timestamp from Nats-Time-Stamp header, fallback to zero if not present
+        var created: Io.Timestamp = .zero;
         if (stored_msg.headerGet("Nats-Time-Stamp")) |timestamp_str| {
-            created = timestamp.parseTimestamp(timestamp_str) catch 0;
+            created = timestamp.parseTimestamp(timestamp_str) catch .zero;
         }
 
         return KVEntry{
@@ -516,8 +511,8 @@ pub const KV = struct {
             .bucket = try arena_allocator.dupe(u8, self.bucket_name),
             .values = stream_info.value.state.messages,
             .history = @intCast(stream_info.value.config.max_msgs_per_subject),
-            .ttl = stream_info.value.config.max_age,
-            .limit_marker_ttl = stream_info.value.config.subject_delete_marker_ttl orelse 0,
+            .ttl = .fromNanoseconds(@intCast(stream_info.value.config.max_age)),
+            .limit_marker_ttl = .fromNanoseconds(@intCast(stream_info.value.config.subject_delete_marker_ttl orelse 0)),
             .is_compressed = stream_info.value.config.compression == .s2,
             .backing_store = "JetStream",
             .bytes = stream_info.value.state.bytes,
@@ -651,17 +646,11 @@ pub const KV = struct {
             }
         }
 
-        const total_timeout_ms = self.js.nc.options.timeout_ms;
-        var timer = zio.Stopwatch.start();
+        const deadline = io_util.deadline(self.js.nc.io, self.js.nc.options.timeout);
 
         while (true) {
-            const elapsed_ms = timer.read().toNanoseconds() / std.time.ns_per_ms;
-            if (elapsed_ms >= total_timeout_ms) {
-                return error.Timeout;
-            }
-
-            const remaining_ms = total_timeout_ms - elapsed_ms;
-            const entry = try watcher.next(remaining_ms) orelse break;
+            const remaining = io_util.remaining(self.js.nc.io, deadline) orelse return error.Timeout;
+            const entry = try watcher.next(remaining) orelse break;
 
             try entries.append(arena_allocator, entry);
         }
@@ -692,7 +681,7 @@ pub const KV = struct {
 
         // Collect unique keys - use completion marker to know when done
         while (true) {
-            var maybe_entry = watcher.next(5000) catch |err| {
+            var maybe_entry = watcher.next(.fromSeconds(5)) catch |err| {
                 if (err == error.Timeout or err == error.QueueEmpty) {
                     break;
                 }
@@ -763,7 +752,7 @@ pub const KV = struct {
 
         // Collect unique keys - use completion marker to know when done
         while (true) {
-            var maybe_entry = watcher.next(5000) catch |err| {
+            var maybe_entry = watcher.next(.fromSeconds(5)) catch |err| {
                 if (err == error.Timeout or err == error.QueueEmpty) {
                     break;
                 }
@@ -819,7 +808,7 @@ pub const KVManager = struct {
             return error.InvalidConfiguration;
         }
 
-        if (config.limit_marker_ttl > 0 and config.limit_marker_ttl < std.time.ns_per_s) {
+        if (config.limit_marker_ttl.nanoseconds > 0 and config.limit_marker_ttl.nanoseconds < std.time.ns_per_s) {
             return error.InvalidConfiguration;
         }
 
@@ -830,10 +819,11 @@ pub const KVManager = struct {
         defer self.js.nc.allocator.free(subject_pattern);
 
         // Configure duplicate window based on TTL rules from ADR-8
+        const ttl_ns: u64 = @intCast(config.ttl.toNanoseconds());
         var duplicate_window: u64 = 0;
-        if (config.ttl > 0) {
+        if (ttl_ns > 0) {
             const two_minutes_ns = 2 * 60 * std.time.ns_per_s;
-            duplicate_window = if (config.ttl > two_minutes_ns) two_minutes_ns else config.ttl;
+            duplicate_window = @min(ttl_ns, two_minutes_ns);
         }
 
         const stream_config = StreamConfig{
@@ -842,7 +832,7 @@ pub const KVManager = struct {
             .subjects = &.{subject_pattern},
             .retention = .limits,
             .max_msgs_per_subject = config.history,
-            .max_age = config.ttl,
+            .max_age = ttl_ns,
             .max_msg_size = config.max_value_size,
             .max_bytes = config.max_bytes,
             .storage = switch (config.storage) {
@@ -857,7 +847,7 @@ pub const KVManager = struct {
             // KV-specific stream settings required by ADR-8
             .allow_rollup_hdrs = true,
             .deny_delete = true,
-            .subject_delete_marker_ttl = if (config.limit_marker_ttl == 0) null else config.limit_marker_ttl,
+            .subject_delete_marker_ttl = if (config.limit_marker_ttl.nanoseconds == 0) null else @intCast(config.limit_marker_ttl.toNanoseconds()),
         };
 
         const result = try self.js.addStream(stream_config);

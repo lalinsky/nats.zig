@@ -48,7 +48,7 @@ test "JetStream pull consumer basic fetch" {
     try nc.flush();
 
     // Fetch the messages
-    var batch = try subscription.fetch(2, 1000);
+    var batch = try subscription.fetch(2, .fromSeconds(1));
     defer batch.deinit();
 
     // Verify we got the expected messages
@@ -64,7 +64,7 @@ test "JetStream pull consumer basic fetch" {
     try batch.messages[1].ack();
 
     // Fetch the messages
-    var batch2 = try subscription.fetch(2, 1000);
+    var batch2 = try subscription.fetch(2, .fromSeconds(1));
     defer batch2.deinit();
 
     // Verify we got the expected messages
