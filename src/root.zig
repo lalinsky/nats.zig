@@ -85,6 +85,7 @@ pub const ObjectStoreError = @import("jetstream_objstore.zig").ObjectStoreError;
 pub const ObjectResult = @import("jetstream_objstore.zig").ObjectResult;
 
 pub const nkeys = @import("nkeys.zig");
+pub const creds = @import("creds.zig");
 
 // Removed top-level connect functions - use Connection.init() and Connection.connect() directly
 
@@ -92,6 +93,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("net_util.zig");
     _ = @import("nkeys.zig");
+    _ = @import("creds.zig");
     _ = @import("jetstream.zig");
     _ = @import("jetstream_message.zig");
     _ = @import("jetstream_kv.zig");

@@ -34,6 +34,7 @@ const ResponseManager = @import("response_manager.zig").ResponseManager;
 const MAX_CONTROL_LINE_SIZE = @import("parser.zig").MAX_CONTROL_LINE_SIZE;
 const validation = @import("validation.zig");
 const nkeys = @import("nkeys.zig");
+const creds_mod = @import("creds.zig");
 const xsync = @import("xsync");
 const Io = std.Io;
 const io_util = @import("io_util.zig");
@@ -262,7 +263,18 @@ pub const ConnectionOptions = struct {
     /// NKey seed ("SU..."); the client signs the server nonce with it and
     /// sends the derived public key and signature in CONNECT.
     nkey_seed: ?[]const u8 = null,
+    /// Path to a credentials (.creds) file containing the user JWT and the
+    /// NKey seed. The file is re-read on every (re)connect, so rotated
+    /// credentials are picked up automatically. Takes precedence over
+    /// `user_jwt` and `nkey_seed`.
+    user_creds: ?[]const u8 = null,
+    /// User JWT to present in CONNECT. Requires `nkey_seed` for signing
+    /// the server nonce.
+    user_jwt: ?[]const u8 = null,
 };
+
+/// Maximum accepted size of a credentials file.
+const max_creds_file_size = 1024 * 1024;
 
 pub const Connection = struct {
     allocator: Allocator,
@@ -390,9 +402,22 @@ pub const Connection = struct {
 
         try io_util.ensureAwakeClock(self.io);
 
-        // Validate the NKey seed up front so a bad seed fails immediately
-        // instead of surfacing as a handshake error on every server.
-        if (self.options.nkey_seed) |seed| {
+        // Validate credential options up front so a bad seed or an
+        // unreadable credentials file fails immediately instead of
+        // surfacing as a handshake error on every server.
+        if (self.options.user_creds) |path| {
+            const content = try Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(max_creds_file_size));
+            defer {
+                std.crypto.secureZero(u8, content);
+                self.allocator.free(content);
+            }
+            const credentials = try creds_mod.parse(content);
+            var seed_kp = try nkeys.SeedKeyPair.fromSeed(credentials.seed);
+            seed_kp.wipe();
+        } else if (self.options.user_jwt != null and self.options.nkey_seed == null) {
+            // A JWT alone cannot authenticate; the nonce must be signed.
+            return error.MissingNKeySeed;
+        } else if (self.options.nkey_seed) |seed| {
             var seed_kp = try nkeys.SeedKeyPair.fromSeed(seed);
             seed_kp.wipe();
         }
@@ -1327,17 +1352,40 @@ pub const Connection = struct {
             }
         }
 
-        // NKey authentication: sign the server-provided nonce and send the
-        // public key alongside the signature.
+        // JWT and NKey authentication. Credentials files are re-read on
+        // every handshake so rotated credentials are picked up across
+        // reconnects. With a JWT the public key is omitted from CONNECT;
+        // the server takes it from the JWT itself.
         var nkey: ?[]const u8 = null;
         var sig: ?[]const u8 = null;
-        if (self.options.nkey_seed) |seed| {
+        var jwt: ?[]const u8 = null;
+        var signing_seed: ?[]const u8 = null;
+
+        var creds_content: ?[]u8 = null;
+        defer if (creds_content) |content| std.crypto.secureZero(u8, content);
+
+        if (self.options.user_creds) |path| {
+            const content = try Io.Dir.cwd().readFileAlloc(self.io, path, allocator, .limited(max_creds_file_size));
+            creds_content = content;
+            const credentials = try creds_mod.parse(content);
+            jwt = credentials.jwt;
+            signing_seed = credentials.seed;
+        } else if (self.options.user_jwt) |user_jwt| {
+            jwt = user_jwt;
+            signing_seed = self.options.nkey_seed orelse return error.MissingNKeySeed;
+        } else if (self.options.nkey_seed) |seed| {
+            signing_seed = seed;
+        }
+
+        if (signing_seed) |seed| {
             if (self.server_info.nonce) |nonce| {
                 var seed_kp = try nkeys.SeedKeyPair.fromSeed(seed);
                 defer seed_kp.wipe();
 
-                const nkey_buf = try allocator.create([nkeys.public_key_text_len]u8);
-                nkey = seed_kp.publicKeyText(nkey_buf);
+                if (jwt == null) {
+                    const nkey_buf = try allocator.create([nkeys.public_key_text_len]u8);
+                    nkey = seed_kp.publicKeyText(nkey_buf);
+                }
 
                 const raw_sig = try seed_kp.sign(nonce);
                 const Base64Encoder = std.base64.url_safe_no_pad.Encoder;
@@ -1361,6 +1409,7 @@ pub const Connection = struct {
             .auth_token = auth_token,
             .nkey = nkey,
             .sig = sig,
+            .jwt = jwt,
         };
 
         try buffer.writer.writeAll("CONNECT ");
