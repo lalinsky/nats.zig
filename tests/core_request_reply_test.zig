@@ -401,3 +401,67 @@ test "requestMany with stall timeout" {
     // Should get exactly 2 messages before stall timeout
     try std.testing.expectEqual(2, messages.len);
 }
+
+test "close connection with responses in flight" {
+    const io = std.testing.io;
+
+    // Responder on its own connection, so replies keep flowing while the
+    // requesting connection is torn down.
+    const responder_conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(responder_conn);
+
+    const EchoHandler = struct {
+        fn handle(msg: *nats.Message, conn: *nats.Connection) !void {
+            defer msg.deinit();
+            const reply_subject = msg.reply orelse return;
+            // Send a burst of replies per request: the requester consumes
+            // the first one, and the surplus keeps the response handler
+            // acquiring pending_mutex (via the unknown-rid path) while the
+            // connection is torn down.
+            for (0..20) |_| {
+                try conn.publish(reply_subject, msg.data);
+            }
+        }
+    };
+    const responder_sub = try responder_conn.subscribe("test.inflight.echo", EchoHandler.handle, .{responder_conn});
+    defer responder_sub.deinit();
+    try responder_conn.flush();
+
+    const Requester = struct {
+        var stop: std.atomic.Value(bool) = .init(false);
+
+        fn run(conn: *nats.Connection) void {
+            while (!stop.load(.acquire)) {
+                const reply = conn.request(
+                    "test.inflight.echo",
+                    "ping",
+                    .{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } },
+                ) catch return;
+                reply.deinit();
+            }
+        }
+    };
+
+    // Repeatedly tear down a connection while its response multiplexer is
+    // busy: the surplus replies are still streaming in and being dispatched
+    // by the response handler while ResponseManager.deinit runs. This used
+    // to be able to deadlock (deinit joined the handler while holding the
+    // mutex the handler needs).
+    for (0..5) |_| {
+        const conn = try utils.createDefaultConnection(io);
+
+        Requester.stop.store(false, .release);
+        var group: std.Io.Group = .init;
+        for (0..4) |_| {
+            try group.concurrent(io, Requester.run, .{conn});
+        }
+
+        io.sleep(.fromMilliseconds(30), .awake) catch {};
+
+        // Let requesters wind down, then tear down the connection while
+        // late replies are still being processed.
+        Requester.stop.store(true, .release);
+        try group.await(io);
+        utils.closeConnection(conn);
+    }
+}
