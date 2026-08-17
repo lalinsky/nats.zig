@@ -81,18 +81,24 @@ pub const ResponseManager = struct {
     }
 
     pub fn deinit(self: *ResponseManager) void {
-        // Signal shutdown and wake up all waiters
+        // Mark the manager closed and detach the subscription under the
+        // lock, but stop the subscription outside of it: sub.deinit() joins
+        // the response handler task, and the handler acquires pending_mutex,
+        // so holding it across the join can deadlock. Once is_closed is set,
+        // a still-running handler drops any response it delivers.
         self.pending_mutex.lockUncancelable(self.io);
-        defer self.pending_mutex.unlock(self.io);
+        self.is_closed = true;
+        const resp_mux = self.resp_mux;
+        self.resp_mux = null;
+        self.pending_condition.broadcast(self.io); // Wake up all waiters
+        self.pending_mutex.unlock(self.io);
 
-        // Clean up the response subscription if it exists
-        if (self.resp_mux) |sub| {
+        if (resp_mux) |sub| {
             sub.deinit(); // This will unsubscribe and release the user reference
-            self.resp_mux = null;
         }
 
-        self.is_closed = true;
-        self.pending_condition.broadcast(self.io); // Wake up all waiters
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
 
         // Clean up any remaining pending responses
         if (self.pending_responses.count() > 0) {
