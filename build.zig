@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     // Parse the ZON content at compile time, or use fallback values if parsing fails
     var parsed_zon: BuildZon = undefined;
     var should_free = false;
-    if (std.zon.parse.fromSlice(BuildZon, b.allocator, zon_content, null, .{})) |result| {
+    if (std.zon.parse.fromSliceAlloc(BuildZon, b.allocator, zon_content, null, .{})) |result| {
         parsed_zon = result;
         should_free = true;
     } else |_| {
@@ -35,6 +35,11 @@ pub fn build(b: *std.Build) void {
     defer if (should_free) std.zon.parse.free(b.allocator, parsed_zon);
 
     const zio = b.dependency("zio", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const xsync = b.dependency("xsync", .{
         .target = target,
         .optimize = optimize,
     });
@@ -58,6 +63,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     lib_mod.addImport("zio", zio.module("zio"));
+    lib_mod.addImport("xsync", xsync.module("xsync"));
 
     // Add build options to the module
     lib_mod.addOptions("build_options", options);
@@ -176,12 +182,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = null,
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
-    c_echo_server.addCSourceFile(.{ .file = b.path("benchmarks/echo_server.c"), .flags = &.{} });
-    c_echo_server.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
-    c_echo_server.linkLibC();
-    c_echo_server.linkSystemLibrary("nats");
+    c_echo_server.root_module.addCSourceFile(.{ .file = b.path("benchmarks/echo_server.c"), .flags = &.{} });
+    c_echo_server.root_module.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
+    c_echo_server.root_module.linkSystemLibrary("nats", .{});
 
     const c_echo_client = b.addExecutable(.{
         .name = "echo_client_c",
@@ -189,12 +195,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = null,
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
-    c_echo_client.addCSourceFile(.{ .file = b.path("benchmarks/echo_client.c"), .flags = &.{} });
-    c_echo_client.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
-    c_echo_client.linkLibC();
-    c_echo_client.linkSystemLibrary("nats");
+    c_echo_client.root_module.addCSourceFile(.{ .file = b.path("benchmarks/echo_client.c"), .flags = &.{} });
+    c_echo_client.root_module.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
+    c_echo_client.root_module.linkSystemLibrary("nats", .{});
 
     const c_publisher = b.addExecutable(.{
         .name = "publisher_c",
@@ -202,12 +208,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = null,
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
-    c_publisher.addCSourceFile(.{ .file = b.path("benchmarks/publisher.c"), .flags = &.{} });
-    c_publisher.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
-    c_publisher.linkLibC();
-    c_publisher.linkSystemLibrary("nats");
+    c_publisher.root_module.addCSourceFile(.{ .file = b.path("benchmarks/publisher.c"), .flags = &.{} });
+    c_publisher.root_module.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
+    c_publisher.root_module.linkSystemLibrary("nats", .{});
 
     const c_subscriber = b.addExecutable(.{
         .name = "subscriber_c",
@@ -215,12 +221,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = null,
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
-    c_subscriber.addCSourceFile(.{ .file = b.path("benchmarks/subscriber.c"), .flags = &.{} });
-    c_subscriber.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
-    c_subscriber.linkLibC();
-    c_subscriber.linkSystemLibrary("nats");
+    c_subscriber.root_module.addCSourceFile(.{ .file = b.path("benchmarks/subscriber.c"), .flags = &.{} });
+    c_subscriber.root_module.addCSourceFile(.{ .file = b.path("benchmarks/bench_util.c"), .flags = &.{} });
+    c_subscriber.root_module.linkSystemLibrary("nats", .{});
 
     const install_c_echo_server = b.addInstallArtifact(c_echo_server, .{});
     const install_c_echo_client = b.addInstallArtifact(c_echo_client, .{});

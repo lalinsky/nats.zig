@@ -10,7 +10,7 @@ test "subscribeSync smoke test" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("test");
@@ -30,7 +30,7 @@ test "queueSubscribeSync smoke test" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     const sub = try conn.queueSubscribeSync("test", "workers");
@@ -68,9 +68,9 @@ const MessageCollector = struct {
         defer self.mutex.unlock();
 
         const timeout_ns = timeout_ms * std.time.ns_per_ms;
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = zio.Stopwatch.start();
         while (self.result == null) {
-            const elapsed_ns = timer.read();
+            const elapsed_ns = timer.read().toNanoseconds();
             if (elapsed_ns >= timeout_ns) {
                 return error.Timeout;
             }
@@ -84,7 +84,7 @@ test "subscribe smoke test" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     var collector: MessageCollector = .{};
@@ -105,7 +105,7 @@ test "queueSubscribe smoke test" {
     const rt = try zio.Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
     var collector: MessageCollector = .{};

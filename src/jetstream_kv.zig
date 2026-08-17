@@ -12,6 +12,7 @@
 // limitations under the License.
 
 const std = @import("std");
+const zio = @import("zio");
 const JetStream = @import("jetstream.zig").JetStream;
 const validation = @import("validation.zig");
 const StreamConfig = @import("jetstream.zig").StreamConfig;
@@ -246,7 +247,7 @@ pub const KVWatcher = struct {
             return null;
         }
 
-        var timer = try std.time.Timer.start();
+        var timer = zio.Stopwatch.start();
         var remaining_ns = timeout_ms * std.time.ns_per_ms;
         while (true) {
             const remaining_ms = remaining_ns / std.time.ns_per_ms;
@@ -278,7 +279,7 @@ pub const KVWatcher = struct {
                 return entry;
             }
 
-            const elapsed_ns = timer.lap();
+            const elapsed_ns = timer.lap().toNanoseconds();
             if (elapsed_ns > remaining_ns) {
                 return error.Timeout;
             }
@@ -651,10 +652,10 @@ pub const KV = struct {
         }
 
         const total_timeout_ms = self.js.nc.options.timeout_ms;
-        var timer = try std.time.Timer.start();
+        var timer = zio.Stopwatch.start();
 
         while (true) {
-            const elapsed_ms = timer.read() / std.time.ns_per_ms;
+            const elapsed_ms = timer.read().toNanoseconds() / std.time.ns_per_ms;
             if (elapsed_ms >= total_timeout_ms) {
                 return error.Timeout;
             }

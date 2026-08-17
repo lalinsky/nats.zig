@@ -1,5 +1,6 @@
 const std = @import("std");
 const nats = @import("nats");
+const zio = @import("zio");
 const bench_util = @import("bench_util.zig");
 
 const REPORT_INTERVAL = 1000;
@@ -10,7 +11,7 @@ pub const std_options: std.Options = .{
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -63,7 +64,7 @@ pub fn main() !void {
             stats.last_msg_count = stats.msg_count;
             stats.last_success_count = stats.success_count;
             stats.last_error_count = stats.error_count;
-            stats.last_report_time = std.time.nanoTimestamp();
+            stats.last_report_time = zio.Timestamp.now(.monotonic).toNanoseconds();
         }
     }
 
