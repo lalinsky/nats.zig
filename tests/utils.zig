@@ -103,12 +103,24 @@ pub fn waitForHealthyServices(allocator: std.mem.Allocator, timeout: std.Io.Dura
             }
         }
 
-        if (total_count > 0 and healthy_count == total_count) {
+        if (total_count > 0 and healthy_count == total_count and allServerPortsOpen(io)) {
             return;
         }
 
         blockingIo().sleep(.fromMilliseconds(100), .awake) catch {};
     }
+}
+
+/// Docker reporting a container healthy is not the same as the NATS client
+/// port accepting connections; probe the real thing so a test never starts
+/// against a server that is still coming up.
+fn allServerPortsOpen(io: std.Io) bool {
+    for ([_]Node{ .node1, .node2, .node3, .token_auth }) |node| {
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(@intFromEnum(node)) };
+        const stream = address.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch return false;
+        stream.close(io);
+    }
+    return true;
 }
 
 /// Publish into a JetStream stream and wait for the PubAck, so the message
