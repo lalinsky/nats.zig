@@ -1,7 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 const Connection = nats.Connection;
 const JetStream = nats.JetStream;
@@ -12,11 +11,10 @@ const MessageBatch = nats.MessageBatch;
 const PullSubscription = nats.PullSubscription;
 
 test "JetStream pull consumer basic fetch" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
     // Use existing utility functions
-    const nc = try utils.createDefaultConnection(rt.io());
+    const nc = try utils.createDefaultConnection(io);
     defer utils.closeConnection(nc);
 
     var js = nc.jetstream(.{});

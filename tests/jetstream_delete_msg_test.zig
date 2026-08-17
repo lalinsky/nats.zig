@@ -1,14 +1,12 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "delete message" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -57,10 +55,9 @@ test "delete message" {
 }
 
 test "erase message" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -109,10 +106,9 @@ test "erase message" {
 }
 
 test "delete vs erase message behavior" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -164,10 +160,9 @@ test "delete vs erase message behavior" {
 }
 
 test "delete message error cases" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -204,10 +199,9 @@ test "delete message error cases" {
 }
 
 test "erase message error cases" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

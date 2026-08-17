@@ -34,11 +34,6 @@ pub fn build(b: *std.Build) void {
     }
     defer if (should_free) std.zon.parse.free(b.allocator, parsed_zon);
 
-    const zio = b.dependency("zio", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     const xsync = b.dependency("xsync", .{
         .target = target,
         .optimize = optimize,
@@ -106,7 +101,6 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
     integration_tests.root_module.addImport("nats", lib_mod);
-    integration_tests.root_module.addImport("zio", zio.module("zio"));
     integration_tests.root_module.addImport("xsync", xsync.module("xsync"));
 
     const run_integration_tests = b.addRunArtifact(integration_tests);

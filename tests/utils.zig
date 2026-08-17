@@ -1,12 +1,16 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
 
 const log = std.log.default;
 
-// Blocking `std.Io` instance for test utilities that run outside any zio
-// runtime (docker compose invocations, sleeps). Lazily initialized, never
-// deinitialized; lives for the whole test process.
+/// Duration-form `std.Io.Timeout` on the awake clock, for xsync wait calls.
+pub fn ioTimeout(duration: std.Io.Duration) std.Io.Timeout {
+    return .{ .duration = .{ .raw = duration, .clock = .awake } };
+}
+
+// Blocking `std.Io` instance for test utilities that must outlive any
+// per-test io instance (docker compose invocations, sleeps). Lazily
+// initialized, never deinitialized; lives for the whole test process.
 var blocking_io_instance: ?std.Io.Threaded = null;
 
 fn blockingIo() std.Io {

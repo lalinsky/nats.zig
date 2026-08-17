@@ -1,16 +1,14 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
 
 test "list stream names" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -49,10 +47,9 @@ test "list stream names" {
 }
 
 test "add stream" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -87,10 +84,9 @@ test "add stream" {
 }
 
 test "list streams" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -135,10 +131,9 @@ test "list streams" {
 }
 
 test "update stream" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -179,10 +174,9 @@ test "update stream" {
 }
 
 test "delete stream" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -233,10 +227,9 @@ test "delete stream" {
 }
 
 test "get stream info" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
