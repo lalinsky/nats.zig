@@ -171,6 +171,12 @@ pub const Subscription = struct {
     }
 
     fn destroy(self: *Subscription) void {
+        // Close the queue before canceling the handler task group: cancelation
+        // is delivered only once, and a user callback may swallow it (e.g. an
+        // `io.sleep(...) catch {}`), in which case the handler loop keeps
+        // polling the queue and only a `Closed` result makes it exit.
+        self.messages.close();
+
         // Cancel handler task group and wait for completion
         self.handler_group.cancel(self.nc.io);
 
@@ -185,8 +191,7 @@ pub const Subscription = struct {
             handler.cleanup(self.nc.allocator);
         }
 
-        // Close the queue to prevent new messages and clean up pending messages
-        self.messages.close();
+        // Clean up messages still pending in the closed queue
         while (self.messages.tryPop()) |msg| {
             msg.deinit();
         }
