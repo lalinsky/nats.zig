@@ -254,6 +254,8 @@ pub const ConnectionOptions = struct {
     max_pings_out: u32 = 2, // max unanswered keep-alive PINGs
 
     // Authentication
+    user: ?[]const u8 = null,
+    password: ?[]const u8 = null,
     token: ?[]const u8 = null,
     token_handler: ?*const fn () []const u8 = null,
 };
@@ -1278,11 +1280,41 @@ pub const Connection = struct {
         // Get client name from options or use default
         const client_name = self.options.name orelse build_options.name;
 
-        // Get authentication token (dynamic handler takes precedence)
-        const auth_token = if (self.options.token_handler) |handler|
-            handler()
-        else
-            self.options.token;
+        // Determine credentials with the same precedence as the C client:
+        // the current server's URL first, then the connection options, then
+        // credentials saved from the first explicit URL in the server pool
+        // (for implicitly discovered servers). A username without a password
+        // is treated as a token.
+        var user: ?[]const u8 = null;
+        var password: ?[]const u8 = null;
+        var auth_token: ?[]const u8 = null;
+
+        if (self.current_server) |server| {
+            user = server.parsed_url.username;
+            password = server.parsed_url.password;
+        }
+        if (user != null and password == null) {
+            auth_token = user;
+            user = null;
+        }
+        if (user == null and auth_token == null) {
+            user = self.options.user;
+            password = self.options.password;
+            // Dynamic token handler takes precedence over the static token
+            auth_token = if (self.options.token_handler) |handler|
+                handler()
+            else
+                self.options.token;
+
+            if (user == null and auth_token == null) {
+                user = self.server_pool.default_user;
+                password = self.server_pool.default_pwd;
+                if (user != null and password == null) {
+                    auth_token = user;
+                    user = null;
+                }
+            }
+        }
 
         // Create CONNECT JSON object
         const connect_obj = .{
@@ -1294,11 +1326,13 @@ pub const Connection = struct {
             .lang = build_options.lang,
             .version = build_options.version,
             .protocol = 1,
+            .user = user,
+            .pass = password,
             .auth_token = auth_token,
         };
 
         try buffer.writer.writeAll("CONNECT ");
-        try buffer.writer.print("{f}", .{std.json.fmt(connect_obj, .{})});
+        try buffer.writer.print("{f}", .{std.json.fmt(connect_obj, .{ .emit_null_optional_fields = false })});
         try buffer.writer.writeAll("\r\n");
         try buffer.writer.writeAll("PING\r\n");
 
