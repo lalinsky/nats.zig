@@ -91,6 +91,90 @@ test "token authentication failure" {
     }
 }
 
+test "user password authentication success" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .user = "test_user",
+        .password = "test_password",
+    };
+
+    const conn = try utils.createConnection(io, .user_pass, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.userpass", "authenticated message");
+    try conn.flush();
+}
+
+test "user password authentication failure" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .user = "test_user",
+        .password = "wrong_password",
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+    };
+
+    const result = utils.createConnection(io, .user_pass, opts);
+
+    if (result) |conn| {
+        defer utils.closeConnection(conn);
+        try std.testing.expect(false);
+    } else |err| {
+        try std.testing.expect(err == nats.ProtocolError.AuthorizationViolation);
+    }
+}
+
+test "url credentials authentication" {
+    const io = std.testing.io;
+
+    const conn = try utils.createConnectionWithUrl(
+        io,
+        "nats://test_user:test_password@127.0.0.1:14227",
+        .{},
+    );
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.urlcreds", "url authenticated");
+    try conn.flush();
+}
+
+test "url credentials take precedence over options" {
+    const io = std.testing.io;
+
+    // The URL credentials are valid, the options ones are not; the URL
+    // must win, matching the C client's precedence.
+    const opts = nats.ConnectionOptions{
+        .user = "test_user",
+        .password = "wrong_password",
+    };
+
+    const conn = try utils.createConnectionWithUrl(
+        io,
+        "nats://test_user:test_password@127.0.0.1:14227",
+        opts,
+    );
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.urlprecedence", "url wins");
+    try conn.flush();
+}
+
+test "url token authentication" {
+    const io = std.testing.io;
+
+    // A username without a password in the URL is treated as a token.
+    const conn = try utils.createConnectionWithUrl(
+        io,
+        "nats://test_token_123@127.0.0.1:14225",
+        .{},
+    );
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.urltoken", "token authenticated");
+    try conn.flush();
+}
+
 test "no authentication options against auth server" {
     const io = std.testing.io;
 

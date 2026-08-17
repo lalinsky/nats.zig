@@ -111,7 +111,7 @@ const sub = try nc.subscribe("hello", messageHandler, .{&counter});
 
 ```zig
 // Send request and wait for reply with 5 second timeout
-const reply = try nc.request("help", "need assistance", .fromSeconds(5));
+const reply = try nc.request("help", "need assistance", .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
 defer reply.deinit();
 
 std.debug.print("Received reply: {s}\n", .{reply.data});
@@ -121,9 +121,9 @@ std.debug.print("Received reply: {s}\n", .{reply.data});
 
 ```zig
 // Request multiple responses from different responders
-var messages = try nc.requestMany("services.status", "ping all", .fromSeconds(5), .{
-    .max_messages = 10,             // Stop after 10 responses
-    .stall = .fromMilliseconds(100), // Stop if no new responses for 100ms
+var messages = try nc.requestMany("services.status", "ping all", .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }, .{
+    .max_messages = 10, // Stop after 10 responses
+    .stall = .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }, // Stop if no new responses for 100ms
 });
 
 while (messages.pop()) |msg| {
@@ -216,6 +216,33 @@ for (batch.messages) |js_msg| {
     try js_msg.ack();
 }
 ```
+
+### Authentication
+
+Username/password and token authentication can be configured through the
+connection options or directly in the URL:
+
+```zig
+// Username and password from options
+var nc = nats.Connection.init(init.gpa, init.io, .{
+    .user = "alice",
+    .password = "secret",
+});
+
+// Token from options
+var nc2 = nats.Connection.init(init.gpa, init.io, .{
+    .token = "s3cr3t-t0ken",
+});
+
+// Credentials embedded in the URL
+try nc.connect("nats://alice:secret@localhost:4222");
+
+// A URL username without a password is sent as a token
+try nc2.connect("nats://s3cr3t-t0ken@localhost:4222");
+```
+
+Credentials in the server URL take precedence over the options, matching the
+behavior of the official NATS clients.
 
 ## Selecting the I/O Backend
 
