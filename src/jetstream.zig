@@ -13,7 +13,6 @@
 
 const std = @import("std");
 const Io = std.Io;
-const zio = @import("zio");
 const xsync = @import("xsync");
 const message_mod = @import("message.zig");
 const Message = message_mod.Message;

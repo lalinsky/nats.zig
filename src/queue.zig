@@ -12,7 +12,6 @@
 // limitations under the License.
 
 const std = @import("std");
-const zio = @import("zio");
 const xsync = @import("xsync");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -899,11 +898,8 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
 test "generic queue with integers" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const IntQueue = ConcurrentQueue(i32, 4);
-    var queue = IntQueue.init(allocator, rt.io(), .{});
+    var queue = IntQueue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
     // Push individual items
@@ -921,16 +917,13 @@ test "generic queue with integers" {
 test "generic queue with structs" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Message = struct {
         id: u32,
         data: [8]u8,
     };
 
     const MsgQueue = ConcurrentQueue(Message, 16);
-    var queue = MsgQueue.init(allocator, rt.io(), .{});
+    var queue = MsgQueue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
     // Push messages
@@ -953,11 +946,8 @@ test "generic queue with structs" {
 test "byte buffer specialization" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, rt.io(), .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     try buffer.append("Hello, World!");
@@ -971,12 +961,10 @@ test "byte buffer specialization" {
 
 test "concurrent push and pop" {
     const allocator = std.testing.allocator;
-
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
     const Queue = ConcurrentQueue(u64, 32);
-    var queue = Queue.init(allocator, rt.io(), .{});
+    var queue = Queue.init(allocator, io, .{});
     defer queue.deinit();
 
     var sum: u64 = 0;
@@ -995,13 +983,13 @@ test "concurrent push and pop" {
         }
     };
 
-    var group: zio.Group = .init;
-    defer group.cancel();
+    var group: Io.Group = .init;
+    defer group.cancel(io);
 
-    try group.spawn(TestFn.producer, .{&queue});
-    try group.spawn(TestFn.consumer, .{ &queue, &sum });
+    try group.concurrent(io, TestFn.producer, .{&queue});
+    try group.concurrent(io, TestFn.consumer, .{ &queue, &sum });
 
-    try group.wait();
+    try group.await(io);
 
     // Sum of 0..99 = 4950
     try std.testing.expectEqual(4950, sum);
@@ -1010,11 +998,8 @@ test "concurrent push and pop" {
 test "queue close functionality" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, rt.io(), .{});
+    var queue = Queue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
     // Push some items before closing
@@ -1039,18 +1024,15 @@ test "queue close functionality" {
 test "blocking pop handles queue closure" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, rt.io(), .{});
+    var queue = Queue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
     var pop_result: ?(Io.Cancelable || PopError) = null;
 
     const TestFn = struct {
         fn closer(q: *Queue) void {
-            zio.sleep(.fromMilliseconds(10)) catch return;
+            std.testing.io.sleep(.fromMilliseconds(10), .awake) catch return;
             q.close();
         }
 
@@ -1062,13 +1044,13 @@ test "blocking pop handles queue closure" {
         }
     };
 
-    var group: zio.Group = .init;
-    defer group.cancel();
+    var group: Io.Group = .init;
+    defer group.cancel(std.testing.io);
 
-    try group.spawn(TestFn.closer, .{&queue});
-    try group.spawn(TestFn.popper, .{ &queue, &pop_result });
+    try group.concurrent(std.testing.io, TestFn.closer, .{&queue});
+    try group.concurrent(std.testing.io, TestFn.popper, .{ &queue, &pop_result });
 
-    try group.wait();
+    try group.await(std.testing.io);
 
     try std.testing.expectEqual(error.Closed, pop_result.?);
 }
@@ -1076,18 +1058,15 @@ test "blocking pop handles queue closure" {
 test "getSlice handles queue closure with indefinite wait" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, rt.io(), .{});
+    var queue = Queue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
     var get_result: ?(Io.Cancelable || PopError) = null;
 
     const TestFn = struct {
         fn closer(q: *Queue) void {
-            zio.sleep(.fromMilliseconds(10)) catch return;
+            std.testing.io.sleep(.fromMilliseconds(10), .awake) catch return;
             q.close();
         }
 
@@ -1099,13 +1078,13 @@ test "getSlice handles queue closure with indefinite wait" {
         }
     };
 
-    var group: zio.Group = .init;
-    defer group.cancel();
+    var group: Io.Group = .init;
+    defer group.cancel(std.testing.io);
 
-    try group.spawn(TestFn.closer, .{&queue});
-    try group.spawn(TestFn.getter, .{ &queue, &get_result });
+    try group.concurrent(std.testing.io, TestFn.closer, .{&queue});
+    try group.concurrent(std.testing.io, TestFn.getter, .{ &queue, &get_result });
 
-    try group.wait();
+    try group.await(std.testing.io);
 
     try std.testing.expectEqual(error.Closed, get_result.?);
 }
@@ -1113,11 +1092,8 @@ test "getSlice handles queue closure with indefinite wait" {
 test "buffer close functionality" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, rt.io(), .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     // Append some data before closing
@@ -1143,14 +1119,11 @@ test "buffer close functionality" {
 test "buffer moveToBuffer functionality" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(32);
-    var source = Buffer.init(allocator, rt.io(), .{});
+    var source = Buffer.init(allocator, std.testing.io, .{});
     defer source.deinit();
 
-    var dest = Buffer.init(allocator, rt.io(), .{});
+    var dest = Buffer.init(allocator, std.testing.io, .{});
     defer dest.deinit();
 
     // Add data to source buffer
@@ -1180,15 +1153,12 @@ test "buffer moveToBuffer functionality" {
 test "buffer moveToBuffer with multiple chunks" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     // Use small chunk size to force multiple chunks
     const Buffer = ConcurrentWriteBuffer(8);
-    var source = Buffer.init(allocator, rt.io(), .{});
+    var source = Buffer.init(allocator, std.testing.io, .{});
     defer source.deinit();
 
-    var dest = Buffer.init(allocator, rt.io(), .{});
+    var dest = Buffer.init(allocator, std.testing.io, .{});
     defer dest.deinit();
 
     // Add data that spans multiple chunks
@@ -1228,14 +1198,11 @@ test "buffer moveToBuffer with multiple chunks" {
 test "buffer moveToBuffer empty source" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var source = Buffer.init(allocator, rt.io(), .{});
+    var source = Buffer.init(allocator, std.testing.io, .{});
     defer source.deinit();
 
-    var dest = Buffer.init(allocator, rt.io(), .{});
+    var dest = Buffer.init(allocator, std.testing.io, .{});
     defer dest.deinit();
 
     // Add some data to destination first
@@ -1257,11 +1224,8 @@ test "buffer moveToBuffer empty source" {
 test "buffer max_size limit" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, rt.io(), .{ .max_size = 10 });
+    var buffer = Buffer.init(allocator, std.testing.io, .{ .max_size = 10 });
     defer buffer.deinit();
 
     // Should be able to add up to max_size
@@ -1286,11 +1250,8 @@ test "buffer max_size limit" {
 test "queue close wakes readers" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, rt.io(), .{});
+    var queue = Queue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
     queue.close();
@@ -1302,11 +1263,8 @@ test "queue close wakes readers" {
 test "ConcurrentWriteBuffer waitForData smoke test" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, rt.io(), .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     // Test waitForData with immediate data available
@@ -1323,11 +1281,8 @@ test "ConcurrentWriteBuffer waitForData smoke test" {
 test "ConcurrentWriteBuffer waitForData with closed buffer" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, rt.io(), .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     // Close the buffer
@@ -1340,11 +1295,8 @@ test "ConcurrentWriteBuffer waitForData with closed buffer" {
 test "ConcurrentWriteBuffer waitForMoreData smoke test" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, rt.io(), .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     // Add initial data
@@ -1361,11 +1313,8 @@ test "ConcurrentWriteBuffer waitForMoreData smoke test" {
 test "ConcurrentWriteBuffer waitForMoreData with closed buffer" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, rt.io(), .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     // Close the buffer
@@ -1378,11 +1327,8 @@ test "ConcurrentWriteBuffer waitForMoreData with closed buffer" {
 test "VectorGather thread safety validation" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, rt.io(), .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     try buffer.append("Hello, World!");
@@ -1404,11 +1350,8 @@ test "VectorGather thread safety validation" {
 test "VectorGather blocking behavior" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, rt.io(), .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     // Should return WouldBlock immediately when no data (non-blocking)
@@ -1428,11 +1371,8 @@ test "VectorGather blocking behavior" {
 test "VectorGather detects buffer reset between gather and consume" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, rt.io(), .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     try buffer.append("Hello, World!");
@@ -1451,11 +1391,8 @@ test "VectorGather detects buffer reset between gather and consume" {
 test "VectorGather detects concurrent consumer advancing buffer" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, rt.io(), .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     try buffer.append("Hello, World!");

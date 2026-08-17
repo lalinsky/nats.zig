@@ -13,7 +13,6 @@
 // limitations under the License.
 
 const std = @import("std");
-const zio = @import("zio");
 const Message = @import("message.zig").Message;
 const MessagePool = @import("message.zig").MessagePool;
 const log = @import("log.zig").log;
