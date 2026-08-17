@@ -55,7 +55,7 @@ const sub = try nc.subscribeSync("hello");
 
 // Wait for message with 5 second timeout
 while (true) {
-    var msg = sub.nextMsgTimeout(.fromSeconds(5)) catch |err| {
+    var msg = sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch |err| {
         if (err == error.Timeout) continue;
         return err;
     };
@@ -79,7 +79,7 @@ if (sub.tryNextMsg()) |available| { // never blocks
 
 var batch: [64]*nats.Message = undefined;
 {
-    const count = try sub.nextMsgBatchTimeout(&batch, .fromSeconds(5));
+    const count = try sub.nextMsgBatchTimeout(&batch, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
     defer for (batch[0..count]) |batch_msg| batch_msg.deinit();
     // Process batch[0..count].
 }

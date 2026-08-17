@@ -112,7 +112,7 @@ pub const Subscription = struct {
 
         while (true) {
             // Wait for a message with timeout (allows periodic checking)
-            const msg = self.messages.pop(.fromMilliseconds(100)) catch |err| {
+            const msg = self.messages.pop(.{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch |err| {
                 if (err == error.Closed or err == error.Canceled) {
                     log.debug("Subscription {} queue closed, stopping handler", .{self.sid});
                     break;
@@ -237,17 +237,16 @@ pub const Subscription = struct {
         return self.draining.load(.acquire) and self.drain_complete.isSet();
     }
 
-    /// Wait for the subscription drain to finish. A null timeout waits
-    /// indefinitely.
-    pub fn waitForDrainCompletion(self: *Subscription, timeout: ?Io.Duration) !void {
+    /// Wait for the subscription drain to finish.
+    pub fn waitForDrainCompletion(self: *Subscription, timeout: Io.Timeout) !void {
         if (!self.draining.load(.acquire)) {
             return error.NotDraining;
         }
 
-        if (timeout) |t| {
-            try self.drain_complete.waitTimeout(self.nc.io, io_util.timeout(t));
-        } else {
+        if (timeout == .none) {
             try self.drain_complete.wait(self.nc.io);
+        } else {
+            try self.drain_complete.waitTimeout(self.nc.io, timeout);
         }
     }
 
@@ -279,26 +278,37 @@ pub const Subscription = struct {
     }
 
     pub const ReceiveError = Io.Cancelable || error{
-        Timeout,
         ConnectionClosed,
     };
 
+    pub const ReceiveTimeoutError = ReceiveError || Io.Timeout.Error;
+
     /// Wait indefinitely for the next message.
     pub fn nextMsg(self: *Subscription) ReceiveError!*Message {
-        return self.nextMsgTimeout(.max);
+        return self.nextMsgInternal(.none) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return other,
+        };
     }
 
     /// Wait up to `timeout` for the next message.
     /// Returns `error.ConnectionClosed` once the queue is closed and drained.
-    pub fn nextMsgTimeout(self: *Subscription, timeout: Io.Duration) ReceiveError!*Message {
+    pub fn nextMsgTimeout(self: *Subscription, timeout: Io.Timeout) ReceiveTimeoutError!*Message {
+        return self.nextMsgInternal(timeout);
+    }
+
+    fn nextMsgInternal(self: *Subscription, timeout: Io.Timeout) ReceiveTimeoutError!*Message {
         // Check if subscription has reached autounsubscribe limit
         const max = self.max_msgs.load(.acquire);
         if (max > 0 and self.delivered_msgs.load(.acquire) >= max) {
-            return error.Timeout; // Consistent with "no more messages" semantics
+            return switch (timeout) {
+                .none => error.ConnectionClosed,
+                .duration, .deadline => error.Timeout,
+            };
         }
 
         const msg = self.messages.pop(timeout) catch |err| switch (err) {
-            error.WouldBlock => return error.Timeout,
+            error.Timeout => return error.Timeout,
             error.Closed => return error.ConnectionClosed,
             error.Canceled => return error.Canceled,
         };
@@ -320,17 +330,23 @@ pub const Subscription = struct {
     /// Wait indefinitely for at least one message, then drain up to
     /// `output.len` currently available messages into `output`.
     pub fn nextMsgBatch(self: *Subscription, output: []*Message) ReceiveError!usize {
-        return self.nextMsgBatchTimeout(output, .max);
+        if (output.len == 0) return 0;
+
+        output[0] = try self.nextMsg();
+        return self.drainBatch(output, 1);
     }
 
     /// Wait up to `timeout` for at least one message, then drain up to
     /// `output.len` currently available messages into `output`.
-    pub fn nextMsgBatchTimeout(self: *Subscription, output: []*Message, timeout: Io.Duration) ReceiveError!usize {
+    pub fn nextMsgBatchTimeout(self: *Subscription, output: []*Message, timeout: Io.Timeout) ReceiveTimeoutError!usize {
         if (output.len == 0) return 0;
 
         output[0] = try self.nextMsgTimeout(timeout);
-        var count: usize = 1;
+        return self.drainBatch(output, 1);
+    }
 
+    fn drainBatch(self: *Subscription, output: []*Message, start: usize) usize {
+        var count = start;
         while (count < output.len) : (count += 1) {
             output[count] = self.tryNextMsg() orelse break;
         }
