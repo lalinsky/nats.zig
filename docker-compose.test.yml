@@ -78,6 +78,59 @@ services:
       timeout: 3s
       retries: 5
 
+  nats-user-pass:
+    image: nats:2.10-alpine
+    network_mode: host
+    command:
+      - "--addr"
+      - "127.0.0.1"
+      - "--port"
+      - "14227"
+      - "--http_port"
+      - "18227"
+      - "--user"
+      - "test_user"
+      - "--pass"
+      - "test_password"
+      - "-D"
+      - "--server_name"
+      - "nats-user-pass"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:18227/healthz"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+
+  nats-nkey-auth:
+    image: nats:2.10-alpine
+    network_mode: host
+    command:
+      - "--config"
+      - "/etc/nats/nkey.conf"
+      - "-D"
+    volumes:
+      - ./tests/configs/nkey.conf:/etc/nats/nkey.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:18228/healthz"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+
+  nats-jwt-auth:
+    image: nats:2.10-alpine
+    network_mode: host
+    command:
+      - "--config"
+      - "/etc/nats/jwt.conf"
+      - "-D"
+    volumes:
+      - ./tests/configs/jwt.conf:/etc/nats/jwt.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:18229/healthz"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+
   nats-token-auth:
     image: nats:2.10-alpine
     network_mode: host
