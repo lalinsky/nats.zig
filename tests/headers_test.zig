@@ -27,7 +27,7 @@ test "publish and receive message with headers" {
     try conn.flush();
 
     // Receive the message
-    var received_msg = sub.nextMsgTimeout(.fromSeconds(1)) catch return error.NoMessageReceived;
+    var received_msg = sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } }) catch return error.NoMessageReceived;
     defer received_msg.deinit();
 
     // Verify basic message properties
@@ -67,7 +67,7 @@ test "publish message without headers using publishMsg" {
     try conn.flush();
 
     // Receive the message
-    var received_msg = sub.nextMsgTimeout(.fromSeconds(1)) catch return error.NoMessageReceived;
+    var received_msg = sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } }) catch return error.NoMessageReceived;
     defer received_msg.deinit();
 
     // Verify basic message properties
@@ -136,7 +136,7 @@ test "message with reply and headers" {
     try conn.flush();
 
     // Receive the message
-    var received_msg = sub.nextMsgTimeout(.fromSeconds(1)) catch return error.NoMessageReceived;
+    var received_msg = sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } }) catch return error.NoMessageReceived;
     defer received_msg.deinit();
 
     // Verify message properties

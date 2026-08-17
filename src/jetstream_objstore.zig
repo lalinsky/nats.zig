@@ -192,7 +192,7 @@ pub const ObjectResult = struct {
 
             // Get next chunk from subscription
             const request_timeout = sub.js.nc.options.timeout;
-            const js_msg = try sub.nextMsg(request_timeout);
+            const js_msg = try sub.nextMsgTimeout(request_timeout);
 
             // Store the message pointer and reset position
             self.current_msg = js_msg;
@@ -644,7 +644,7 @@ pub const ObjectStore = struct {
         // Collect all objects (including deleted ones, to be filtered later)
         const request_timeout = self.js.nc.options.timeout;
         while (true) {
-            const js_msg = sub.nextMsg(request_timeout) catch |err| {
+            const js_msg = sub.nextMsgTimeout(request_timeout) catch |err| {
                 if (err == error.Timeout) {
                     break;
                 }

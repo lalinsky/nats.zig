@@ -46,7 +46,7 @@ pub const MsgMetadata = jetstream_message.MsgMetadata;
 pub const SequencePair = jetstream_message.SequencePair;
 
 const default_api_prefix = "$JS.API.";
-const default_request_timeout: Io.Duration = .fromMilliseconds(5000);
+const default_request_timeout: Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(5000), .clock = .awake } };
 
 // JetStream publish headers
 const MsgIdHdr = "Nats-Msg-Id";
@@ -430,7 +430,7 @@ pub const PullSubscription = struct {
     }
 
     /// Fetch a batch of messages from the pull consumer
-    pub fn fetch(self: *PullSubscription, batch: usize, timeout: Io.Duration) !MessageBatch {
+    pub fn fetch(self: *PullSubscription, batch: usize, timeout: Io.Timeout) !MessageBatch {
         if (batch == 0) return error.InvalidBatchSize;
 
         try self.mutex.lock(self.js.nc.io);
@@ -443,9 +443,10 @@ pub const PullSubscription = struct {
         const reply_subject = try std.fmt.allocPrint(self.js.nc.allocator, "{s}{d}", .{ self.inbox_prefix, fetch_id });
         defer self.js.nc.allocator.free(reply_subject);
 
+        const timeout_duration = timeout.toDurationFromNow(self.js.nc.io);
         const request = FetchRequest{
             .batch = batch,
-            .expires = @intCast(timeout.toNanoseconds()),
+            .expires = if (timeout_duration) |duration| @intCast(duration.raw.toNanoseconds()) else null,
         };
 
         // Serialize the fetch request to JSON
@@ -471,7 +472,7 @@ pub const PullSubscription = struct {
 
         // Collect messages until batch is complete or timeout
         while (!batch_complete and messages.items.len < request.batch) {
-            if (self.inbox_subscription.nextMsgTimeout(.{ .nanoseconds = timeout.nanoseconds * 2 })) |raw_msg| {
+            if (self.inbox_subscription.nextMsgTimeout(timeout)) |raw_msg| {
                 log.debug("Message: subject={s}, reply={s}, data='{s}'", .{ raw_msg.subject, raw_msg.reply orelse "none", raw_msg.data });
                 // JetStream messages arrive with original subjects and ACK reply subjects
                 // The timestamp in the ACK subject ensures messages belong to this fetch request
@@ -556,8 +557,16 @@ pub const JetStreamSubscription = struct {
         self.js.nc.allocator.destroy(self);
     }
 
-    /// Get the next JetStream message synchronously (for sync subscriptions)
-    pub fn nextMsg(self: *JetStreamSubscription, timeout: Io.Duration) !*JetStreamMessage {
+    /// Wait indefinitely for the next JetStream message.
+    pub fn nextMsg(self: *JetStreamSubscription) !*JetStreamMessage {
+        const msg = try self.subscription.nextMsg();
+        errdefer msg.deinit();
+
+        return try jetstream_message.createJetStreamMessage(self.js.nc, msg);
+    }
+
+    /// Wait up to `timeout` for the next JetStream message.
+    pub fn nextMsgTimeout(self: *JetStreamSubscription, timeout: Io.Timeout) !*JetStreamMessage {
         // Get the next message from the underlying subscription
         const msg = try self.subscription.nextMsgTimeout(timeout);
         errdefer msg.deinit();
@@ -592,7 +601,7 @@ pub const PullSubscribeOptions = struct {
 };
 
 pub const JetStreamOptions = struct {
-    request_timeout: Io.Duration = default_request_timeout,
+    request_timeout: Io.Timeout = default_request_timeout,
     // Add options here
 };
 

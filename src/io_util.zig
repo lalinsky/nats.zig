@@ -14,14 +14,9 @@
 const std = @import("std");
 const Io = std.Io;
 
-/// Convert a duration into a duration-form `std.Io.Timeout` on the awake clock.
-pub fn timeout(duration: Io.Duration) Io.Timeout {
-    return .{ .duration = .{ .raw = duration, .clock = .awake } };
-}
-
-/// Absolute deadline `duration` from now on the awake clock.
-pub fn deadline(io: Io, duration: Io.Duration) Io.Timeout {
-    return timeout(duration).toDeadline(io);
+/// Convert a timeout to an absolute deadline.
+pub fn deadline(io: Io, timeout: Io.Timeout) Io.Timeout {
+    return timeout.toDeadline(io);
 }
 
 /// Whether a deadline-form timeout has expired. `.none` never expires.

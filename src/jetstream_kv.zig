@@ -241,7 +241,7 @@ pub const KVWatcher = struct {
     }
 
     /// Get the next entry from the watcher (returns null for completion marker, error.Timeout if no entry available)
-    pub fn next(self: *KVWatcher, timeout: Io.Duration) !?KVEntry {
+    pub fn next(self: *KVWatcher, timeout: Io.Timeout) !?KVEntry {
         // If we need to return the completion marker, do it now
         if (self.return_marker) {
             self.return_marker = false;
@@ -249,11 +249,10 @@ pub const KVWatcher = struct {
         }
 
         const io = self.kv.js.nc.io;
-        const deadline = io_util.deadline(io, timeout);
+        const deadline = timeout.toDeadline(io);
         while (true) {
-            const remaining = io_util.remaining(io, deadline) orelse return error.Timeout;
-            log.debug("nextMsg({f})", .{remaining});
-            var msg = try self.sub.nextMsg(remaining);
+            if (io_util.expired(io, deadline)) return error.Timeout;
+            var msg = try self.sub.nextMsgTimeout(deadline);
             var delete_msg = true;
             defer if (delete_msg) msg.deinit();
 
@@ -650,7 +649,7 @@ pub const KV = struct {
 
         while (true) {
             const remaining = io_util.remaining(self.js.nc.io, deadline) orelse return error.Timeout;
-            const entry = try watcher.next(remaining) orelse break;
+            const entry = try watcher.next(.{ .duration = .{ .raw = remaining, .clock = .awake } }) orelse break;
 
             try entries.append(arena_allocator, entry);
         }
@@ -681,7 +680,7 @@ pub const KV = struct {
 
         // Collect unique keys - use completion marker to know when done
         while (true) {
-            var maybe_entry = watcher.next(.fromSeconds(5)) catch |err| {
+            var maybe_entry = watcher.next(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch |err| {
                 if (err == error.Timeout) {
                     break;
                 }
@@ -752,7 +751,7 @@ pub const KV = struct {
 
         // Collect unique keys - use completion marker to know when done
         while (true) {
-            var maybe_entry = watcher.next(.fromSeconds(5)) catch |err| {
+            var maybe_entry = watcher.next(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch |err| {
                 if (err == error.Timeout) {
                     break;
                 }

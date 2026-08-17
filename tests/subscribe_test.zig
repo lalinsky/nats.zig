@@ -16,7 +16,7 @@ test "subscribeSync smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try sub.nextMsgTimeout(.fromSeconds(1));
+    const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test", msg.subject);
@@ -33,7 +33,7 @@ test "queueSubscribeSync smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try sub.nextMsgTimeout(.fromSeconds(1));
+    const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test", msg.subject);
@@ -58,7 +58,7 @@ test "sync receive API" {
 
     try std.testing.expectError(
         error.Timeout,
-        sub.nextMsgTimeout(.fromMilliseconds(10)),
+        sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } }),
     );
 }
 
@@ -77,7 +77,7 @@ test "sync batch receive API" {
     var messages: [5]*Message = undefined;
     const count = try sub.nextMsgBatchTimeout(
         &messages,
-        .fromSeconds(1),
+        .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } },
     );
     defer for (messages[0..count]) |msg| msg.deinit();
 
@@ -89,7 +89,7 @@ test "sync batch receive API" {
     try std.testing.expectEqual(0, sub.tryNextMsgBatch(&messages));
     try std.testing.expectEqual(
         0,
-        try sub.nextMsgBatchTimeout(messages[0..0], .fromSeconds(1)),
+        try sub.nextMsgBatchTimeout(messages[0..0], .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } }),
     );
 }
 
