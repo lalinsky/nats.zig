@@ -4,7 +4,7 @@ const zio = @import("zio");
 const bench_util = @import("bench_util.zig");
 
 const REPORT_INTERVAL = 1000;
-const REQUEST_TIMEOUT: std.Io.Duration = .fromSeconds(5);
+const REQUEST_TIMEOUT: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
 
 pub const std_options: std.Options = .{
     .log_level = .info,
