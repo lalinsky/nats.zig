@@ -12,7 +12,7 @@
 // limitations under the License.
 
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const Parser = @import("parser.zig").Parser;
@@ -33,10 +33,10 @@ const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
 const ResponseManager = @import("response_manager.zig").ResponseManager;
 const MAX_CONTROL_LINE_SIZE = @import("parser.zig").MAX_CONTROL_LINE_SIZE;
 const validation = @import("validation.zig");
-const zio = @import("zio");
 const xsync = @import("xsync");
 const Io = std.Io;
 const io_util = @import("io_util.zig");
+const net_util = @import("net_util.zig");
 
 const log = @import("log.zig").log;
 
@@ -117,7 +117,7 @@ pub const ConnectionError = error{
     NotConnected,
     ManualReconnect,
     StaleConnection,
-} || PublishError || ProtocolError || std.Thread.SpawnError || zio.ev.NetRecv.Error || zio.ev.NetSend.Error;
+} || PublishError || ProtocolError || std.Thread.SpawnError || net.Stream.Reader.Error || net.Stream.Writer.Error;
 
 // Protocol-specific errors from server -ERR messages (matching nats.go approach)
 pub const ProtocolError = error{
@@ -983,12 +983,12 @@ pub const Connection = struct {
         return server;
     }
 
-    fn establishConnection(self: *Self, server: *Server) !zio.net.Stream {
+    fn establishConnection(self: *Self, server: *Server) !net.Stream {
         log.debug("Connecting to server: {s}:{d} ({d} retries)", .{ server.parsed_url.host, server.parsed_url.port, server.reconnects });
-        const stream = try zio.net.tcpConnectToHost(server.parsed_url.host, server.parsed_url.port, .{});
-        errdefer stream.close();
+        const stream = try net_util.tcpConnectToHost(self.io, server.parsed_url.host, server.parsed_url.port);
+        errdefer stream.close(self.io);
 
-        try stream.socket.setKeepAlive(true);
+        try net_util.setKeepAlive(stream.socket, true);
 
         if (self.options.trace) {
             log.debug("Connected, starting handshake...", .{});
@@ -1025,7 +1025,7 @@ pub const Connection = struct {
         const server = try self.selectNextServer();
 
         var stream = try self.establishConnection(server);
-        defer stream.close();
+        defer stream.close(self.io);
 
         var exit_signal: ExitSignal = .{};
 
@@ -1101,7 +1101,7 @@ pub const Connection = struct {
         }
     }
 
-    fn readerLoop(self: *Self, stream: *zio.net.Stream, exit: *ExitSignal) void {
+    fn readerLoop(self: *Self, stream: *net.Stream, exit: *ExitSignal) void {
         if (self.runReader(stream)) |_| {
             exit.signal(self.io, .reader_done, null);
         } else |err| {
@@ -1109,29 +1109,39 @@ pub const Connection = struct {
         }
     }
 
-    fn runReader(self: *Self, stream: *zio.net.Stream) !void {
+    fn runReader(self: *Self, stream: *net.Stream) !void {
         log.debug("Reader loop started", .{});
         defer {
             log.debug("Reader loop exited", .{});
         }
 
         var buffer: [4096]u8 = undefined;
+        var stream_reader = stream.reader(self.io, &buffer);
+        const reader = &stream_reader.interface;
 
         while (true) {
-            const bytes_read = try stream.read(&buffer, .none);
-            if (bytes_read == 0) {
-                log.debug("Connection closed by server (EOF)", .{});
-                break;
-            }
+            reader.fillMore() catch |err| switch (err) {
+                error.EndOfStream => {
+                    log.debug("Connection closed by server (EOF)", .{});
+                    break;
+                },
+                // The `Io.Reader` interface erases the real error; it is
+                // stashed on the stream reader (including cancellation).
+                error.ReadFailed => return stream_reader.err.?,
+            };
 
-            log.debug("Read {} bytes: {s}", .{ bytes_read, buffer[0..bytes_read] });
-            try self.parser.parse(self, buffer[0..bytes_read]);
+            const data = reader.buffered();
+            if (data.len == 0) continue;
+
+            log.debug("Read {} bytes: {s}", .{ data.len, data });
+            try self.parser.parse(self, data);
+            reader.toss(data.len);
 
             try self.checkAndSendPing();
         }
     }
 
-    fn flusherLoop(self: *Self, stream: *zio.net.Stream, exit: *ExitSignal) void {
+    fn flusherLoop(self: *Self, stream: *net.Stream, exit: *ExitSignal) void {
         if (self.runFlusher(stream)) |_| {
             exit.signal(self.io, .flusher_done, null);
         } else |err| {
@@ -1139,14 +1149,17 @@ pub const Connection = struct {
         }
     }
 
-    fn runFlusher(self: *Self, stream: *zio.net.Stream) !void {
+    fn runFlusher(self: *Self, stream: *net.Stream) !void {
         log.debug("Flusher loop started", .{});
         defer {
             log.debug("Flusher loop stopped", .{});
         }
 
+        // Unbuffered: every writeVec goes straight to the socket.
+        var stream_writer = stream.writer(self.io, &.{});
+
         while (true) {
-            try self.flusherIteration(stream);
+            try self.flusherIteration(&stream_writer);
 
             if (self.drain_state.load(.acquire) == .draining_pubs) {
                 self.sendDrainPing();
@@ -1154,7 +1167,7 @@ pub const Connection = struct {
         }
     }
 
-    fn flusherIteration(self: *Self, stream: *zio.net.Stream) !void {
+    fn flusherIteration(self: *Self, stream_writer: *net.Stream.Writer) !void {
         // Try to gather data from buffer first
         var slices: [16][]const u8 = undefined;
         const gather = self.write_buffer.gatherReadSlices(&slices, self.options.timeout) catch |err| switch (err) {
@@ -1175,7 +1188,12 @@ pub const Connection = struct {
             return;
         }
 
-        const bytes_written = try stream.writeVec(gather.slices, .none);
+        // The `Io.Writer` interface erases the real error; it is stashed on
+        // the stream writer (including cancellation). Partial writes are
+        // fine, whatever was written is consumed from the buffer.
+        const bytes_written = stream_writer.interface.writeVec(gather.slices) catch {
+            return stream_writer.err.?;
+        };
         try gather.consume(bytes_written);
     }
 
