@@ -36,10 +36,6 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .zio = .{
-            .url = "git+https://github.com/lalinsky/zio#175ca4833c2a20f52ee023b97589336bc508d464",
-            .hash = "zio-0.17.0-xHbVVJ4LJwCysqAz5HnmE8QoT2-W4iI-dMFucTYmldrp",
-        },
         .xsync = .{
             .url = "git+https://github.com/lalinsky/xsync.zig?ref=v1.0.0#2ab0801071f1918d799c115542b8121486dc2520",
             .hash = "xsync-1.0.0-CcXcL3DCAQA0FPLdBPhtTB182kN-COorlMw_cabmgHJm",

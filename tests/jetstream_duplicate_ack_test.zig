@@ -1,16 +1,15 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
+const xsync = @import("xsync");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
 
 test "ack should succeed on first call" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -27,7 +26,7 @@ test "ack should succeed on first call" {
     const TestData = struct {
         received: bool = false,
         acknowledged: bool = false,
-        mutex: zio.Mutex = .{},
+        mutex: xsync.Mutex = .init,
     };
 
     var test_data = TestData{};
@@ -37,8 +36,8 @@ test "ack should succeed on first call" {
         fn handle(js_msg: *nats.JetStreamMessage, data: *TestData) !void {
             defer js_msg.deinit();
 
-            try data.mutex.lock();
-            defer data.mutex.unlock();
+            try data.mutex.lock(std.testing.io);
+            defer data.mutex.unlock(std.testing.io);
 
             data.received = true;
 
@@ -68,29 +67,28 @@ test "ack should succeed on first call" {
     // Wait for message processing
     var attempts: u32 = 0;
     while (attempts < 30) {
-        try rt.sleep(.fromMilliseconds(100));
+        try io.sleep(.fromMilliseconds(100), .awake);
         attempts += 1;
 
-        try test_data.mutex.lock();
+        try test_data.mutex.lock(std.testing.io);
         const done = test_data.received;
-        test_data.mutex.unlock();
+        test_data.mutex.unlock(std.testing.io);
 
         if (done) break;
     }
 
     // Verify results
-    try test_data.mutex.lock();
-    defer test_data.mutex.unlock();
+    try test_data.mutex.lock(std.testing.io);
+    defer test_data.mutex.unlock(std.testing.io);
 
     try testing.expect(test_data.received);
     try testing.expect(test_data.acknowledged);
 }
 
 test "ack should fail on second call" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -108,7 +106,7 @@ test "ack should fail on second call" {
         received: bool = false,
         first_ack_success: bool = false,
         second_ack_failed: bool = false,
-        mutex: zio.Mutex = .{},
+        mutex: xsync.Mutex = .init,
     };
 
     var test_data = TestData{};
@@ -118,8 +116,8 @@ test "ack should fail on second call" {
         fn handle(js_msg: *nats.JetStreamMessage, data: *TestData) !void {
             defer js_msg.deinit();
 
-            try data.mutex.lock();
-            defer data.mutex.unlock();
+            try data.mutex.lock(std.testing.io);
+            defer data.mutex.unlock(std.testing.io);
 
             data.received = true;
 
@@ -156,19 +154,19 @@ test "ack should fail on second call" {
     // Wait for message processing
     var attempts: u32 = 0;
     while (attempts < 30) {
-        try rt.sleep(.fromMilliseconds(100));
+        try io.sleep(.fromMilliseconds(100), .awake);
         attempts += 1;
 
-        try test_data.mutex.lock();
+        try test_data.mutex.lock(std.testing.io);
         const done = test_data.received;
-        test_data.mutex.unlock();
+        test_data.mutex.unlock(std.testing.io);
 
         if (done) break;
     }
 
     // Verify results
-    try test_data.mutex.lock();
-    defer test_data.mutex.unlock();
+    try test_data.mutex.lock(std.testing.io);
+    defer test_data.mutex.unlock(std.testing.io);
 
     try testing.expect(test_data.received);
     try testing.expect(test_data.first_ack_success);
@@ -176,10 +174,9 @@ test "ack should fail on second call" {
 }
 
 test "nak should fail after ack" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -197,7 +194,7 @@ test "nak should fail after ack" {
         received: bool = false,
         ack_success: bool = false,
         nak_failed: bool = false,
-        mutex: zio.Mutex = .{},
+        mutex: xsync.Mutex = .init,
     };
 
     var test_data = TestData{};
@@ -207,8 +204,8 @@ test "nak should fail after ack" {
         fn handle(js_msg: *nats.JetStreamMessage, data: *TestData) !void {
             defer js_msg.deinit();
 
-            try data.mutex.lock();
-            defer data.mutex.unlock();
+            try data.mutex.lock(std.testing.io);
+            defer data.mutex.unlock(std.testing.io);
 
             data.received = true;
 
@@ -245,19 +242,19 @@ test "nak should fail after ack" {
     // Wait for message processing
     var attempts: u32 = 0;
     while (attempts < 30) {
-        try rt.sleep(.fromMilliseconds(100));
+        try io.sleep(.fromMilliseconds(100), .awake);
         attempts += 1;
 
-        try test_data.mutex.lock();
+        try test_data.mutex.lock(std.testing.io);
         const done = test_data.received;
-        test_data.mutex.unlock();
+        test_data.mutex.unlock(std.testing.io);
 
         if (done) break;
     }
 
     // Verify results
-    try test_data.mutex.lock();
-    defer test_data.mutex.unlock();
+    try test_data.mutex.lock(std.testing.io);
+    defer test_data.mutex.unlock(std.testing.io);
 
     try testing.expect(test_data.received);
     try testing.expect(test_data.ack_success);
@@ -265,10 +262,9 @@ test "nak should fail after ack" {
 }
 
 test "inProgress can be called multiple times" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -287,7 +283,7 @@ test "inProgress can be called multiple times" {
         progress_calls: u32 = 0,
         final_ack: bool = false,
         not_acknowledged_after_progress: bool = false,
-        mutex: zio.Mutex = .{},
+        mutex: xsync.Mutex = .init,
     };
 
     var test_data = TestData{};
@@ -297,8 +293,8 @@ test "inProgress can be called multiple times" {
         fn handle(js_msg: *nats.JetStreamMessage, data: *TestData) !void {
             defer js_msg.deinit();
 
-            try data.mutex.lock();
-            defer data.mutex.unlock();
+            try data.mutex.lock(std.testing.io);
+            defer data.mutex.unlock(std.testing.io);
 
             data.received = true;
 
@@ -341,19 +337,19 @@ test "inProgress can be called multiple times" {
     // Wait for message processing
     var attempts: u32 = 0;
     while (attempts < 30) {
-        try rt.sleep(.fromMilliseconds(100));
+        try io.sleep(.fromMilliseconds(100), .awake);
         attempts += 1;
 
-        try test_data.mutex.lock();
+        try test_data.mutex.lock(std.testing.io);
         const done = test_data.received;
-        test_data.mutex.unlock();
+        test_data.mutex.unlock(std.testing.io);
 
         if (done) break;
     }
 
     // Verify results
-    try test_data.mutex.lock();
-    defer test_data.mutex.unlock();
+    try test_data.mutex.lock(std.testing.io);
+    defer test_data.mutex.unlock(std.testing.io);
 
     try testing.expect(test_data.received);
     try testing.expectEqual(@as(u32, 3), test_data.progress_calls);

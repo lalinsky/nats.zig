@@ -1,6 +1,5 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
@@ -16,12 +15,11 @@ const Counters = struct {
 var counts: Counters = Counters{};
 
 test "close callback" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
     counts.reset();
 
-    const conn = try utils.createConnection(rt.io(), .node1, .{
+    const conn = try utils.createConnection(io, .node1, .{
         .callbacks = .{
             .closed_cb = struct {
                 fn close(_: *nats.Connection) void {

@@ -1,16 +1,15 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
+const xsync = @import("xsync");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
 
 test "NAK redelivery with delivery count verification" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -30,7 +29,7 @@ test "NAK redelivery with delivery count verification" {
         delivery_counts: std.ArrayList(u64),
         first_delivery_data: ?[]const u8 = null,
         nak_count: u32 = 0,
-        mutex: zio.Mutex = .{},
+        mutex: xsync.Mutex = .init,
         allocator: std.mem.Allocator,
 
         fn init(allocator: std.mem.Allocator) @This() {
@@ -61,8 +60,8 @@ test "NAK redelivery with delivery count verification" {
         fn handle(js_msg: *nats.JetStreamMessage, data: *TestData) void {
             defer js_msg.deinit();
 
-            data.mutex.lockUncancelable();
-            defer data.mutex.unlock();
+            data.mutex.lockUncancelable(std.testing.io);
+            defer data.mutex.unlock(std.testing.io);
 
             // Store message data copy for comparison
             const msg_copy = data.allocator.dupe(u8, js_msg.msg.data) catch return;
@@ -109,19 +108,19 @@ test "NAK redelivery with delivery count verification" {
     // Wait for message processing (should get delivered, NAK'd, then redelivered)
     var attempts: u32 = 0;
     while (attempts < 50) { // Wait up to 5 seconds
-        try rt.sleep(.fromMilliseconds(100));
+        try io.sleep(.fromMilliseconds(100), .awake);
         attempts += 1;
 
-        test_data.mutex.lockUncancelable();
+        test_data.mutex.lockUncancelable(std.testing.io);
         const message_count = test_data.messages.items.len;
-        test_data.mutex.unlock();
+        test_data.mutex.unlock(std.testing.io);
 
         if (message_count >= 2) break; // Got at least 2 deliveries
     }
 
     // Verify results
-    test_data.mutex.lockUncancelable();
-    defer test_data.mutex.unlock();
+    test_data.mutex.lockUncancelable(std.testing.io);
+    defer test_data.mutex.unlock(std.testing.io);
 
     // Should have received the message at least twice (original + redelivery after NAK)
     try testing.expect(test_data.messages.items.len >= 2);
@@ -149,10 +148,9 @@ test "NAK redelivery with delivery count verification" {
 }
 
 test "NAK with max delivery limit" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -170,7 +168,7 @@ test "NAK with max delivery limit" {
     const LimitTestData = struct {
         delivery_count: u32 = 0,
         received_deliveries: [5]u64 = undefined,
-        mutex: zio.Mutex = .{},
+        mutex: xsync.Mutex = .init,
     };
 
     var test_data = LimitTestData{};
@@ -180,8 +178,8 @@ test "NAK with max delivery limit" {
         fn handle(js_msg: *nats.JetStreamMessage, data: *LimitTestData) void {
             defer js_msg.deinit();
 
-            data.mutex.lockUncancelable();
-            defer data.mutex.unlock();
+            data.mutex.lockUncancelable(std.testing.io);
+            defer data.mutex.unlock(std.testing.io);
 
             // Get delivery count from JetStream message metadata
             const delivery_num = js_msg.metadata.num_delivered;
@@ -216,24 +214,24 @@ test "NAK with max delivery limit" {
     // Wait for all deliveries (should stop at max_deliver = 2)
     var wait_attempts: u32 = 0;
     while (wait_attempts < 30) { // Wait up to 3 seconds
-        try rt.sleep(.fromMilliseconds(100));
+        try io.sleep(.fromMilliseconds(100), .awake);
         wait_attempts += 1;
 
-        test_data.mutex.lockUncancelable();
+        test_data.mutex.lockUncancelable(std.testing.io);
         const count = test_data.delivery_count;
-        test_data.mutex.unlock();
+        test_data.mutex.unlock(std.testing.io);
 
         // Should stop at max_deliver limit
         if (count >= 2) {
             // Give a bit more time to ensure no additional deliveries
-            try rt.sleep(.fromMilliseconds(200));
+            try io.sleep(.fromMilliseconds(200), .awake);
             break;
         }
     }
 
     // Verify results
-    test_data.mutex.lockUncancelable();
-    defer test_data.mutex.unlock();
+    test_data.mutex.lockUncancelable(std.testing.io);
+    defer test_data.mutex.unlock(std.testing.io);
 
     // Should have received exactly max_deliver deliveries
     try testing.expectEqual(@as(u32, 2), test_data.delivery_count);
@@ -249,10 +247,9 @@ test "NAK with max delivery limit" {
 }
 
 test "JetStream message metadata parsing" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -268,15 +265,15 @@ test "JetStream message metadata parsing" {
 
     var received_message = false;
     var metadata_verified = false;
-    var mutex: zio.Mutex = .{};
+    var mutex: xsync.Mutex = .init;
 
     // Handler that verifies all JetStream metadata fields
     const MetadataHandler = struct {
-        fn handle(js_msg: *nats.JetStreamMessage, received: *bool, verified: *bool, mtx: *zio.Mutex) void {
+        fn handle(js_msg: *nats.JetStreamMessage, received: *bool, verified: *bool, mtx: *xsync.Mutex) void {
             defer js_msg.deinit();
 
-            mtx.lockUncancelable();
-            defer mtx.unlock();
+            mtx.lockUncancelable(std.testing.io);
+            defer mtx.unlock(std.testing.io);
 
             received.* = true;
 
@@ -323,19 +320,19 @@ test "JetStream message metadata parsing" {
     // Wait for message processing
     var attempts: u32 = 0;
     while (attempts < 30) {
-        try rt.sleep(.fromMilliseconds(100));
+        try io.sleep(.fromMilliseconds(100), .awake);
         attempts += 1;
 
-        mutex.lockUncancelable();
+        mutex.lockUncancelable(std.testing.io);
         const done = received_message;
-        mutex.unlock();
+        mutex.unlock(std.testing.io);
 
         if (done) break;
     }
 
     // Verify results
-    mutex.lockUncancelable();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
 
     try testing.expect(received_message);
     try testing.expect(metadata_verified);
@@ -344,10 +341,9 @@ test "JetStream message metadata parsing" {
 }
 
 test "NAK with delay redelivery timing" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -367,15 +363,15 @@ test "NAK with delay redelivery timing" {
         delivery_count: u32 = 0,
         first_delivery_time: i64 = 0,
         second_delivery_time: i64 = 0,
-        mutex: zio.Mutex = .{},
+        mutex: xsync.Mutex = .init,
         allocator: std.mem.Allocator,
         io: std.Io,
 
-        fn init(allocator: std.mem.Allocator, io: std.Io) @This() {
+        fn init(allocator: std.mem.Allocator, data_io: std.Io) @This() {
             return .{
                 .delivery_times = std.ArrayList(i64).empty,
                 .allocator = allocator,
-                .io = io,
+                .io = data_io,
             };
         }
 
@@ -384,7 +380,7 @@ test "NAK with delay redelivery timing" {
         }
     };
 
-    var test_data = DelayTestData.init(testing.allocator, rt.io());
+    var test_data = DelayTestData.init(testing.allocator, io);
     defer test_data.deinit();
 
     // Message handler that NAKs with delay on first delivery
@@ -392,8 +388,8 @@ test "NAK with delay redelivery timing" {
         fn handle(js_msg: *nats.JetStreamMessage, data: *DelayTestData) void {
             defer js_msg.deinit();
 
-            data.mutex.lockUncancelable();
-            defer data.mutex.unlock();
+            data.mutex.lockUncancelable(std.testing.io);
+            defer data.mutex.unlock(std.testing.io);
 
             const current_time: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(data.io, .awake).nanoseconds, std.time.ns_per_ms));
             data.delivery_times.append(data.allocator, current_time) catch return;
@@ -438,19 +434,19 @@ test "NAK with delay redelivery timing" {
     // Wait for both deliveries (original + redelivery after delay)
     var attempts: u32 = 0;
     while (attempts < 100) { // Wait up to 10 seconds
-        try rt.sleep(.fromMilliseconds(100));
+        try io.sleep(.fromMilliseconds(100), .awake);
         attempts += 1;
 
-        test_data.mutex.lockUncancelable();
+        test_data.mutex.lockUncancelable(std.testing.io);
         const count = test_data.delivery_count;
-        test_data.mutex.unlock();
+        test_data.mutex.unlock(std.testing.io);
 
         if (count >= 2) break; // Got both deliveries
     }
 
     // Verify results
-    test_data.mutex.lockUncancelable();
-    defer test_data.mutex.unlock();
+    test_data.mutex.lockUncancelable(std.testing.io);
+    defer test_data.mutex.unlock(std.testing.io);
 
     // Should have received the message exactly twice
     try testing.expectEqual(@as(u32, 2), test_data.delivery_count);
@@ -468,10 +464,9 @@ test "NAK with delay redelivery timing" {
 }
 
 test "NAK with zero delay behaves like regular NAK" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection(rt.io());
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -486,15 +481,15 @@ test "NAK with zero delay behaves like regular NAK" {
     defer stream_info.deinit();
 
     var delivery_count: u32 = 0;
-    var mutex: zio.Mutex = .{};
+    var mutex: xsync.Mutex = .init;
 
     // Message handler that NAKs with zero delay on first delivery
     const ZeroDelayHandler = struct {
-        fn handle(js_msg: *nats.JetStreamMessage, count: *u32, mtx: *zio.Mutex) void {
+        fn handle(js_msg: *nats.JetStreamMessage, count: *u32, mtx: *xsync.Mutex) void {
             defer js_msg.deinit();
 
-            mtx.lockUncancelable();
-            defer mtx.unlock();
+            mtx.lockUncancelable(std.testing.io);
+            defer mtx.unlock(std.testing.io);
 
             const delivery_num = js_msg.metadata.num_delivered;
             count.* += 1;
@@ -533,19 +528,19 @@ test "NAK with zero delay behaves like regular NAK" {
     // Wait for both deliveries
     var attempts: u32 = 0;
     while (attempts < 30) { // Wait up to 3 seconds
-        try rt.sleep(.fromMilliseconds(100));
+        try io.sleep(.fromMilliseconds(100), .awake);
         attempts += 1;
 
-        mutex.lockUncancelable();
+        mutex.lockUncancelable(std.testing.io);
         const count = delivery_count;
-        mutex.unlock();
+        mutex.unlock(std.testing.io);
 
         if (count >= 2) break;
     }
 
     // Verify results
-    mutex.lockUncancelable();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
 
     // Should have received the message exactly twice
     try testing.expectEqual(@as(u32, 2), delivery_count);
