@@ -61,7 +61,7 @@ test "basic push subscription" {
     try conn.publish("orders.new", "Order #2");
     try conn.publish("orders.update", "Order Update");
 
-    try handler_context.called.wait(io);
+    try handler_context.called.waitTimeout(io, utils.ioTimeout(.fromSeconds(5)));
 
     // Verify messages were received
     const message_count = handler_context.count.load(.acquire);
@@ -129,7 +129,7 @@ test "push subscription with flow control" {
         try conn.publish("tasks.new", task_data);
     }
 
-    try handler_context.called.wait(io);
+    try handler_context.called.waitTimeout(io, utils.ioTimeout(.fromSeconds(5)));
 
     const processed_count = handler_context.count.load(.acquire);
     try testing.expect(processed_count > 0);
