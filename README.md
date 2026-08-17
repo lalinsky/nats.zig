@@ -1,7 +1,12 @@
 # NATS.zig
 
-A Zig client library for NATS, based on the [zio](https://github.com/lalinsky/zio) asynchronous I/O library.
-It supports most of the funcionality found in the official client libraries.
+A Zig client library for NATS, built on top of Zig's standard library I/O interface (`std.Io`).
+It supports most of the functionality found in the official client libraries.
+
+The library was originally written for [zio](https://github.com/lalinsky/zio), and later ported to `std.Io`.
+It's still recommended to use it with zio's implementation of the `std.Io` interface (see
+[Selecting the I/O Backend](#selecting-the-io-backend)), but it works with any implementation,
+like `std.Io.Threaded`.
 
 ## Installation
 
@@ -28,13 +33,15 @@ exe.root_module.addImport("nats", nats.module("nats"));
 ### Connect
 
 ```zig
-const rt = try zio.Runtime.init(allocator, .{});
-defer rt.deinit();
+const std = @import("std");
+const nats = @import("nats");
 
-var nc = nats.Connection.init(allocator, .{});
-defer nc.deinit();
+pub fn main(init: std.process.Init) !void {
+    var nc = nats.Connection.init(init.gpa, init.io, .{});
+    defer nc.deinit();
 
-try nc.connect("nats://localhost:4222");
+    try nc.connect("nats://localhost:4222");
+}
 ```
 
 ### Publish message
@@ -186,6 +193,51 @@ var batch = try pull_sub.fetch(10, .fromSeconds(5)); // Fetch up to 10 msgs, 5s 
 defer batch.deinit();
 for (batch.messages) |js_msg| {
     try js_msg.ack();
+}
+```
+
+## Selecting the I/O Backend
+
+The examples above use `init.io`, the threaded I/O implementation from the stdlib. This is suitable for development
+or applications with a small number of connections.
+
+For production use, it's recommended to use [zio](https://github.com/lalinsky/zio), which provides a coroutine-based
+async I/O runtime. Each connection runs several internal tasks (socket reader, flusher, async subscription handlers),
+and with zio these are lightweight coroutines multiplexed over a few OS threads instead of dedicated threads.
+In the future, you can also use `std.Io.Evented`, but that implementation is not finished yet, it's missing any
+networking functionality, so use zio for now.
+
+Add it as a dependency:
+
+```sh
+zig fetch --save "git+https://github.com/lalinsky/zio"
+```
+
+In `build.zig`, add the zio module:
+
+```zig
+const zio = b.dependency("zio", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("zio", zio.module("zio"));
+```
+
+Then initialize zio's runtime and pass it to nats.zig:
+
+```zig
+const std = @import("std");
+const zio = @import("zio");
+const nats = @import("nats");
+
+pub fn main(init: std.process.Init) !void {
+    var rt = try zio.Runtime.init(init.gpa, .{});
+    defer rt.deinit();
+
+    var nc = nats.Connection.init(init.gpa, rt.io(), .{});
+    defer nc.deinit();
+
+    try nc.connect("nats://localhost:4222");
 }
 ```
 
