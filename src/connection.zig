@@ -1185,7 +1185,25 @@ pub const Connection = struct {
             }
         }
 
-        try exit_signal.event.wait(self.io);
+        // Wait for the connection to end, waking up on the keep-alive
+        // interval to send PINGs. The manager task is otherwise idle while
+        // the connection is up, so it doubles as the heartbeat timer; this
+        // is the only path that sends keep-alive PINGs, so an idle or
+        // half-open connection is detected even when nothing is received.
+        if (self.options.ping_interval.nanoseconds == 0) {
+            try exit_signal.event.wait(self.io);
+        } else {
+            while (true) {
+                exit_signal.event.waitTimeout(self.io, .{ .duration = .{ .raw = self.options.ping_interval, .clock = .awake } }) catch |err| switch (err) {
+                    error.Timeout => {
+                        try self.checkAndSendPing();
+                        continue;
+                    },
+                    error.Canceled => |e| return e,
+                };
+                break;
+            }
+        }
 
         switch (exit_signal.reason.load(.acquire)) {
             .none => unreachable, // the event is only set by signal()
@@ -1244,8 +1262,6 @@ pub const Connection = struct {
             log.debug("Read {} bytes: {s}", .{ data.len, data });
             try self.parser.parse(self, data);
             reader.toss(data.len);
-
-            try self.checkAndSendPing();
         }
     }
 
@@ -1670,12 +1686,20 @@ pub const Connection = struct {
 
         const current_time = io_util.now(self.io);
         if (self.ping_time.durationTo(current_time).nanoseconds >= self.options.ping_interval.nanoseconds) {
-            _ = try self.sendPing(true);
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
+
+            // Count the PING as outstanding before it can be written:
+            // processPong resets the counter under the same mutex, so the
+            // PONG can never be processed ahead of the increment. Checking
+            // first also avoids queueing another PING onto a connection
+            // already deemed stale.
             const current_pings = self.pings_out.fetchAdd(1, .monotonic) + 1;
             if (self.options.max_pings_out > 0 and current_pings > self.options.max_pings_out) {
                 log.warn("Stale connection: {} unanswered PINGs", .{current_pings});
                 return error.StaleConnection;
             }
+            _ = try self.sendPing(false);
             self.ping_time = current_time;
         }
     }
