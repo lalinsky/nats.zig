@@ -14,6 +14,12 @@
 const std = @import("std");
 const Io = std.Io;
 
+/// Verify that the I/O backend provides the awake clock used for deadlines.
+pub fn ensureAwakeClock(io: Io) Io.Clock.ResolutionError!void {
+    const resolution = try Io.Clock.awake.resolution(io);
+    if (resolution.nanoseconds == 0) return error.ClockUnavailable;
+}
+
 /// Convert a duration into a duration-form `std.Io.Timeout` on the awake clock.
 pub fn timeout(duration: Io.Duration) Io.Timeout {
     return .{ .duration = .{ .raw = duration, .clock = .awake } };

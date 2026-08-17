@@ -18,12 +18,12 @@ const Allocator = std.mem.Allocator;
 
 const io_util = @import("io_util.zig");
 
-const PopError = error{
+pub const PopError = error{
     WouldBlock,
     Closed,
 };
 
-const PushError = error{
+pub const PushError = error{
     Closed,
     ChunkLimitExceeded,
     OutOfMemory,
