@@ -370,9 +370,13 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
             try self.waitForDataInternal(timeout);
 
-            // At this point we have data, pop it
-            const chunk = self.head orelse return PopError.QueueEmpty;
-            const item = chunk.popItem() orelse return PopError.QueueEmpty;
+            return self.popLocked() orelse PopError.QueueEmpty;
+        }
+
+        /// Pop the next available item; assumes the mutex is held.
+        fn popLocked(self: *Self) ?T {
+            const chunk = self.head orelse return null;
+            const item = chunk.popItem() orelse return null;
 
             self.items_available -= 1;
 
@@ -390,9 +394,13 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             return item;
         }
 
-        /// Try to pop a single item (non-blocking, returns null if empty)
+        /// Try to pop a single item (non-blocking, returns null if empty).
+        /// Not a cancelation point, so it is safe in cleanup paths.
         pub fn tryPop(self: *Self) ?T {
-            return self.pop(.zero) catch null;
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+
+            return self.popLocked();
         }
 
         /// Get readable slice with timeout (`.zero` = non-blocking, `.max` = wait forever)
@@ -402,11 +410,16 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
             try self.waitForDataInternal(timeout);
 
-            const chunk = self.head orelse return PopError.QueueEmpty;
+            return self.getSliceLocked() orelse PopError.QueueEmpty;
+        }
+
+        /// Get a readable slice if data is available; assumes the mutex is held.
+        fn getSliceLocked(self: *Self) ?View {
+            const chunk = self.head orelse return null;
             const available = chunk.availableToRead();
 
             if (available == 0) {
-                return PopError.QueueEmpty;
+                return null;
             }
 
             return View{
@@ -416,9 +429,13 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             };
         }
 
-        /// Try to get readable slice without blocking
+        /// Try to get readable slice without blocking.
+        /// Not a cancelation point, so it is safe in cleanup paths.
         pub fn tryGetSlice(self: *Self) ?View {
-            return self.getSlice(.zero) catch null;
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+
+            return self.getSliceLocked();
         }
 
         /// Consume items after processing

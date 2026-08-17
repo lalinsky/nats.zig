@@ -1209,17 +1209,19 @@ pub const JetStream = struct {
                 // Check for status messages (heartbeats and flow control)
                 if (msg.status_code == STATUS_CONTROL) {
                     // Handle status message internally, don't pass to user callback
+                    defer msg.deinit(); // Clean up status message
                     handleStatusMessage(msg, nc) catch |err| {
+                        if (err == error.Canceled) return err;
                         log.err("Failed to handle status message: {}", .{err});
                     };
-                    msg.deinit(); // Clean up status message
                     return;
                 }
 
                 // Create JetStream message wrapper for regular messages
                 const js_msg = jetstream_message.createJetStreamMessage(nc, msg) catch |err| {
-                    log.err("Failed to wrap JetStream message: {}", .{err});
                     msg.deinit(); // Clean up on error
+                    if (err == error.Canceled) return err;
+                    log.err("Failed to wrap JetStream message: {}", .{err});
                     return;
                 };
 
@@ -1251,6 +1253,7 @@ pub const JetStream = struct {
                 if (!manual_ack and callback_success) {
                     js_msg.ack() catch |err| switch (err) {
                         jetstream_message.AckError.AlreadyAcked => {}, // Ignore already acked (like nats-py)
+                        error.Canceled => |e| return e,
                         else => log.err("Auto-ack failed: {}", .{err}),
                     };
                 }

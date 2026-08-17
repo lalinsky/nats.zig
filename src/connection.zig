@@ -760,7 +760,14 @@ pub const Connection = struct {
         // processMsg will keep sending UNSUB commands once
         // it receives a message with unknown sid.
         self.unsubscribeInternal(sub.sid, null) catch |err| {
-            log.err("Failed to send UNSUB for sid {d}: {}", .{ sub.sid, err });
+            if (err == error.Canceled) {
+                // This is a void-returning cleanup path; re-arm the
+                // cancelation so the caller's next cancelation point
+                // still observes it.
+                self.io.recancel();
+            } else {
+                log.err("Failed to send UNSUB for sid {d}: {}", .{ sub.sid, err });
+            }
         };
 
         log.debug("Unsubscribed from {s} with sid {d}", .{ sub.subject, sub.sid });
@@ -811,7 +818,10 @@ pub const Connection = struct {
                 return ConnectionError.Timeout;
             }
 
-            self.pong_condition.waitTimeout(self.io, &self.mutex, deadline) catch {};
+            self.pong_condition.waitTimeout(self.io, &self.mutex, deadline) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Timeout => {}, // Continue loop to check conditions
+            };
         }
 
         log.debug("Flush completed, received PONG for ping_id={}", .{our_ping_id});
@@ -1159,7 +1169,7 @@ pub const Connection = struct {
             try self.flusherIteration(&stream_writer);
 
             if (self.drain_state.load(.acquire) == .draining_pubs) {
-                self.sendDrainPing();
+                try self.sendDrainPing();
             }
         }
     }
@@ -1243,6 +1253,7 @@ pub const Connection = struct {
         } else {
             // No sub subscription found, try to send UNSUB command
             self.unsubscribeInternal(message.sid, null) catch |err| {
+                if (err == error.Canceled) return err;
                 log.err("Failed to send UNSUB for unknown sid {d}: {}", .{ message.sid, err });
             };
         }
@@ -1317,6 +1328,7 @@ pub const Connection = struct {
         // Handle handshake if we're waiting for INFO
         if (self.handshake_state == .waiting_for_info) {
             self.sendConnectAndPing() catch |err| {
+                if (err == error.Canceled) return err;
                 log.err("Failed to send CONNECT+PING: {}", .{err});
                 self.handshake_error = err;
                 self.handshake_state = .failed;
@@ -1593,7 +1605,10 @@ pub const Connection = struct {
                 break;
             }
 
-            self.handshake_cond.waitTimeout(self.io, &self.mutex, deadline) catch {};
+            self.handshake_cond.waitTimeout(self.io, &self.mutex, deadline) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Timeout => {}, // Continue loop to check conditions
+            };
         }
 
         // Return the handshake error if it failed, or void if successful
@@ -1676,13 +1691,14 @@ pub const Connection = struct {
         }
     }
 
-    fn sendDrainPing(self: *Self) void {
+    fn sendDrainPing(self: *Self) Io.Cancelable!void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         if (self.drain_ping_id > 0) return; // Already sent the last ping
 
         self.drain_ping_id = self.sendPing(false) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
             log.err("Failed to send drain ping: {}", .{err});
             return;
         };
@@ -1701,6 +1717,11 @@ pub const Connection = struct {
         const prev_state = self.drain_state.cmpxchgStrong(.draining_subs, .draining_pubs, .acq_rel, .acquire);
         if (prev_state != null) return; // Already draining pubs
 
-        self.sendDrainPing();
+        self.sendDrainPing() catch |err| switch (err) {
+            // This is a void-returning path; re-arm the cancelation so the
+            // caller's next cancelation point still observes it. The drain
+            // ping is retried by the flusher loop while draining pubs.
+            error.Canceled => self.io.recancel(),
+        };
     }
 };

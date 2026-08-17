@@ -130,9 +130,14 @@ pub const Subscription = struct {
             const message_data_len = msg.data.len;
 
             // Call the handler
+            var canceled = false;
             if (self.handler) |handler| {
                 handler.call(msg) catch |err| {
-                    log.err("Message handler failed for subscription {}: {}", .{ self.sid, err });
+                    if (err == error.Canceled) {
+                        canceled = true;
+                    } else {
+                        log.err("Message handler failed for subscription {}: {}", .{ self.sid, err });
+                    }
                 };
             } else {
                 // No handler - shouldn't happen for async subscriptions
@@ -142,6 +147,11 @@ pub const Subscription = struct {
 
             // Decrement pending counters after handler completes
             decrementPending(self, message_data_len);
+
+            if (canceled) {
+                log.debug("Handler fiber for subscription {} canceled, stopping", .{self.sid});
+                break;
+            }
 
             // Check if we've reached autounsubscribe limit
             if (max > 0 and delivered >= max) {
@@ -208,9 +218,15 @@ pub const Subscription = struct {
 
         // Send UNSUB to server
         self.nc.unsubscribeInternal(self.sid, null) catch |err| {
-            // Even with this failing, once we set draining to true,
-            // messages will be dropped, so it's OK to continue
-            log.err("Failed to send UNSUB for sid {d}: {}", .{ self.sid, err });
+            if (err == error.Canceled) {
+                // This is a void-returning path; re-arm the cancelation so
+                // the caller's next cancelation point still observes it.
+                self.nc.io.recancel();
+            } else {
+                // Even with this failing, once we set draining to true,
+                // messages will be dropped, so it's OK to continue
+                log.err("Failed to send UNSUB for sid {d}: {}", .{ self.sid, err });
+            }
         };
     }
 
@@ -245,7 +261,7 @@ pub const Subscription = struct {
 
     /// Issues an automatic unsubscribe that is processed by the server when 'max' messages have been received.
     /// This can be useful when sending a request to an unknown number of subscribers.
-    pub fn autoUnsubscribe(self: *Subscription, max: u64) AutoUnsubscribeError!void {
+    pub fn autoUnsubscribe(self: *Subscription, max: u64) (Io.Cancelable || AutoUnsubscribeError)!void {
         if (max == 0) return AutoUnsubscribeError.InvalidMax;
 
         const current_delivered = self.delivered_msgs.load(.acquire);
@@ -254,7 +270,8 @@ pub const Subscription = struct {
         }
 
         // Send protocol message to server first
-        self.nc.unsubscribeInternal(self.sid, max) catch {
+        self.nc.unsubscribeInternal(self.sid, max) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
             return AutoUnsubscribeError.SendFailed;
         };
 
