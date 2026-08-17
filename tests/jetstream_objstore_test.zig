@@ -176,8 +176,12 @@ test "ObjectStore delete operations" {
     try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.getBytes(object_name));
     try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.info(object_name));
 
-    // Deleting a deleted object reports not found as well.
-    try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.delete(object_name));
+    // Deleting again succeeds: delete is retryable so that a failed chunk
+    // purge can be finished on a retry.
+    try objstore.delete(object_name);
+
+    // Deleting an object that never existed is an error.
+    try testing.expectError(nats.ObjectStoreError.ObjectNotFound, objstore.delete("never-existed"));
 }
 
 test "ObjectStore list operations" {
@@ -402,4 +406,38 @@ test "ObjectStore wire format matches ADR-20" {
     }
 
     try objstore_manager.deleteStore(store_name);
+}
+
+test "ObjectStore put with zero chunk size uses the default" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    const js = conn.jetstream(.{});
+
+    const store_name = try utils.generateUniqueName(testing.allocator, "zerochunk");
+    defer testing.allocator.free(store_name);
+
+    var objstore_manager = js.objectStoreManager();
+    var objstore = try objstore_manager.createStore(.{ .store_name = store_name });
+    defer objstore.deinit();
+    defer objstore_manager.deleteStore(store_name) catch {};
+
+    // An explicit zero chunk size must fall back to the default instead of
+    // silently consuming no input and storing an empty object.
+    const content = "not an empty object";
+    var stream = nats.SliceReader{ .data = content };
+    const put_result = try objstore.put(.{
+        .name = "zero-chunk-object",
+        .opts = .{ .max_chunk_size = 0 },
+    }, &stream);
+    defer put_result.deinit();
+
+    try testing.expectEqual(@as(u64, content.len), put_result.value.size);
+    try testing.expectEqual(@as(u32, 1), put_result.value.chunks);
+
+    const get_result = try objstore.getBytes("zero-chunk-object");
+    defer get_result.deinit();
+    try testing.expectEqualStrings(content, get_result.value);
 }

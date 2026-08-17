@@ -119,7 +119,7 @@ pub const ObjectInfo = struct {
     chunks: u32,
     /// Last modified time (from message timestamp, not stored in JSON)
     mtime: std.Io.Timestamp = .zero,
-    /// SHA-256 digest hex string
+    /// Digest in the ADR-20 format: "SHA-256=<base64url of the hash>"
     digest: []const u8,
     /// True if object is deleted
     deleted: bool = false,
@@ -406,11 +406,18 @@ pub const ObjectStore = struct {
         // Initialize digest calculation
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
-        // Determine chunk size (use meta option or store default)
-        const chunk_size = if (meta.opts) |opts|
+        // Determine chunk size: object option, then store default, with
+        // zero meaning "use the default", matching the reference client.
+        const requested_chunk_size = if (meta.opts) |opts|
             opts.max_chunk_size orelse self.chunk_size
         else
             self.chunk_size;
+        const chunk_size = if (requested_chunk_size != 0)
+            requested_chunk_size
+        else if (self.chunk_size != 0)
+            self.chunk_size
+        else
+            DEFAULT_CHUNK_SIZE;
 
         // Allocate chunk buffer using temporary allocator
         const chunk_buffer = try self.allocator.alloc(u8, chunk_size);
@@ -432,9 +439,10 @@ pub const ObjectStore = struct {
             // Update digest
             hasher.update(chunk_buffer[0..bytes_read]);
 
-            // Publish chunk
+            // Publish chunk; the ack is released immediately, only the
+            // publish success matters here.
             const ack = try self.js.publish(chunk_subject, chunk_buffer[0..bytes_read], .{});
-            defer ack.deinit();
+            ack.deinit();
 
             total_size += bytes_read;
             chunk_count += 1;
@@ -674,8 +682,10 @@ pub const ObjectStore = struct {
     /// Delete an object: write a rolled-up tombstone with zeroed instance
     /// fields, then purge the object's chunks.
     pub fn delete(self: *ObjectStore, object_name: []const u8) !void {
-        // Get current metadata; a deleted object is reported as not found.
-        const info_result = try self.info(object_name);
+        // Look at the current metadata including tombstones: if an earlier
+        // delete wrote the tombstone but failed to purge the chunks,
+        // retrying must be able to finish the cleanup (nats.go behavior).
+        const info_result = try self.infoIncludingDeleted(object_name);
         defer info_result.deinit();
         const obj_info = info_result.value;
 
