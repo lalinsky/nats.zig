@@ -825,8 +825,13 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
                 }
             }
 
-            // Splice self's list onto dest's list.
+            // Splice self's list onto dest's list. The destination tail must
+            // be sealed: an unsealed chunk with a successor can neither be
+            // unlinked by consumers (only sealed chunks are considered fully
+            // consumed) nor safely read past, so the reader would gather
+            // zero slices forever once it drained that chunk.
             if (dest.queue.tail) |tail| {
+                tail.is_sealed = true;
                 tail.next = self.queue.head;
             } else {
                 dest.queue.head = self.queue.head;
@@ -872,7 +877,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
                 }
 
                 if (deadline) |d| {
-                    self.queue.data_cond.waitTimeout(self.queue.io, &self.queue.mutex, d) catch |err| switch (err) {
+                    self.queue.data_cond.waitTimeout(self.queue.io, &self.queue.mutex, .{ .deadline = d }) catch |err| switch (err) {
                         error.Canceled => return error.Canceled,
                         error.Timeout => {},
                     };
@@ -1145,6 +1150,43 @@ test "buffer moveToBuffer functionality" {
     }
 }
 
+test "buffer moveToBuffer into partially consumed destination" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(32);
+    var source = Buffer.init(allocator, std.testing.io, .{});
+    defer source.deinit();
+
+    var dest = Buffer.init(allocator, std.testing.io, .{});
+    defer dest.deinit();
+
+    // Fill the destination and drain it completely, leaving an unsealed,
+    // fully consumed tail chunk - the state a live write buffer is in
+    // after the flusher catches up.
+    try dest.append("CONNECT\r\n");
+    {
+        var view = dest.tryGetSlice().?;
+        try std.testing.expectEqualStrings("CONNECT\r\n", view.data);
+        view.consume(view.data.len);
+    }
+    try std.testing.expectEqual(@as(usize, 0), dest.getBytesAvailable());
+
+    try source.append("PUB a 1\r\nx\r\n");
+    try source.moveToBuffer(&dest);
+
+    // The moved data must be readable past the drained old tail chunk.
+    var slices: [4][]const u8 = undefined;
+    const gather = try dest.gatherReadSlices(&slices, .{ .duration = .{ .raw = .zero, .clock = .awake } });
+    try std.testing.expect(gather.total_bytes == 12);
+    try gather.consume(gather.total_bytes);
+
+    // And the buffer must remain usable for further appends.
+    try dest.append("PING\r\n");
+    var view = dest.tryGetSlice().?;
+    try std.testing.expectEqualStrings("PING\r\n", view.data);
+    view.consume(view.data.len);
+}
+
 test "buffer moveToBuffer with multiple chunks" {
     const allocator = std.testing.allocator;
 
@@ -1251,7 +1293,7 @@ test "queue close wakes readers" {
 
     queue.close();
 
-    try std.testing.expectError(PopError.Closed, queue.pop(.{ .duration = .zero }));
+    try std.testing.expectError(PopError.Closed, queue.pop(.{ .duration = .{ .raw = .zero, .clock = .awake } }));
     try std.testing.expectError(PushError.Closed, queue.push(42));
 }
 
@@ -1329,7 +1371,7 @@ test "VectorGather thread safety validation" {
     try buffer.append("Hello, World!");
 
     var slices: [4][]const u8 = undefined;
-    const gather = try buffer.gatherReadSlices(&slices, .{ .duration = .zero });
+    const gather = try buffer.gatherReadSlices(&slices, .{ .duration = .{ .raw = .zero, .clock = .awake } });
     try std.testing.expect(gather.slices.len > 0);
 
     // Should be able to consume gathered data normally
@@ -1351,7 +1393,7 @@ test "VectorGather blocking behavior" {
 
     // A zero-duration blocking read should time out immediately when no data is available.
     var slices: [4][]const u8 = undefined;
-    try std.testing.expectError(PopError.Timeout, buffer.gatherReadSlices(&slices, .{ .duration = .zero }));
+    try std.testing.expectError(PopError.Timeout, buffer.gatherReadSlices(&slices, .{ .duration = .{ .raw = .zero, .clock = .awake } }));
 
     // Add data and gather successfully
     try buffer.append("Hello, World!");
@@ -1373,7 +1415,7 @@ test "VectorGather detects buffer reset between gather and consume" {
     try buffer.append("Hello, World!");
 
     var slices: [4][]const u8 = undefined;
-    const gather = try buffer.gatherReadSlices(&slices, .{ .duration = .zero });
+    const gather = try buffer.gatherReadSlices(&slices, .{ .duration = .{ .raw = .zero, .clock = .awake } });
     try std.testing.expect(gather.slices.len > 0);
 
     // Reset the buffer which should increment reset_id
@@ -1393,12 +1435,12 @@ test "VectorGather detects concurrent consumer advancing buffer" {
     try buffer.append("Hello, World!");
 
     var slices: [4][]const u8 = undefined;
-    const gather = try buffer.gatherReadSlices(&slices, .{ .duration = .zero });
+    const gather = try buffer.gatherReadSlices(&slices, .{ .duration = .{ .raw = .zero, .clock = .awake } });
     try std.testing.expect(gather.slices.len > 0);
     try std.testing.expect(gather.total_bytes > 0);
 
     // Simulate another consumer advancing the read position
-    var view = try buffer.getSlice(.{ .duration = .zero });
+    var view = try buffer.getSlice(.{ .duration = .{ .raw = .zero, .clock = .awake } });
     view.consume(2); // Advance read_pos by 2 bytes
 
     // Now trying to consume with the original gather should fail with ConcurrentConsumer

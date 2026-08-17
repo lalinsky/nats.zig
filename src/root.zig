@@ -94,6 +94,7 @@ test {
     _ = @import("net_util.zig");
     _ = @import("nkeys.zig");
     _ = @import("creds.zig");
+    _ = @import("queue.zig");
     _ = @import("jetstream.zig");
     _ = @import("jetstream_message.zig");
     _ = @import("jetstream_kv.zig");
