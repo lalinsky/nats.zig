@@ -1,16 +1,13 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
+const xsync = @import("xsync");
 const utils = @import("utils.zig");
 const Message = nats.Message;
 
 const log = std.log.default;
 
 test "subscribeSync smoke test" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    var conn = try utils.createDefaultConnection(rt.io());
+    var conn = try utils.createDefaultConnection(std.testing.io);
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("test");
@@ -27,10 +24,7 @@ test "subscribeSync smoke test" {
 }
 
 test "queueSubscribeSync smoke test" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    var conn = try utils.createDefaultConnection(rt.io());
+    var conn = try utils.createDefaultConnection(std.testing.io);
     defer utils.closeConnection(conn);
 
     const sub = try conn.queueSubscribeSync("test", "workers");
@@ -48,42 +42,39 @@ test "queueSubscribeSync smoke test" {
 
 const MessageCollector = struct {
     result: ?*Message = null,
-    mutex: zio.Mutex = .{},
-    cond: zio.Condition = .{},
+    mutex: xsync.Mutex = .init,
+    cond: xsync.Condition = .init,
 
     pub fn deinit(self: *@This()) void {
         if (self.result) |msg| msg.deinit();
     }
 
     pub fn processMsg(msg: *Message, self: *@This()) !void {
-        try self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = std.testing.io;
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
         self.result = msg;
-        self.cond.broadcast();
+        self.cond.broadcast(io);
     }
 
     pub fn timedWait(self: *@This(), io: std.Io, timeout: std.Io.Duration) !*Message {
-        try self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
-        const start = std.Io.Timestamp.now(io, .awake);
+        const deadline = (std.Io.Timeout{ .duration = .{ .raw = timeout, .clock = .awake } }).toDeadline(io);
         while (self.result == null) {
-            const elapsed = start.untilNow(io, .awake);
-            if (elapsed.nanoseconds >= timeout.nanoseconds) {
-                return error.Timeout;
-            }
-            try self.cond.timedWait(&self.mutex, .fromNanoseconds(@intCast(timeout.nanoseconds - elapsed.nanoseconds)));
+            self.cond.waitTimeout(io, &self.mutex, deadline) catch |err| switch (err) {
+                error.Timeout => return error.Timeout,
+                error.Canceled => return error.Canceled,
+            };
         }
         return self.result.?;
     }
 };
 
 test "subscribe smoke test" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    var conn = try utils.createDefaultConnection(rt.io());
+    var conn = try utils.createDefaultConnection(std.testing.io);
     defer utils.closeConnection(conn);
 
     var collector: MessageCollector = .{};
@@ -95,16 +86,13 @@ test "subscribe smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try collector.timedWait(rt.io(), .fromSeconds(1));
+    const msg = try collector.timedWait(std.testing.io, .fromSeconds(1));
     try std.testing.expectEqualStrings("test", msg.subject);
     try std.testing.expectEqualStrings("Hello world!", msg.data);
 }
 
 test "queueSubscribe smoke test" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    var conn = try utils.createDefaultConnection(rt.io());
+    var conn = try utils.createDefaultConnection(std.testing.io);
     defer utils.closeConnection(conn);
 
     var collector: MessageCollector = .{};
@@ -116,7 +104,7 @@ test "queueSubscribe smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try collector.timedWait(rt.io(), .fromSeconds(1));
+    const msg = try collector.timedWait(std.testing.io, .fromSeconds(1));
     try std.testing.expectEqualStrings("test", msg.subject);
     try std.testing.expectEqualStrings("Hello world!", msg.data);
 }

@@ -76,12 +76,8 @@ pub fn setKeepAlive(socket: net.Socket, enabled: bool) std.posix.SetSockOptError
     try std.posix.setsockopt(socket.handle, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&value));
 }
 
-const zio = @import("zio");
-
 test "tcpConnectToHost with an IP literal" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-    const io = rt.io();
+    const io = std.testing.io;
 
     const listen_address: net.IpAddress = .{ .ip4 = .loopback(0) };
     var server = try listen_address.listen(io, .{});
@@ -94,9 +90,7 @@ test "tcpConnectToHost with an IP literal" {
 }
 
 test "tcpConnectToHost with a host name" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-    const io = rt.io();
+    const io = std.testing.io;
 
     const listen_address: net.IpAddress = .{ .ip4 = .loopback(0) };
     var server = try listen_address.listen(io, .{});
@@ -107,17 +101,13 @@ test "tcpConnectToHost with a host name" {
 }
 
 test "tcpConnectToHost with an invalid host name" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-    const io = rt.io();
+    const io = std.testing.io;
 
     try std.testing.expectError(error.InvalidHostName, tcpConnectToHost(io, "invalid_host!", 4222));
 }
 
 test "tcpConnectToHost with nothing listening" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-    const io = rt.io();
+    const io = std.testing.io;
 
     // Grab an ephemeral port and close the listener so the port is dead.
     const listen_address: net.IpAddress = .{ .ip4 = .loopback(0) };

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 const std = @import("std");
-const zio = @import("zio");
 const xsync = @import("xsync");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;

@@ -62,7 +62,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    lib_mod.addImport("zio", zio.module("zio"));
     lib_mod.addImport("xsync", xsync.module("xsync"));
 
     // Add build options to the module
@@ -108,6 +107,7 @@ pub fn build(b: *std.Build) void {
     });
     integration_tests.root_module.addImport("nats", lib_mod);
     integration_tests.root_module.addImport("zio", zio.module("zio"));
+    integration_tests.root_module.addImport("xsync", xsync.module("xsync"));
 
     const run_integration_tests = b.addRunArtifact(integration_tests);
     run_integration_tests.has_side_effects = true; // Allow repeated runs with Docker interactions

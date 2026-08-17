@@ -12,7 +12,6 @@
 // limitations under the License.
 
 const std = @import("std");
-const zio = @import("zio");
 const xsync = @import("xsync");
 const Io = std.Io;
 const io_util = @import("io_util.zig");
@@ -426,10 +425,7 @@ test "response manager basic functionality" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    var manager = ResponseManager.init(allocator, rt.io());
+    var manager = ResponseManager.init(allocator, std.testing.io);
     defer manager.deinit();
 
     // Test that we can create request handles with different rids
@@ -448,19 +444,16 @@ test "request handle timeout functionality" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    var manager = ResponseManager.init(allocator, rt.io());
+    var manager = ResponseManager.init(allocator, std.testing.io);
     defer manager.deinit();
 
     const handle = try manager.createRequest();
     defer manager.cleanupRequest(handle);
 
     // Test timeout behavior
-    const start = io_util.now(rt.io());
+    const start = io_util.now(std.testing.io);
     const result = manager.waitForResponse(handle, .fromMilliseconds(1)); // 1ms timeout
-    const duration = start.durationTo(io_util.now(rt.io())).nanoseconds;
+    const duration = start.durationTo(io_util.now(std.testing.io)).nanoseconds;
 
     try testing.expectError(error.Timeout, result);
     try testing.expect(duration >= 1_000_000); // At least 1ms passed
@@ -470,10 +463,7 @@ test "multi-response request creation and timeout" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    var manager = ResponseManager.init(allocator, rt.io());
+    var manager = ResponseManager.init(allocator, std.testing.io);
     defer manager.deinit();
 
     // Test that we can create multi-response request handles
