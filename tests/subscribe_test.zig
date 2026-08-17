@@ -1,16 +1,13 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
+const xsync = @import("xsync");
 const utils = @import("utils.zig");
 const Message = nats.Message;
 
 const log = std.log.default;
 
 test "subscribeSync smoke test" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(std.testing.io);
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("test");
@@ -19,7 +16,7 @@ test "subscribeSync smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try sub.nextMsg(1000);
+    const msg = try sub.nextMsg(.fromSeconds(1));
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test", msg.subject);
@@ -27,10 +24,7 @@ test "subscribeSync smoke test" {
 }
 
 test "queueSubscribeSync smoke test" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(std.testing.io);
     defer utils.closeConnection(conn);
 
     const sub = try conn.queueSubscribeSync("test", "workers");
@@ -39,7 +33,7 @@ test "queueSubscribeSync smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try sub.nextMsg(1000);
+    const msg = try sub.nextMsg(.fromSeconds(1));
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test", msg.subject);
@@ -48,43 +42,39 @@ test "queueSubscribeSync smoke test" {
 
 const MessageCollector = struct {
     result: ?*Message = null,
-    mutex: zio.Mutex = .{},
-    cond: zio.Condition = .{},
+    mutex: xsync.Mutex = .init,
+    cond: xsync.Condition = .init,
 
     pub fn deinit(self: *@This()) void {
         if (self.result) |msg| msg.deinit();
     }
 
     pub fn processMsg(msg: *Message, self: *@This()) !void {
-        try self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = std.testing.io;
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
         self.result = msg;
-        self.cond.broadcast();
+        self.cond.broadcast(io);
     }
 
-    pub fn timedWait(self: *@This(), timeout_ms: u64) !*Message {
-        try self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn timedWait(self: *@This(), io: std.Io, timeout: std.Io.Duration) !*Message {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
-        const timeout_ns = timeout_ms * std.time.ns_per_ms;
-        var timer = std.time.Timer.start() catch unreachable;
+        const deadline = (std.Io.Timeout{ .duration = .{ .raw = timeout, .clock = .awake } }).toDeadline(io);
         while (self.result == null) {
-            const elapsed_ns = timer.read();
-            if (elapsed_ns >= timeout_ns) {
-                return error.Timeout;
-            }
-            try self.cond.timedWait(&self.mutex, .fromNanoseconds(timeout_ns - elapsed_ns));
+            self.cond.waitTimeout(io, &self.mutex, deadline) catch |err| switch (err) {
+                error.Timeout => return error.Timeout,
+                error.Canceled => return error.Canceled,
+            };
         }
         return self.result.?;
     }
 };
 
 test "subscribe smoke test" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(std.testing.io);
     defer utils.closeConnection(conn);
 
     var collector: MessageCollector = .{};
@@ -96,16 +86,13 @@ test "subscribe smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try collector.timedWait(1000);
+    const msg = try collector.timedWait(std.testing.io, .fromSeconds(1));
     try std.testing.expectEqualStrings("test", msg.subject);
     try std.testing.expectEqualStrings("Hello world!", msg.data);
 }
 
 test "queueSubscribe smoke test" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(std.testing.io);
     defer utils.closeConnection(conn);
 
     var collector: MessageCollector = .{};
@@ -117,7 +104,7 @@ test "queueSubscribe smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try collector.timedWait(1000);
+    const msg = try collector.timedWait(std.testing.io, .fromSeconds(1));
     try std.testing.expectEqualStrings("test", msg.subject);
     try std.testing.expectEqualStrings("Hello world!", msg.data);
 }

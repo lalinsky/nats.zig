@@ -1,16 +1,14 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
 
 test "JetStream synchronous subscription basic functionality" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -36,7 +34,7 @@ test "JetStream synchronous subscription basic functionality" {
     try conn.publish("test.sync.message", test_message);
 
     // Wait for message using nextMsg
-    const js_msg = try sync_sub.nextMsg(5000);
+    const js_msg = try sync_sub.nextMsg(.fromSeconds(5));
     defer js_msg.deinit(); // This cleans up everything via arena.deinit()
 
     // Verify message content
@@ -49,10 +47,9 @@ test "JetStream synchronous subscription basic functionality" {
 }
 
 test "JetStream synchronous subscription timeout" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -74,9 +71,9 @@ test "JetStream synchronous subscription timeout" {
     defer sync_sub.deinit();
 
     // Test timeout (should return error.Timeout after timeout)
-    const start = std.time.milliTimestamp();
-    const result = sync_sub.nextMsg(100); // 100ms timeout
-    const duration = std.time.milliTimestamp() - start;
+    const start = std.Io.Timestamp.now(io, .awake);
+    const result = sync_sub.nextMsg(.fromMilliseconds(100)); // 100ms timeout
+    const duration = start.untilNow(io, .awake).toMilliseconds();
 
     try testing.expectError(error.Timeout, result);
     try testing.expect(duration >= 100); // Should have waited at least 100ms
@@ -85,10 +82,9 @@ test "JetStream synchronous subscription timeout" {
 }
 
 test "JetStream synchronous subscription multiple messages" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -117,7 +113,7 @@ test "JetStream synchronous subscription multiple messages" {
 
     // Receive and verify all messages
     for (messages, 0..) |expected, i| {
-        const js_msg = try sync_sub.nextMsg(5000);
+        const js_msg = try sync_sub.nextMsg(.fromSeconds(5));
         defer js_msg.deinit(); // This cleans up everything via arena.deinit()
 
         try testing.expectEqualStrings(expected, js_msg.msg.data);
@@ -130,10 +126,9 @@ test "JetStream synchronous subscription multiple messages" {
 }
 
 test "JetStream synchronous queue subscription basic functionality" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -159,7 +154,7 @@ test "JetStream synchronous queue subscription basic functionality" {
     try conn.publish("test.queue.sync.message", test_message);
 
     // Wait for message using nextMsg
-    const js_msg = try queue_sub.nextMsg(5000);
+    const js_msg = try queue_sub.nextMsg(.fromSeconds(5));
     defer js_msg.deinit();
 
     // Verify message content

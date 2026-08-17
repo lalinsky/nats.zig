@@ -1,6 +1,6 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
+const xsync = @import("xsync");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
@@ -13,8 +13,8 @@ const CallbackTracker = struct {
     reconnected_called: u32 = 0,
     closed_called: u32 = 0,
     error_called: u32 = 0,
-    mutex: zio.Mutex = .{},
-    cond: zio.Condition = .{},
+    mutex: xsync.Mutex = .init,
+    cond: xsync.Condition = .init,
 
     fn reset(self: *@This()) void {
         self.disconnected_called = 0;
@@ -25,71 +25,70 @@ const CallbackTracker = struct {
 
     fn disconnectedCallback(_: *nats.Connection) void {
         var self = &tracker;
-        self.mutex.lockUncancelable();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
         self.disconnected_called += 1;
-        self.cond.signal();
+        self.cond.signal(std.testing.io);
     }
 
     fn reconnectedCallback(_: *nats.Connection) void {
         var self = &tracker;
-        self.mutex.lockUncancelable();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
         self.reconnected_called += 1;
-        self.cond.signal();
+        self.cond.signal(std.testing.io);
     }
 
     fn closedCallback(_: *nats.Connection) void {
         var self = &tracker;
-        self.mutex.lockUncancelable();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
         self.closed_called += 1;
-        self.cond.signal();
+        self.cond.signal(std.testing.io);
     }
 
     fn errorCallback(_: *nats.Connection, msg: []const u8) void {
         var self = &tracker;
-        self.mutex.lockUncancelable();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
         self.error_called += 1;
-        self.cond.signal();
+        self.cond.signal(std.testing.io);
         _ = msg;
     }
 
-    fn waitForDisconnected(self: *@This(), timeout_ms: u64) !void {
-        try self.mutex.lock();
-        defer self.mutex.unlock();
+    fn waitForDisconnected(self: *@This(), io: std.Io, timeout: std.Io.Duration) !void {
+        try self.mutex.lock(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
 
-        var timer = try std.time.Timer.start();
+        const start = std.Io.Timestamp.now(io, .awake);
         while (self.disconnected_called == 0) {
-            if (timer.read() >= timeout_ms * std.time.ns_per_ms) {
+            if (start.untilNow(io, .awake).nanoseconds >= timeout.nanoseconds) {
                 return error.DisconnectTimeout;
             }
-            self.cond.timedWait(&self.mutex, .fromMilliseconds(100)) catch {};
+            self.cond.waitTimeout(std.testing.io, &self.mutex, utils.ioTimeout(.fromMilliseconds(100))) catch {};
         }
     }
 
-    fn waitForReconnected(self: *@This(), timeout_ms: u64) !void {
-        try self.mutex.lock();
-        defer self.mutex.unlock();
+    fn waitForReconnected(self: *@This(), io: std.Io, timeout: std.Io.Duration) !void {
+        try self.mutex.lock(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
 
-        var timer = try std.time.Timer.start();
+        const start = std.Io.Timestamp.now(io, .awake);
         while (self.reconnected_called == 0) {
-            if (timer.read() >= timeout_ms * std.time.ns_per_ms) {
+            if (start.untilNow(io, .awake).nanoseconds >= timeout.nanoseconds) {
                 return error.ReconnectionTimeout;
             }
-            self.cond.timedWait(&self.mutex, .fromMilliseconds(100)) catch {};
+            self.cond.waitTimeout(std.testing.io, &self.mutex, utils.ioTimeout(.fromMilliseconds(100))) catch {};
         }
     }
 };
 
 test "basic reconnection when server stops" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
     tracker.reset();
 
-    const nc = try utils.createConnection(.node1, .{
+    const nc = try utils.createConnection(io, .node1, .{
         .trace = true,
         .reconnect = .{
             .allow_reconnect = true,
@@ -111,31 +110,30 @@ test "basic reconnection when server stops" {
     try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
 
     // Wait for disconnect and reconnection callbacks
-    try tracker.waitForDisconnected(10000);
-    try tracker.waitForReconnected(10000);
+    try tracker.waitForDisconnected(io, .fromSeconds(10));
+    try tracker.waitForReconnected(io, .fromSeconds(10));
 
     // Verify connection works after reconnection
     log.debug("Publishing after reconnection", .{});
     try nc.publish("test.after", "hello after reconnection");
 
     // Verify both disconnected and reconnected callbacks were called
-    tracker.mutex.lockUncancelable();
-    defer tracker.mutex.unlock();
+    tracker.mutex.lockUncancelable(std.testing.io);
+    defer tracker.mutex.unlock(std.testing.io);
     try testing.expectEqual(@as(u32, 1), tracker.disconnected_called);
     try testing.expectEqual(@as(u32, 1), tracker.reconnected_called);
 }
 
 test "manual reconnection with nc.reconnect()" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
     tracker.reset();
 
-    const nc = try utils.createConnection(.node1, .{
+    const nc = try utils.createConnection(io, .node1, .{
         .trace = true,
         .reconnect = .{
             .allow_reconnect = true,
-            .reconnect_wait_ms = 100,
+            .reconnect_wait = .fromMilliseconds(100),
         },
         .callbacks = .{
             .disconnected_cb = CallbackTracker.disconnectedCallback,
@@ -157,7 +155,7 @@ test "manual reconnection with nc.reconnect()" {
 
     // Verify message was received
     {
-        const msg = try sub.nextMsg(1000);
+        const msg = try sub.nextMsg(.fromSeconds(1));
         defer msg.deinit();
         try testing.expectEqualStrings("before reconnect", msg.data);
     }
@@ -167,14 +165,14 @@ test "manual reconnection with nc.reconnect()" {
     try nc.reconnect();
 
     // Wait for reconnection to complete
-    try tracker.waitForReconnected(5000);
+    try tracker.waitForReconnected(io, .fromSeconds(5));
     log.debug("Manual reconnection completed", .{});
 
     // Verify callbacks were called
-    tracker.mutex.lockUncancelable();
+    tracker.mutex.lockUncancelable(std.testing.io);
     try testing.expectEqual(@as(u32, 1), tracker.disconnected_called);
     try testing.expectEqual(@as(u32, 1), tracker.reconnected_called);
-    tracker.mutex.unlock();
+    tracker.mutex.unlock(std.testing.io);
 
     // Verify connection is working after reconnection
     log.debug("Publishing test message after manual reconnection", .{});
@@ -183,17 +181,16 @@ test "manual reconnection with nc.reconnect()" {
 
     // Verify subscription survived reconnection
     {
-        const msg = try sub.nextMsg(1000);
+        const msg = try sub.nextMsg(.fromSeconds(1));
         defer msg.deinit();
         try testing.expectEqualStrings("after reconnect", msg.data);
     }
 }
 
 test "reconnect() errors when disabled" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const nc = try utils.createConnection(.node1, .{
+    const nc = try utils.createConnection(io, .node1, .{
         .reconnect = .{
             .allow_reconnect = false,
         },
@@ -205,10 +202,9 @@ test "reconnect() errors when disabled" {
 }
 
 test "reconnect() errors when connection closed" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const nc = try utils.createConnection(.node1, .{});
+    const nc = try utils.createConnection(io, .node1, .{});
     defer utils.closeConnection(nc);
 
     nc.close();

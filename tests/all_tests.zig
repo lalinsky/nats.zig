@@ -32,15 +32,15 @@ test {
 }
 
 test "tests:beforeEach" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    try utils.waitForHealthyServices(allocator, 10_000);
+    try utils.waitForHealthyServices(allocator, .fromSeconds(10));
 }
 
 test "tests:beforeAll" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -48,7 +48,7 @@ test "tests:beforeAll" {
 }
 
 test "tests:afterAll" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

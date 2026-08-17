@@ -1,15 +1,13 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
 
 test "publish and receive message with headers" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -29,7 +27,7 @@ test "publish and receive message with headers" {
     try conn.flush();
 
     // Receive the message
-    var received_msg = sub.nextMsg(1000) catch return error.NoMessageReceived;
+    var received_msg = sub.nextMsg(.fromSeconds(1)) catch return error.NoMessageReceived;
     defer received_msg.deinit();
 
     // Verify basic message properties
@@ -49,10 +47,9 @@ test "publish and receive message with headers" {
 }
 
 test "publish message without headers using publishMsg" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -70,7 +67,7 @@ test "publish message without headers using publishMsg" {
     try conn.flush();
 
     // Receive the message
-    var received_msg = sub.nextMsg(1000) catch return error.NoMessageReceived;
+    var received_msg = sub.nextMsg(.fromSeconds(1)) catch return error.NoMessageReceived;
     defer received_msg.deinit();
 
     // Verify basic message properties
@@ -81,9 +78,6 @@ test "publish message without headers using publishMsg" {
 }
 
 test "header manipulation API" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
     // Test header manipulation on a message
     var msg = nats.Message.init(std.testing.allocator);
     defer msg.deinit();
@@ -119,10 +113,9 @@ test "header manipulation API" {
 }
 
 test "message with reply and headers" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create a subscription
@@ -143,7 +136,7 @@ test "message with reply and headers" {
     try conn.flush();
 
     // Receive the message
-    var received_msg = sub.nextMsg(1000) catch return error.NoMessageReceived;
+    var received_msg = sub.nextMsg(.fromSeconds(1)) catch return error.NoMessageReceived;
     defer received_msg.deinit();
 
     // Verify message properties
@@ -164,9 +157,6 @@ test "message with reply and headers" {
 }
 
 test "no responders header detection" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
     // Create a message that simulates "no responders" response
     var msg = nats.Message.init(std.testing.allocator);
     defer msg.deinit();

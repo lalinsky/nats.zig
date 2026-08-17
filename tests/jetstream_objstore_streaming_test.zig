@@ -1,14 +1,12 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "ObjectStore streaming put and get" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create JetStream context
@@ -41,8 +39,8 @@ test "ObjectStore streaming put and get" {
         .opts = null,
     };
 
-    var stream = std.io.fixedBufferStream(test_data);
-    const put_result = try store.put(meta, stream.reader());
+    var stream = nats.SliceReader{ .data = test_data };
+    const put_result = try store.put(meta, &stream);
 
     try testing.expect(put_result.value.size == test_data.len);
     try testing.expect(put_result.value.chunks > 0);
@@ -78,10 +76,9 @@ test "ObjectStore streaming put and get" {
 }
 
 test "ObjectStore streaming empty object" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create JetStream context
@@ -114,8 +111,8 @@ test "ObjectStore streaming empty object" {
         .opts = null,
     };
 
-    var stream = std.io.fixedBufferStream(empty_data);
-    const put_result = try store.put(meta, stream.reader());
+    var stream = nats.SliceReader{ .data = empty_data };
+    const put_result = try store.put(meta, &stream);
 
     try testing.expect(put_result.value.size == 0);
     try testing.expect(put_result.value.chunks == 0);

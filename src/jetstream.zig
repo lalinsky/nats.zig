@@ -12,7 +12,8 @@
 // limitations under the License.
 
 const std = @import("std");
-const zio = @import("zio");
+const Io = std.Io;
+const xsync = @import("xsync");
 const message_mod = @import("message.zig");
 const Message = message_mod.Message;
 const MessageList = message_mod.MessageList;
@@ -32,11 +33,11 @@ const log = @import("log.zig").log;
 
 // Helper function to replace jsonStringifyAlloc
 fn jsonStringifyAlloc(allocator: std.mem.Allocator, value: anytype, options: std.json.Stringify.Options) ![]u8 {
-    var buffer = std.ArrayList(u8){};
-    defer buffer.deinit(allocator);
+    var buffer: std.Io.Writer.Allocating = .init(allocator);
+    defer buffer.deinit();
 
-    try std.fmt.format(buffer.writer(allocator), "{f}", .{std.json.fmt(value, options)});
-    return buffer.toOwnedSlice(allocator);
+    try buffer.writer.print("{f}", .{std.json.fmt(value, options)});
+    return buffer.toOwnedSlice();
 }
 
 // Re-export JetStream message types
@@ -45,7 +46,7 @@ pub const MsgMetadata = jetstream_message.MsgMetadata;
 pub const SequencePair = jetstream_message.SequencePair;
 
 const default_api_prefix = "$JS.API.";
-const default_request_timeout_ms = 5000;
+const default_request_timeout: Io.Duration = .fromMilliseconds(5000);
 
 // JetStream publish headers
 const MsgIdHdr = "Nats-Msg-Id";
@@ -380,7 +381,7 @@ pub const PublishOptions = struct {
     /// Expected last message ID
     expected_last_msg_id: ?[]const u8 = null,
     /// Message time-to-live in nanoseconds
-    msg_ttl: ?u64 = null,
+    msg_ttl: ?Io.Duration = null,
 };
 
 /// Batch of messages returned from fetch operation
@@ -419,7 +420,7 @@ pub const PullSubscription = struct {
     /// Fetch ID counter for unique reply subjects
     fetch_id_counter: u64 = 0,
     /// Mutex for fiber safety
-    mutex: zio.Mutex = .{},
+    mutex: xsync.Mutex = .init,
 
     pub fn deinit(self: *PullSubscription) void {
         self.consumer_info.deinit();
@@ -429,11 +430,11 @@ pub const PullSubscription = struct {
     }
 
     /// Fetch a batch of messages from the pull consumer
-    pub fn fetch(self: *PullSubscription, batch: usize, timeout_ms: u64) !MessageBatch {
+    pub fn fetch(self: *PullSubscription, batch: usize, timeout: Io.Duration) !MessageBatch {
         if (batch == 0) return error.InvalidBatchSize;
 
-        try self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.js.nc.io);
+        defer self.mutex.unlock(self.js.nc.io);
 
         // Generate unique fetch ID and reply subject
         self.fetch_id_counter += 1;
@@ -444,7 +445,7 @@ pub const PullSubscription = struct {
 
         const request = FetchRequest{
             .batch = batch,
-            .expires = timeout_ms * std.time.ns_per_ms,
+            .expires = @intCast(timeout.toNanoseconds()),
         };
 
         // Serialize the fetch request to JSON
@@ -461,15 +462,16 @@ pub const PullSubscription = struct {
         try self.js.nc.publishRequest(api_subject, reply_subject, request_json);
 
         // Collect messages
-        var messages = std.ArrayList(*JetStreamMessage){};
+        var messages = std.ArrayList(*JetStreamMessage).empty;
         defer messages.deinit(self.js.nc.allocator);
+        errdefer for (messages.items) |js_msg| js_msg.deinit();
 
         var batch_complete = false;
         var fetch_error: ?anyerror = null;
 
         // Collect messages until batch is complete or timeout
         while (!batch_complete and messages.items.len < request.batch) {
-            if (self.inbox_subscription.nextMsg(timeout_ms * 2)) |raw_msg| {
+            if (self.inbox_subscription.nextMsg(.{ .nanoseconds = timeout.nanoseconds * 2 })) |raw_msg| {
                 log.debug("Message: subject={s}, reply={s}, data='{s}'", .{ raw_msg.subject, raw_msg.reply orelse "none", raw_msg.data });
                 // JetStream messages arrive with original subjects and ACK reply subjects
                 // The timestamp in the ACK subject ensures messages belong to this fetch request
@@ -503,7 +505,10 @@ pub const PullSubscription = struct {
                     raw_msg.deinit();
                 } else {
                     // This is a regular message - convert to JetStream message
-                    const js_msg_ptr = try jetstream_message.createJetStreamMessage(self.js.nc, raw_msg);
+                    const js_msg_ptr = jetstream_message.createJetStreamMessage(self.js.nc, raw_msg) catch |err| {
+                        raw_msg.deinit();
+                        return err;
+                    };
                     errdefer js_msg_ptr.deinit();
 
                     try messages.append(self.js.nc.allocator, js_msg_ptr);
@@ -513,8 +518,8 @@ pub const PullSubscription = struct {
                     // Timeout occurred
                     batch_complete = true;
                 },
-                error.Canceled => {
-                    // Propagate cancellation
+                error.Canceled, error.ConnectionClosed => {
+                    // Propagate cancellation and closed connections
                     return err;
                 },
             }
@@ -552,9 +557,9 @@ pub const JetStreamSubscription = struct {
     }
 
     /// Get the next JetStream message synchronously (for sync subscriptions)
-    pub fn nextMsg(self: *JetStreamSubscription, timeout_ms: u64) !*JetStreamMessage {
+    pub fn nextMsg(self: *JetStreamSubscription, timeout: Io.Duration) !*JetStreamMessage {
         // Get the next message from the underlying subscription
-        const msg = try self.subscription.nextMsg(timeout_ms);
+        const msg = try self.subscription.nextMsg(timeout);
         errdefer msg.deinit();
 
         // Convert to JetStream message
@@ -587,7 +592,7 @@ pub const PullSubscribeOptions = struct {
 };
 
 pub const JetStreamOptions = struct {
-    request_timeout_ms: u64 = default_request_timeout_ms,
+    request_timeout: Io.Duration = default_request_timeout,
     // Add options here
 };
 
@@ -606,7 +611,7 @@ pub const JetStream = struct {
         const full_subject = try std.fmt.allocPrint(self.nc.allocator, "{s}{s}", .{ default_api_prefix, subject });
         defer self.nc.allocator.free(full_subject);
 
-        return try self.nc.request(full_subject, payload, self.opts.request_timeout_ms);
+        return try self.nc.request(full_subject, payload, self.opts.request_timeout);
     }
 
     /// Parse an error response from the server, if present.
@@ -1207,17 +1212,19 @@ pub const JetStream = struct {
                 // Check for status messages (heartbeats and flow control)
                 if (msg.status_code == STATUS_CONTROL) {
                     // Handle status message internally, don't pass to user callback
+                    defer msg.deinit(); // Clean up status message
                     handleStatusMessage(msg, nc) catch |err| {
+                        if (err == error.Canceled) return err;
                         log.err("Failed to handle status message: {}", .{err});
                     };
-                    msg.deinit(); // Clean up status message
                     return;
                 }
 
                 // Create JetStream message wrapper for regular messages
                 const js_msg = jetstream_message.createJetStreamMessage(nc, msg) catch |err| {
-                    log.err("Failed to wrap JetStream message: {}", .{err});
                     msg.deinit(); // Clean up on error
+                    if (err == error.Canceled) return err;
+                    log.err("Failed to wrap JetStream message: {}", .{err});
                     return;
                 };
 
@@ -1249,6 +1256,7 @@ pub const JetStream = struct {
                 if (!manual_ack and callback_success) {
                     js_msg.ack() catch |err| switch (err) {
                         jetstream_message.AckError.AlreadyAcked => {}, // Ignore already acked (like nats-py)
+                        error.Canceled => |e| return e,
                         else => log.err("Auto-ack failed: {}", .{err}),
                     };
                 }
@@ -1571,7 +1579,7 @@ pub const JetStream = struct {
         }
         if (options.msg_ttl) |ttl| {
             var buf: [256]u8 = undefined;
-            const ttl_str = try std.fmt.bufPrint(&buf, "{d}ns", .{ttl});
+            const ttl_str = try std.fmt.bufPrint(&buf, "{d}ns", .{ttl.toNanoseconds()});
             try msg.headerSet(MsgTTLHdr, ttl_str);
         }
 
@@ -1582,7 +1590,7 @@ pub const JetStream = struct {
         // - nats.go: 250ms backoff, 2 retries by default
         // - nats.c: Check their implementation
         // - nats.java: Check their implementation
-        const resp = self.nc.requestMsg(msg, self.opts.request_timeout_ms) catch |request_err| {
+        const resp = self.nc.requestMsg(msg, self.opts.request_timeout) catch |request_err| {
             return if (request_err == error.NoResponders) error.NoStreamResponse else request_err;
         };
 

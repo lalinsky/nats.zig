@@ -13,7 +13,6 @@
 // limitations under the License.
 
 const std = @import("std");
-const zio = @import("zio");
 const Message = @import("message.zig").Message;
 const MessagePool = @import("message.zig").MessagePool;
 const log = @import("log.zig").log;
@@ -58,7 +57,7 @@ pub const ParserState = enum {
 pub const MsgArg = struct {
     msg: ?*Message = null,
     payload_buffer: []u8 = undefined,
-    payload_writer: std.io.FixedBufferStream([]u8) = undefined,
+    payload_pos: usize = 0,
 };
 
 // Forward declaration for connection
@@ -77,11 +76,11 @@ pub const Parser = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator) Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) Self {
         return Self{
             .allocator = allocator,
-            .arg_buf_rec = std.ArrayList(u8){},
-            .msg_pool = MessagePool.init(allocator),
+            .arg_buf_rec = std.ArrayList(u8).empty,
+            .msg_pool = MessagePool.init(allocator, io),
         };
     }
 
@@ -206,15 +205,15 @@ pub const Parser = struct {
                 .MSG_PAYLOAD => {
                     const msg = self.ma.msg orelse unreachable;
 
-                    var needed = self.ma.payload_buffer.len - self.ma.payload_writer.pos;
+                    var needed = self.ma.payload_buffer.len - self.ma.payload_pos;
                     const available = buf.len - i;
                     const to_copy = @min(needed, available);
 
                     if (to_copy > 0) {
-                        const written = try self.ma.payload_writer.write(buf[i .. i + to_copy]);
-                        std.debug.assert(written == to_copy);
+                        @memcpy(self.ma.payload_buffer[self.ma.payload_pos..][0..to_copy], buf[i .. i + to_copy]);
+                        self.ma.payload_pos += to_copy;
                         i += to_copy - 1;
-                        needed -= written;
+                        needed -= to_copy;
                     }
 
                     if (needed == 0) {
@@ -570,7 +569,7 @@ pub const Parser = struct {
         self.ma = MsgArg{
             .msg = msg,
             .payload_buffer = payload_buffer,
-            .payload_writer = std.io.fixedBufferStream(payload_buffer),
+            .payload_pos = 0,
         };
     }
 };
@@ -627,7 +626,7 @@ const MockConnection = struct {
 test "parser ping pong" {
     const testing = std.testing;
 
-    var parser = Parser.init(testing.allocator);
+    var parser = Parser.init(testing.allocator, std.testing.io);
     defer parser.deinit();
 
     var mock_conn = MockConnection{};
@@ -645,7 +644,7 @@ test "parser ping pong" {
 test "parser ok" {
     const testing = std.testing;
 
-    var parser = Parser.init(testing.allocator);
+    var parser = Parser.init(testing.allocator, std.testing.io);
     defer parser.deinit();
 
     var mock_conn = MockConnection{};
@@ -658,7 +657,7 @@ test "parser ok" {
 test "parser err" {
     const testing = std.testing;
 
-    var parser = Parser.init(testing.allocator);
+    var parser = Parser.init(testing.allocator, std.testing.io);
     defer parser.deinit();
 
     var mock_conn = MockConnection{};
@@ -672,7 +671,7 @@ test "parser err" {
 test "parser info" {
     const testing = std.testing;
 
-    var parser = Parser.init(testing.allocator);
+    var parser = Parser.init(testing.allocator, std.testing.io);
     defer parser.deinit();
 
     var mock_conn = MockConnection{};
@@ -688,7 +687,7 @@ test "parser info" {
 test "parser msg" {
     const testing = std.testing;
 
-    var parser = Parser.init(testing.allocator);
+    var parser = Parser.init(testing.allocator, std.testing.io);
     defer parser.deinit();
 
     var mock_conn = MockConnection{};
@@ -704,7 +703,7 @@ test "parser msg" {
 test "parser msg with reply" {
     const testing = std.testing;
 
-    var parser = Parser.init(testing.allocator);
+    var parser = Parser.init(testing.allocator, std.testing.io);
     defer parser.deinit();
 
     var mock_conn = MockConnection{ .parser_ref = &parser };
@@ -718,7 +717,7 @@ test "parser msg with reply" {
 test "parser hmsg" {
     const testing = std.testing;
 
-    var parser = Parser.init(testing.allocator);
+    var parser = Parser.init(testing.allocator, std.testing.io);
     defer parser.deinit();
 
     var mock_conn = MockConnection{ .parser_ref = &parser };
@@ -730,15 +729,11 @@ test "parser hmsg" {
 }
 
 fn parseInChunks(parser: *Parser, conn: *MockConnection, data: []const u8, chunk_size: usize) !void {
-    var stream = std.io.fixedBufferStream(data);
-    const reader = stream.reader();
-
-    while (true) {
-        var buf: [1024]u8 = undefined;
-        std.debug.assert(chunk_size <= buf.len);
-        const n = try reader.read(buf[0..chunk_size]);
-        if (n == 0) break;
-        try parser.parse(conn, buf[0..n]);
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const end = @min(offset + chunk_size, data.len);
+        try parser.parse(conn, data[offset..end]);
+        offset = end;
     }
 }
 
@@ -747,7 +742,7 @@ test "parser split msg" {
     for (1..data.len) |chunk_size| {
         log.debug("chunk_size: {}", .{chunk_size});
 
-        var parser = Parser.init(std.testing.allocator);
+        var parser = Parser.init(std.testing.allocator, std.testing.io);
         defer parser.deinit();
 
         var capture = MockConnection{};
@@ -766,7 +761,7 @@ test "parser split hmsg" {
     for (1..data.len) |chunk_size| {
         log.info("chunk_size: {}", .{chunk_size});
 
-        var parser = Parser.init(std.testing.allocator);
+        var parser = Parser.init(std.testing.allocator, std.testing.io);
         defer parser.deinit();
 
         var capture = MockConnection{};
@@ -790,7 +785,7 @@ test "parser split err" {
     for (1..data.len) |chunk_size| {
         log.info("chunk_size: {}", .{chunk_size});
 
-        var parser = Parser.init(std.testing.allocator);
+        var parser = Parser.init(std.testing.allocator, std.testing.io);
         defer parser.deinit();
 
         var capture = MockConnection{};
@@ -808,7 +803,7 @@ test "parser split info" {
     for (1..data.len) |chunk_size| {
         log.info("chunk_size: {}", .{chunk_size});
 
-        var parser = Parser.init(std.testing.allocator);
+        var parser = Parser.init(std.testing.allocator, std.testing.io);
         defer parser.deinit();
 
         var capture = MockConnection{};
@@ -833,7 +828,7 @@ test "parser multiple lines" {
     for (1..data.len) |chunk_size| {
         log.info("chunk_size: {}", .{chunk_size});
 
-        var parser = Parser.init(std.testing.allocator);
+        var parser = Parser.init(std.testing.allocator, std.testing.io);
         defer parser.deinit();
 
         var capture = MockConnection{};

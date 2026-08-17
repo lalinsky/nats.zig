@@ -13,22 +13,22 @@ pub const BenchStats = struct {
     last_msg_count: u64 = 0,
     last_success_count: u64 = 0,
     last_error_count: u64 = 0,
-    start_time: i128 = 0,
-    last_report_time: i128 = 0,
+    io: std.Io,
+    start_time: std.Io.Timestamp = .zero,
+    last_report_time: std.Io.Timestamp = .zero,
 
-    pub fn init() BenchStats {
-        const now = std.time.nanoTimestamp();
+    pub fn init(io: std.Io) BenchStats {
+        const now = std.Io.Timestamp.now(io, .awake);
         return BenchStats{
+            .io = io,
             .start_time = now,
             .last_report_time = now,
         };
     }
 
-    pub fn elapsedS(self: *const BenchStats, start_time: i128) f64 {
-        _ = self;
-        const now = std.time.nanoTimestamp();
-        const elapsed_ns = now - start_time;
-        return @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
+    pub fn elapsedS(self: *const BenchStats, start_time: std.Io.Timestamp) f64 {
+        const elapsed = start_time.untilNow(self.io, .awake);
+        return @as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s;
     }
 
     pub fn printThroughput(self: *BenchStats, action: []const u8) void {
@@ -47,7 +47,7 @@ pub const BenchStats = struct {
         self.last_msg_count = self.msg_count;
         self.last_success_count = self.success_count;
         self.last_error_count = self.error_count;
-        self.last_report_time = std.time.nanoTimestamp();
+        self.last_report_time = std.Io.Timestamp.now(self.io, .awake);
     }
 
     pub fn printError(self: *BenchStats, err: anyerror) void {
@@ -73,7 +73,7 @@ pub const BenchStats = struct {
     }
 };
 
-fn benchSignalHandler(sig_num: i32) callconv(.c) void {
+fn benchSignalHandler(sig_num: std.posix.SIG) callconv(.c) void {
     _ = sig_num;
     keep_running = false;
 }
@@ -98,7 +98,7 @@ pub fn connect(allocator: std.mem.Allocator, url: ?[]const u8) !*nats.Connection
     var conn = try allocator.create(nats.Connection);
     errdefer allocator.destroy(conn);
 
-    conn.* = nats.Connection.init(allocator, .{});
+    conn.* = nats.Connection.init(allocator, rt.io(), .{});
 
     const connect_url = url orelse "nats://localhost:4222";
     conn.connect(connect_url) catch |err| {

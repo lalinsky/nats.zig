@@ -12,20 +12,21 @@
 // limitations under the License.
 
 const std = @import("std");
-const zio = @import("zio");
+const xsync = @import("xsync");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
+const io_util = @import("io_util.zig");
+
 const PopError = error{
-    QueueEmpty,
-    QueueClosed,
-    BufferFrozen,
+    WouldBlock,
+    Closed,
 };
 
 const PushError = error{
-    QueueClosed,
+    Closed,
     ChunkLimitExceeded,
     OutOfMemory,
-    BufferFrozen,
 };
 
 /// A single chunk in the linked list with inline data
@@ -133,7 +134,7 @@ fn ChunkPool(comptime T: type, comptime chunk_size: usize) type {
         fn init(allocator: Allocator, max_size: usize) Self {
             _ = allocator;
             return .{
-                .chunks = std.ArrayList(*Chunk){},
+                .chunks = std.ArrayList(*Chunk).empty,
                 .max_size = max_size,
             };
         }
@@ -166,10 +167,13 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
     return struct {
         allocator: Allocator,
 
+        /// The `std.Io` instance used for blocking and waking
+        io: Io,
+
         /// Single mutex protecting all operations
-        mutex: zio.Mutex,
+        mutex: xsync.Mutex,
         /// Condition variable for waiting readers
-        data_cond: zio.Condition,
+        data_cond: xsync.Condition,
 
         /// Head of the linked list (oldest chunk, protected by mutex)
         head: ?*Chunk,
@@ -189,8 +193,6 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         chunk_pool: Pool,
         /// Whether the queue is closed for writes (protected by mutex)
         is_closed: bool,
-        /// Whether the buffer is frozen (blocks both readers and writers, protected by mutex)
-        is_frozen: bool,
         /// Reset counter to detect buffer state changes
         reset_id: u64,
 
@@ -209,11 +211,12 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             max_size: usize = 0,
         };
 
-        pub fn init(allocator: Allocator, config: Config) Self {
+        pub fn init(allocator: Allocator, io: Io, config: Config) Self {
             return .{
                 .allocator = allocator,
-                .mutex = .{},
-                .data_cond = .{},
+                .io = io,
+                .mutex = .init,
+                .data_cond = .init,
                 .head = null,
                 .tail = null,
                 .items_available = 0,
@@ -222,7 +225,6 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 .max_size = config.max_size,
                 .chunk_pool = Pool.init(allocator, config.max_pool_size),
                 .is_closed = false,
-                .is_frozen = false,
                 .reset_id = 0,
             };
         }
@@ -241,15 +243,12 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         }
 
         /// Push a single item (fiber-safe, cancelable)
-        pub fn push(self: *Self, item: T) (zio.Cancelable || PushError)!void {
-            try self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn push(self: *Self, item: T) (Io.Cancelable || PushError)!void {
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
 
             if (self.is_closed) {
-                return PushError.QueueClosed;
-            }
-            if (self.is_frozen) {
-                return PushError.BufferFrozen;
+                return PushError.Closed;
             }
 
             // Check size limit before adding (overflow-safe)
@@ -269,19 +268,16 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             }
 
             self.items_available += 1;
-            self.data_cond.signal();
+            self.data_cond.signal(self.io);
         }
 
         /// Push multiple items (fiber-safe, cancelable)
-        pub fn pushSlice(self: *Self, items: []const T) (zio.Cancelable || PushError)!void {
-            try self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn pushSlice(self: *Self, items: []const T) (Io.Cancelable || PushError)!void {
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
 
             if (self.is_closed) {
-                return PushError.QueueClosed;
-            }
-            if (self.is_frozen) {
-                return PushError.BufferFrozen;
+                return PushError.Closed;
             }
 
             // Check size limit before adding (overflow-safe)
@@ -315,75 +311,71 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             }
 
             self.items_available += total_written;
-            self.data_cond.signal();
+            self.data_cond.signal(self.io);
         }
 
-        /// Internal helper to wait for data availability with timeout handling
+        /// Internal helper to wait for data availability with timeout handling.
+        /// A `.zero` timeout is non-blocking, `.max` waits indefinitely.
         /// Assumes mutex is already held.
-        fn waitForDataInternal(self: *Self, timeout_ms: u64) (zio.Cancelable || PopError)!void {
-            // Fast path for non-blocking (timeout_ms == 0)
-            if (timeout_ms == 0) {
+        fn waitForDataInternal(self: *Self, timeout: Io.Duration) (Io.Cancelable || PopError)!void {
+            // Fast path for non-blocking (zero timeout)
+            if (timeout.nanoseconds == 0) {
                 if (self.is_closed and self.items_available == 0) {
-                    return PopError.QueueClosed;
-                }
-                if (self.is_frozen) {
-                    return PopError.BufferFrozen;
+                    return PopError.Closed;
                 }
                 if (self.items_available == 0) {
-                    return PopError.QueueEmpty;
+                    return PopError.WouldBlock;
                 }
                 return;
-            } else if (timeout_ms == std.math.maxInt(u64)) {
+            } else if (timeout.nanoseconds == Io.Duration.max.nanoseconds) {
                 // Wait indefinitely
-                while ((self.items_available == 0 or self.is_frozen) and !self.is_closed) {
-                    try self.data_cond.wait(&self.mutex);
+                while (self.items_available == 0 and !self.is_closed) {
+                    try self.data_cond.wait(self.io, &self.mutex);
                 }
 
                 if (self.is_closed and self.items_available == 0) {
-                    return PopError.QueueClosed;
+                    return PopError.Closed;
                 }
                 return;
             } else {
                 // Wait with timeout
-                var timer = std.time.Timer.start() catch unreachable;
-                const timeout_ns = timeout_ms * std.time.ns_per_ms;
+                const deadline = io_util.deadline(self.io, timeout);
 
-                while ((self.items_available == 0 or self.is_frozen) and !self.is_closed) {
-                    const elapsed_ns = timer.read();
-                    if (elapsed_ns >= timeout_ns) {
+                while (self.items_available == 0 and !self.is_closed) {
+                    if (io_util.expired(self.io, deadline)) {
                         if (self.is_closed and self.items_available == 0) {
-                            return PopError.QueueClosed;
+                            return PopError.Closed;
                         }
-                        if (self.is_frozen) {
-                            return PopError.BufferFrozen;
-                        }
-                        return PopError.QueueEmpty;
+                        return PopError.WouldBlock;
                     }
 
-                    const remaining_ns = timeout_ns - elapsed_ns;
-                    self.data_cond.timedWait(&self.mutex, .fromNanoseconds(remaining_ns)) catch |err| switch (err) {
+                    self.data_cond.waitTimeout(self.io, &self.mutex, deadline) catch |err| switch (err) {
                         error.Canceled => return error.Canceled,
                         error.Timeout => {}, // Continue loop to check conditions
                     };
                 }
 
                 if (self.is_closed and self.items_available == 0) {
-                    return PopError.QueueClosed;
+                    return PopError.Closed;
                 }
                 return;
             }
         }
 
-        /// Pop a single item with timeout (0 = non-blocking)
-        pub fn pop(self: *Self, timeout_ms: u64) (zio.Cancelable || PopError)!T {
-            try self.mutex.lock();
-            defer self.mutex.unlock();
+        /// Pop a single item with timeout (`.zero` = non-blocking, `.max` = wait forever)
+        pub fn pop(self: *Self, timeout: Io.Duration) (Io.Cancelable || PopError)!T {
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
 
-            try self.waitForDataInternal(timeout_ms);
+            try self.waitForDataInternal(timeout);
 
-            // At this point we have data, pop it
-            const chunk = self.head orelse return PopError.QueueEmpty;
-            const item = chunk.popItem() orelse return PopError.QueueEmpty;
+            return self.popLocked() orelse PopError.WouldBlock;
+        }
+
+        /// Pop the next available item; assumes the mutex is held.
+        fn popLocked(self: *Self) ?T {
+            const chunk = self.head orelse return null;
+            const item = chunk.popItem() orelse return null;
 
             self.items_available -= 1;
 
@@ -401,23 +393,32 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             return item;
         }
 
-        /// Try to pop a single item (non-blocking, returns null if empty)
+        /// Try to pop a single item (non-blocking, returns null if empty).
+        /// Not a cancelation point, so it is safe in cleanup paths.
         pub fn tryPop(self: *Self) ?T {
-            return self.pop(0) catch null;
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+
+            return self.popLocked();
         }
 
-        /// Get readable slice with timeout (0 = non-blocking, maxInt(u64) = wait forever)
-        pub fn getSlice(self: *Self, timeout_ms: u64) (zio.Cancelable || PopError)!View {
-            try self.mutex.lock();
-            defer self.mutex.unlock();
+        /// Get readable slice with timeout (`.zero` = non-blocking, `.max` = wait forever)
+        pub fn getSlice(self: *Self, timeout: Io.Duration) (Io.Cancelable || PopError)!View {
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
 
-            try self.waitForDataInternal(timeout_ms);
+            try self.waitForDataInternal(timeout);
 
-            const chunk = self.head orelse return PopError.QueueEmpty;
+            return self.getSliceLocked() orelse PopError.WouldBlock;
+        }
+
+        /// Get a readable slice if data is available; assumes the mutex is held.
+        fn getSliceLocked(self: *Self) ?View {
+            const chunk = self.head orelse return null;
             const available = chunk.availableToRead();
 
             if (available == 0) {
-                return PopError.QueueEmpty;
+                return null;
             }
 
             return View{
@@ -427,15 +428,19 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             };
         }
 
-        /// Try to get readable slice without blocking
+        /// Try to get readable slice without blocking.
+        /// Not a cancelation point, so it is safe in cleanup paths.
         pub fn tryGetSlice(self: *Self) ?View {
-            return self.getSlice(0) catch null;
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+
+            return self.getSliceLocked();
         }
 
         /// Consume items after processing
         pub fn consumeItems(self: *Self, chunk: *Chunk, items_consumed: usize) void {
-            self.mutex.lockUncancelable();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
 
             chunk.read_pos += items_consumed;
             self.items_available -= items_consumed;
@@ -456,67 +461,41 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
         /// Get total items available for reading
         pub fn getItemsAvailable(self: *Self) usize {
-            self.mutex.lockUncancelable();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
 
             return self.items_available;
         }
 
         /// Check if queue has data
         pub fn hasData(self: *Self) bool {
-            self.mutex.lockUncancelable();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
 
             return self.items_available > 0;
         }
 
         /// Close the queue to prevent further writes
         pub fn close(self: *Self) void {
-            self.mutex.lockUncancelable();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
 
             self.is_closed = true;
-            self.is_frozen = false;
-            self.data_cond.broadcast();
+            self.data_cond.broadcast(self.io);
         }
 
         /// Check if the queue is closed
         pub fn isClosed(self: *Self) bool {
-            self.mutex.lockUncancelable();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
 
             return self.is_closed;
         }
 
-        /// Freeze the buffer (blocks both readers and writers)
-        pub fn freeze(self: *Self) void {
-            self.mutex.lockUncancelable();
-            defer self.mutex.unlock();
-
-            self.is_frozen = true;
-        }
-
-        /// Unfreeze the buffer and wake up waiting fibers
-        pub fn unfreeze(self: *Self) void {
-            self.mutex.lockUncancelable();
-            defer self.mutex.unlock();
-
-            self.is_frozen = false;
-            self.data_cond.broadcast();
-        }
-
-        /// Check if buffer is frozen
-        pub fn isFrozen(self: *Self) bool {
-            self.mutex.lockUncancelable();
-            defer self.mutex.unlock();
-
-            return self.is_frozen;
-        }
-
         /// Reset the queue to empty state
         pub fn reset(self: *Self) void {
-            self.mutex.lockUncancelable();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
 
             // Free all chunks in the linked list
             var current = self.head;
@@ -531,11 +510,10 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             self.tail = null;
             self.items_available = 0;
             self.is_closed = false;
-            self.is_frozen = false;
             self.reset_id +%= 1;
 
             // Wake up any waiting fibers
-            self.data_cond.broadcast();
+            self.data_cond.broadcast(self.io);
         }
 
         // Private helper functions
@@ -596,13 +574,13 @@ pub fn VectorGather(comptime T: type, comptime chunk_size: usize) type {
 
         const Self = @This();
 
-        pub fn consume(self: Self, bytes_consumed: usize) (zio.Cancelable || error{ BufferReset, ConcurrentConsumer })!void {
+        pub fn consume(self: Self, bytes_consumed: usize) (Io.Cancelable || error{ BufferReset, ConcurrentConsumer })!void {
             if (bytes_consumed > self.total_bytes) {
                 std.debug.panic("Attempting to consume {} bytes but only {} were gathered", .{ bytes_consumed, self.total_bytes });
             }
 
-            try self.buffer.queue.mutex.lock();
-            defer self.buffer.queue.mutex.unlock();
+            try self.buffer.queue.mutex.lock(self.buffer.queue.io);
+            defer self.buffer.queue.mutex.unlock(self.buffer.queue.io);
 
             // Validate reset ID hasn't changed
             if (self.reset_id != self.buffer.queue.reset_id) {
@@ -619,7 +597,6 @@ pub fn VectorGather(comptime T: type, comptime chunk_size: usize) type {
                 return error.ConcurrentConsumer;
             }
 
-            // Proceed with consumption (no freeze check - data was already gathered)
             self.buffer.consumeBytesInternal(bytes_consumed);
         }
     };
@@ -635,9 +612,9 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         pub const Config = Queue.Config;
         pub const Gather = VectorGather(u8, chunk_size);
 
-        pub fn init(allocator: Allocator, config: Config) Self {
+        pub fn init(allocator: Allocator, io: Io, config: Config) Self {
             return .{
-                .queue = Queue.init(allocator, config),
+                .queue = Queue.init(allocator, io, config),
             };
         }
 
@@ -646,21 +623,18 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         }
 
         /// Append bytes to the buffer
-        pub fn append(self: *Self, data: []const u8) (zio.Cancelable || PushError)!void {
+        pub fn append(self: *Self, data: []const u8) (Io.Cancelable || PushError)!void {
             return self.queue.pushSlice(data);
         }
 
         /// Append multiple slices to the buffer in a single operation
         /// More efficient than calling append() multiple times as it only takes the lock once
-        pub fn appendMany(self: *Self, slices: []const []const u8) (zio.Cancelable || PushError)!void {
-            try self.queue.mutex.lock();
-            defer self.queue.mutex.unlock();
+        pub fn appendMany(self: *Self, slices: []const []const u8) (Io.Cancelable || PushError)!void {
+            try self.queue.mutex.lock(self.queue.io);
+            defer self.queue.mutex.unlock(self.queue.io);
 
             if (self.queue.is_closed) {
-                return PushError.QueueClosed;
-            }
-            if (self.queue.is_frozen) {
-                return PushError.BufferFrozen;
+                return PushError.Closed;
             }
 
             // Calculate total size needed
@@ -702,7 +676,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             }
 
             self.queue.items_available += total_size;
-            self.queue.data_cond.signal();
+            self.queue.data_cond.signal(self.queue.io);
         }
 
         /// Close the buffer to prevent further writes
@@ -721,8 +695,8 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         }
 
         /// Get readable byte slice with timeout
-        pub fn getSlice(self: *Self, timeout_ms: u64) (zio.Cancelable || PopError)!Queue.View {
-            return self.queue.getSlice(timeout_ms);
+        pub fn getSlice(self: *Self, timeout: Io.Duration) (Io.Cancelable || PopError)!Queue.View {
+            return self.queue.getSlice(timeout);
         }
 
         /// Get bytes available
@@ -740,29 +714,14 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.reset();
         }
 
-        /// Freeze the buffer (blocks both readers and writers)
-        pub fn freeze(self: *Self) void {
-            self.queue.freeze();
-        }
+        /// Get multiple readable slices for vectored I/O with timeout (`.zero` = non-blocking)
+        pub fn gatherReadSlices(self: *Self, slices: [][]const u8, timeout: Io.Duration) (Io.Cancelable || PopError)!Gather {
+            try self.queue.mutex.lock(self.queue.io);
+            defer self.queue.mutex.unlock(self.queue.io);
 
-        /// Unfreeze the buffer and wake up waiting fibers
-        pub fn unfreeze(self: *Self) void {
-            self.queue.unfreeze();
-        }
+            try self.queue.waitForDataInternal(timeout);
 
-        /// Check if buffer is frozen
-        pub fn isFrozen(self: *Self) bool {
-            return self.queue.isFrozen();
-        }
-
-        /// Get multiple readable slices for vectored I/O with timeout (0 = non-blocking)
-        pub fn gatherReadSlices(self: *Self, slices: [][]const u8, timeout_ms: u64) (zio.Cancelable || PopError)!Gather {
-            try self.queue.mutex.lock();
-            defer self.queue.mutex.unlock();
-
-            try self.queue.waitForDataInternal(timeout_ms);
-
-            // At this point we have data and are not frozen - gather slices
+            // At this point we have data - gather slices
             var count: usize = 0;
             var total_bytes: usize = 0;
             var current = self.queue.head;
@@ -795,7 +754,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             };
         }
 
-        /// Internal helper for consuming bytes (no freeze checking)
+        /// Internal helper for consuming bytes.
         /// Assumes mutex is already held.
         fn consumeBytesInternal(self: *Self, total_bytes: usize) void {
             // Validate that we're not consuming more than available
@@ -833,7 +792,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         }
 
         /// Move all data from this buffer to another buffer atomically (no copy).
-        pub fn moveToBuffer(self: *Self, dest: *Self) (zio.Cancelable || PushError)!void {
+        pub fn moveToBuffer(self: *Self, dest: *Self) (Io.Cancelable || PushError)!void {
             if (self == dest) return; // no-op
 
             // Lock both buffers in a stable order to avoid deadlocks.
@@ -842,22 +801,14 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             var first: *Self = if (self_addr <= dest_addr) self else dest;
             var second: *Self = if (self_addr <= dest_addr) dest else self;
 
-            try first.queue.mutex.lock();
-            defer first.queue.mutex.unlock();
-            try second.queue.mutex.lock();
-            defer second.queue.mutex.unlock();
-
-            // Respect freeze semantics:
-            if (dest.queue.is_frozen) {
-                return PushError.BufferFrozen;
-            }
-            if (self.queue.is_frozen) {
-                return PushError.BufferFrozen;
-            }
+            try first.queue.mutex.lock(first.queue.io);
+            defer first.queue.mutex.unlock(first.queue.io);
+            try second.queue.mutex.lock(second.queue.io);
+            defer second.queue.mutex.unlock(second.queue.io);
 
             // Use direct fields (don't call methods that relock).
             if (self.queue.items_available == 0) return;
-            if (dest.queue.is_closed) return PushError.QueueClosed;
+            if (dest.queue.is_closed) return PushError.Closed;
 
             // Count chunks to enforce dest.max_chunks if needed.
             var moved_chunk_count: usize = 0;
@@ -895,7 +846,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             dest.queue.items_available += self.queue.items_available;
             dest.queue.total_chunks += moved_chunk_count;
             // Wake a waiting reader on dest (consistent with push/pushSlice)
-            dest.queue.data_cond.signal();
+            dest.queue.data_cond.signal(dest.queue.io);
 
             // Reset source queue state (we transferred ownership).
             self.queue.head = null;
@@ -906,32 +857,30 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             self.queue.total_chunks -= moved_chunk_count;
         }
 
-        /// Wait for data to become available with timeout (0 = non-blocking)
-        pub fn waitForData(self: *Self, timeout_ms: u64) (zio.Cancelable || PopError)!void {
-            try self.queue.mutex.lock();
-            defer self.queue.mutex.unlock();
+        /// Wait for data to become available with timeout (`.zero` = non-blocking)
+        pub fn waitForData(self: *Self, timeout: Io.Duration) (Io.Cancelable || PopError)!void {
+            try self.queue.mutex.lock(self.queue.io);
+            defer self.queue.mutex.unlock(self.queue.io);
 
-            try self.queue.waitForDataInternal(timeout_ms);
+            try self.queue.waitForDataInternal(timeout);
         }
 
         /// Wait for more data to become available with timeout
-        pub fn waitForMoreData(self: *Self, timeout_ns: u64) (zio.Cancelable || error{QueueClosed})!void {
-            try self.queue.mutex.lock();
-            defer self.queue.mutex.unlock();
+        pub fn waitForMoreData(self: *Self, timeout: Io.Duration) (Io.Cancelable || error{Closed})!void {
+            try self.queue.mutex.lock(self.queue.io);
+            defer self.queue.mutex.unlock(self.queue.io);
 
             if (self.queue.is_closed) {
-                return error.QueueClosed;
+                return error.Closed;
             }
 
             const initial_data = self.queue.items_available;
-            var timer = std.time.Timer.start() catch unreachable;
+            const deadline = io_util.deadline(self.queue.io, timeout);
 
             while (self.queue.items_available <= initial_data and !self.queue.is_closed) {
-                const elapsed_ns = timer.read();
-                if (elapsed_ns >= timeout_ns) break;
+                if (io_util.expired(self.queue.io, deadline)) break;
 
-                const remaining_ns = timeout_ns - elapsed_ns;
-                self.queue.data_cond.timedWait(&self.queue.mutex, .fromNanoseconds(remaining_ns)) catch |err| switch (err) {
+                self.queue.data_cond.waitTimeout(self.queue.io, &self.queue.mutex, deadline) catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
                     error.Timeout => {}, // Continue loop
                 };
@@ -939,7 +888,7 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
 
             // Check if closed after waiting
             if (self.queue.is_closed) {
-                return error.QueueClosed;
+                return error.Closed;
             }
         }
     };
@@ -949,11 +898,8 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
 test "generic queue with integers" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const IntQueue = ConcurrentQueue(i32, 4);
-    var queue = IntQueue.init(allocator, .{});
+    var queue = IntQueue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
     // Push individual items
@@ -961,7 +907,7 @@ test "generic queue with integers" {
     try queue.push(43);
 
     // Pop them
-    try std.testing.expectEqual(@as(i32, 42), try queue.pop(1000));
+    try std.testing.expectEqual(@as(i32, 42), try queue.pop(.fromMilliseconds(1000)));
     try std.testing.expectEqual(@as(i32, 43), queue.tryPop().?);
 
     // Should be empty
@@ -971,16 +917,13 @@ test "generic queue with integers" {
 test "generic queue with structs" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Message = struct {
         id: u32,
         data: [8]u8,
     };
 
     const MsgQueue = ConcurrentQueue(Message, 16);
-    var queue = MsgQueue.init(allocator, .{});
+    var queue = MsgQueue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
     // Push messages
@@ -1003,11 +946,8 @@ test "generic queue with structs" {
 test "byte buffer specialization" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     try buffer.append("Hello, World!");
@@ -1021,12 +961,10 @@ test "byte buffer specialization" {
 
 test "concurrent push and pop" {
     const allocator = std.testing.allocator;
-
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
     const Queue = ConcurrentQueue(u64, 32);
-    var queue = Queue.init(allocator, .{});
+    var queue = Queue.init(allocator, io, .{});
     defer queue.deinit();
 
     var sum: u64 = 0;
@@ -1040,18 +978,18 @@ test "concurrent push and pop" {
 
         fn consumer(q: *Queue, s: *u64) void {
             for (0..100) |_| {
-                s.* += q.pop(1000) catch return;
+                s.* += q.pop(.fromMilliseconds(1000)) catch return;
             }
         }
     };
 
-    var group: zio.Group = .init;
-    defer group.cancel();
+    var group: Io.Group = .init;
+    defer group.cancel(io);
 
-    try group.spawn(TestFn.producer, .{&queue});
-    try group.spawn(TestFn.consumer, .{ &queue, &sum });
+    try group.concurrent(io, TestFn.producer, .{&queue});
+    try group.concurrent(io, TestFn.consumer, .{ &queue, &sum });
 
-    try group.wait();
+    try group.await(io);
 
     // Sum of 0..99 = 4950
     try std.testing.expectEqual(4950, sum);
@@ -1060,11 +998,8 @@ test "concurrent push and pop" {
 test "queue close functionality" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, .{});
+    var queue = Queue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
     // Push some items before closing
@@ -1075,11 +1010,11 @@ test "queue close functionality" {
     queue.close();
 
     // Should not be able to push after closing
-    try std.testing.expectError(PushError.QueueClosed, queue.push(3));
-    try std.testing.expectError(PushError.QueueClosed, queue.pushSlice(&[_]i32{ 4, 5 }));
+    try std.testing.expectError(PushError.Closed, queue.push(3));
+    try std.testing.expectError(PushError.Closed, queue.pushSlice(&[_]i32{ 4, 5 }));
 
     // Should still be able to read existing data
-    try std.testing.expectEqual(@as(i32, 1), try queue.pop(1000));
+    try std.testing.expectEqual(@as(i32, 1), try queue.pop(.fromMilliseconds(1000)));
     try std.testing.expectEqual(@as(i32, 2), queue.tryPop().?);
 
     // Verify closed state
@@ -1089,85 +1024,76 @@ test "queue close functionality" {
 test "blocking pop handles queue closure" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, .{});
+    var queue = Queue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
-    var pop_result: ?(zio.Cancelable || PopError) = null;
+    var pop_result: ?(Io.Cancelable || PopError) = null;
 
     const TestFn = struct {
         fn closer(q: *Queue) void {
-            zio.sleep(.fromMilliseconds(10)) catch return;
+            std.testing.io.sleep(.fromMilliseconds(10), .awake) catch return;
             q.close();
         }
 
-        fn popper(q: *Queue, result: *?(zio.Cancelable || PopError)) void {
-            _ = q.pop(1000) catch |err| {
+        fn popper(q: *Queue, result: *?(Io.Cancelable || PopError)) void {
+            _ = q.pop(.fromMilliseconds(1000)) catch |err| {
                 result.* = err;
                 return;
             };
         }
     };
 
-    var group: zio.Group = .init;
-    defer group.cancel();
+    var group: Io.Group = .init;
+    defer group.cancel(std.testing.io);
 
-    try group.spawn(TestFn.closer, .{&queue});
-    try group.spawn(TestFn.popper, .{ &queue, &pop_result });
+    try group.concurrent(std.testing.io, TestFn.closer, .{&queue});
+    try group.concurrent(std.testing.io, TestFn.popper, .{ &queue, &pop_result });
 
-    try group.wait();
+    try group.await(std.testing.io);
 
-    try std.testing.expectEqual(error.QueueClosed, pop_result.?);
+    try std.testing.expectEqual(error.Closed, pop_result.?);
 }
 
 test "getSlice handles queue closure with indefinite wait" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, .{});
+    var queue = Queue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
-    var get_result: ?(zio.Cancelable || PopError) = null;
+    var get_result: ?(Io.Cancelable || PopError) = null;
 
     const TestFn = struct {
         fn closer(q: *Queue) void {
-            zio.sleep(.fromMilliseconds(10)) catch return;
+            std.testing.io.sleep(.fromMilliseconds(10), .awake) catch return;
             q.close();
         }
 
-        fn getter(q: *Queue, result: *?(zio.Cancelable || PopError)) void {
-            _ = q.getSlice(std.math.maxInt(u64)) catch |err| {
+        fn getter(q: *Queue, result: *?(Io.Cancelable || PopError)) void {
+            _ = q.getSlice(.max) catch |err| {
                 result.* = err;
                 return;
             };
         }
     };
 
-    var group: zio.Group = .init;
-    defer group.cancel();
+    var group: Io.Group = .init;
+    defer group.cancel(std.testing.io);
 
-    try group.spawn(TestFn.closer, .{&queue});
-    try group.spawn(TestFn.getter, .{ &queue, &get_result });
+    try group.concurrent(std.testing.io, TestFn.closer, .{&queue});
+    try group.concurrent(std.testing.io, TestFn.getter, .{ &queue, &get_result });
 
-    try group.wait();
+    try group.await(std.testing.io);
 
-    try std.testing.expectEqual(error.QueueClosed, get_result.?);
+    try std.testing.expectEqual(error.Closed, get_result.?);
 }
 
 test "buffer close functionality" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     // Append some data before closing
@@ -1177,7 +1103,7 @@ test "buffer close functionality" {
     buffer.close();
 
     // Should not be able to append after closing
-    try std.testing.expectError(PushError.QueueClosed, buffer.append(" World"));
+    try std.testing.expectError(PushError.Closed, buffer.append(" World"));
 
     // Should still be able to read existing data
     var view_opt = buffer.tryGetSlice();
@@ -1193,14 +1119,11 @@ test "buffer close functionality" {
 test "buffer moveToBuffer functionality" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(32);
-    var source = Buffer.init(allocator, .{});
+    var source = Buffer.init(allocator, std.testing.io, .{});
     defer source.deinit();
 
-    var dest = Buffer.init(allocator, .{});
+    var dest = Buffer.init(allocator, std.testing.io, .{});
     defer dest.deinit();
 
     // Add data to source buffer
@@ -1230,15 +1153,12 @@ test "buffer moveToBuffer functionality" {
 test "buffer moveToBuffer with multiple chunks" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     // Use small chunk size to force multiple chunks
     const Buffer = ConcurrentWriteBuffer(8);
-    var source = Buffer.init(allocator, .{});
+    var source = Buffer.init(allocator, std.testing.io, .{});
     defer source.deinit();
 
-    var dest = Buffer.init(allocator, .{});
+    var dest = Buffer.init(allocator, std.testing.io, .{});
     defer dest.deinit();
 
     // Add data that spans multiple chunks
@@ -1259,7 +1179,7 @@ test "buffer moveToBuffer with multiple chunks" {
     try std.testing.expectEqual(total_bytes, dest.getBytesAvailable());
 
     // Read and verify the moved data by consuming all chunks
-    var result = std.ArrayList(u8){};
+    var result = std.ArrayList(u8).empty;
     defer result.deinit(allocator);
 
     while (dest.getBytesAvailable() > 0) {
@@ -1278,14 +1198,11 @@ test "buffer moveToBuffer with multiple chunks" {
 test "buffer moveToBuffer empty source" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var source = Buffer.init(allocator, .{});
+    var source = Buffer.init(allocator, std.testing.io, .{});
     defer source.deinit();
 
-    var dest = Buffer.init(allocator, .{});
+    var dest = Buffer.init(allocator, std.testing.io, .{});
     defer dest.deinit();
 
     // Add some data to destination first
@@ -1307,11 +1224,8 @@ test "buffer moveToBuffer empty source" {
 test "buffer max_size limit" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{ .max_size = 10 });
+    var buffer = Buffer.init(allocator, std.testing.io, .{ .max_size = 10 });
     defer buffer.deinit();
 
     // Should be able to add up to max_size
@@ -1333,203 +1247,31 @@ test "buffer max_size limit" {
     }
 }
 
-test "freeze/unfreeze basic functionality" {
+test "queue close wakes readers" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, .{});
+    var queue = Queue.init(allocator, std.testing.io, .{});
     defer queue.deinit();
 
-    // Add some data
-    try queue.push(42);
-    try std.testing.expectEqual(@as(usize, 1), queue.getItemsAvailable());
-
-    // Freeze buffer
-    queue.freeze();
-    try std.testing.expect(queue.isFrozen());
-
-    // Non-blocking read should return BufferFrozen
-    try std.testing.expectError(PopError.BufferFrozen, queue.pop(0));
-    try std.testing.expectError(PopError.BufferFrozen, queue.getSlice(0));
-
-    // Data should still be available after failed reads
-    try std.testing.expectEqual(@as(usize, 1), queue.getItemsAvailable());
-
-    // Unfreeze buffer
-    queue.unfreeze();
-    try std.testing.expect(!queue.isFrozen());
-
-    // Should be able to read now
-    try std.testing.expectEqual(@as(i32, 42), try queue.pop(1000));
-    try std.testing.expectEqual(@as(usize, 0), queue.getItemsAvailable());
-}
-
-test "writers cannot push while buffer is frozen" {
-    const allocator = std.testing.allocator;
-
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, .{});
-    defer queue.deinit();
-
-    // Freeze buffer
-    queue.freeze();
-
-    // Writers should be blocked
-    try std.testing.expectError(PushError.BufferFrozen, queue.push(1));
-    try std.testing.expectError(PushError.BufferFrozen, queue.pushSlice(&[_]i32{ 2, 3 }));
-    try std.testing.expectEqual(@as(usize, 0), queue.getItemsAvailable());
-
-    // Readers should be blocked
-    try std.testing.expectError(PopError.BufferFrozen, queue.pop(0));
-
-    // Unfreeze and add data
-    queue.unfreeze();
-    try queue.push(1);
-    try queue.push(2);
-    try std.testing.expectEqual(@as(i32, 1), try queue.pop(1000));
-    try std.testing.expectEqual(@as(i32, 2), try queue.pop(1000));
-}
-
-test "blocking operations during freeze" {
-    const allocator = std.testing.allocator;
-
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, .{});
-    defer queue.deinit();
-
-    queue.freeze();
-
-    var pop_result: ?i32 = null;
-
-    const TestFn = struct {
-        fn resumer(q: *Queue) void {
-            zio.sleep(.fromMilliseconds(10)) catch return;
-            q.unfreeze();
-            q.push(99) catch return;
-        }
-
-        fn popper(q: *Queue, result: *?i32) void {
-            result.* = q.pop(1000) catch return;
-        }
-    };
-
-    var group: zio.Group = .init;
-    defer group.cancel();
-
-    try group.spawn(TestFn.resumer, .{&queue});
-    try group.spawn(TestFn.popper, .{ &queue, &pop_result });
-
-    try group.wait();
-
-    try std.testing.expectEqual(@as(i32, 99), pop_result.?);
-}
-
-test "timeout while frozen returns BufferFrozen" {
-    const allocator = std.testing.allocator;
-
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, .{});
-    defer queue.deinit();
-
-    // Add data then freeze buffer
-    try queue.push(42);
-    queue.freeze();
-
-    // Should timeout and return BufferFrozen
-    try std.testing.expectError(PopError.BufferFrozen, queue.pop(10));
-    try std.testing.expectError(PopError.BufferFrozen, queue.getSlice(10));
-
-    // Data should still be there
-    try std.testing.expectEqual(@as(usize, 1), queue.getItemsAvailable());
-}
-
-test "freeze/unfreeze interaction with close" {
-    const allocator = std.testing.allocator;
-
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    const Queue = ConcurrentQueue(i32, 4);
-    var queue = Queue.init(allocator, .{});
-    defer queue.deinit();
-
-    // Freeze then close
-    queue.freeze();
     queue.close();
 
-    // Should return QueueClosed instead of BufferFrozen
-    try std.testing.expectError(PopError.QueueClosed, queue.pop(0));
-
-    // Can't push when closed
-    try std.testing.expectError(PushError.QueueClosed, queue.push(42));
-}
-
-test "ConcurrentWriteBuffer freeze/unfreeze functionality" {
-    const allocator = std.testing.allocator;
-
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
-    defer buffer.deinit();
-
-    // Add some data
-    try buffer.append("Hello, World!");
-
-    // Freeze buffer
-    buffer.freeze();
-    try std.testing.expect(buffer.isFrozen());
-
-    // Non-blocking read should return BufferFrozen
-    try std.testing.expect(buffer.tryGetSlice() == null);
-    try std.testing.expectError(PopError.BufferFrozen, buffer.getSlice(0));
-
-    // Writers should be blocked
-    try std.testing.expectError(PushError.BufferFrozen, buffer.append(" More data"));
-
-    // Unfreeze buffer
-    buffer.unfreeze();
-    try std.testing.expect(!buffer.isFrozen());
-
-    // Now writers work
-    try buffer.append(" More data");
-
-    // Should be able to read now
-    var view_opt = buffer.tryGetSlice();
-    if (view_opt) |*view| {
-        try std.testing.expectEqualStrings("Hello, World! More data", view.data);
-        view.consume(view.data.len);
-    }
+    try std.testing.expectError(PopError.Closed, queue.pop(.zero));
+    try std.testing.expectError(PushError.Closed, queue.push(42));
 }
 
 test "ConcurrentWriteBuffer waitForData smoke test" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     // Test waitForData with immediate data available
     try buffer.append("Hello");
 
     // Should return immediately since data is available
-    try buffer.waitForData(1000);
+    try buffer.waitForData(.fromMilliseconds(1000));
 
     // Verify data is still there
     try std.testing.expect(buffer.hasData());
@@ -1539,35 +1281,29 @@ test "ConcurrentWriteBuffer waitForData smoke test" {
 test "ConcurrentWriteBuffer waitForData with closed buffer" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     // Close the buffer
     buffer.close();
 
-    // waitForData should return QueueClosed error
-    try std.testing.expectError(error.QueueClosed, buffer.waitForData(1000));
+    // waitForData should return Closed error
+    try std.testing.expectError(error.Closed, buffer.waitForData(.fromMilliseconds(1000)));
 }
 
 test "ConcurrentWriteBuffer waitForMoreData smoke test" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     // Add initial data
     try buffer.append("Hello");
 
     // Wait for more data with short timeout (should timeout)
-    try buffer.waitForMoreData(1 * std.time.ns_per_ms);
+    try buffer.waitForMoreData(.fromMilliseconds(1));
 
     // Should still work normally
     try std.testing.expect(buffer.hasData());
@@ -1577,72 +1313,28 @@ test "ConcurrentWriteBuffer waitForMoreData smoke test" {
 test "ConcurrentWriteBuffer waitForMoreData with closed buffer" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     // Close the buffer
     buffer.close();
 
-    // waitForMoreData should return QueueClosed error
-    try std.testing.expectError(error.QueueClosed, buffer.waitForMoreData(1 * std.time.ns_per_ms));
-}
-
-test "gatherReadSlices respects freeze state" {
-    const allocator = std.testing.allocator;
-
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
-    defer buffer.deinit();
-
-    // Add data to buffer
-    try buffer.append("Hello, World!");
-
-    // Normal operation should gather vectors
-    var slices: [4][]const u8 = undefined;
-    const gather = try buffer.gatherReadSlices(&slices, 0);
-    try std.testing.expect(gather.slices.len > 0);
-    try std.testing.expect(gather.total_bytes > 0);
-
-    // Freeze buffer
-    buffer.freeze();
-
-    // gatherReadSlices should return BufferFrozen when frozen (non-blocking)
-    try std.testing.expectError(PopError.BufferFrozen, buffer.gatherReadSlices(&slices, 0));
-
-    // Should timeout and return BufferFrozen (blocking with timeout)
-    try std.testing.expectError(PopError.BufferFrozen, buffer.gatherReadSlices(&slices, 10));
-
-    // Unfreeze and gather successfully
-    buffer.unfreeze();
-    const unfrozen_gather = try buffer.gatherReadSlices(&slices, 1000);
-    try std.testing.expect(unfrozen_gather.slices.len > 0);
-    try std.testing.expect(unfrozen_gather.total_bytes > 0);
-
-    // Should be able to consume gathered data
-    try unfrozen_gather.consume(5); // Consume "Hello"
+    // waitForMoreData should return Closed error
+    try std.testing.expectError(error.Closed, buffer.waitForMoreData(.fromMilliseconds(1)));
 }
 
 test "VectorGather thread safety validation" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     try buffer.append("Hello, World!");
 
     var slices: [4][]const u8 = undefined;
-    const gather = try buffer.gatherReadSlices(&slices, 0);
+    const gather = try buffer.gatherReadSlices(&slices, .zero);
     try std.testing.expect(gather.slices.len > 0);
 
     // Should be able to consume gathered data normally
@@ -1658,30 +1350,17 @@ test "VectorGather thread safety validation" {
 test "VectorGather blocking behavior" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
-    // Should return QueueEmpty immediately when no data (non-blocking)
+    // Should return WouldBlock immediately when no data (non-blocking)
     var slices: [4][]const u8 = undefined;
-    try std.testing.expectError(PopError.QueueEmpty, buffer.gatherReadSlices(&slices, 0));
+    try std.testing.expectError(PopError.WouldBlock, buffer.gatherReadSlices(&slices, .zero));
 
-    // Add data and freeze
+    // Add data and gather successfully
     try buffer.append("Hello, World!");
-    buffer.freeze();
-
-    // Should return BufferFrozen immediately (non-blocking)
-    try std.testing.expectError(PopError.BufferFrozen, buffer.gatherReadSlices(&slices, 0));
-
-    // Should timeout and return BufferFrozen (blocking with timeout)
-    try std.testing.expectError(PopError.BufferFrozen, buffer.gatherReadSlices(&slices, 10));
-
-    // Unfreeze and gather successfully
-    buffer.unfreeze();
-    const gather = try buffer.gatherReadSlices(&slices, 1000);
+    const gather = try buffer.gatherReadSlices(&slices, .fromMilliseconds(1000));
     try std.testing.expect(gather.slices.len > 0);
     try std.testing.expect(gather.total_bytes > 0);
 
@@ -1689,74 +1368,17 @@ test "VectorGather blocking behavior" {
     try gather.consume(gather.total_bytes);
 }
 
-test "moveToBuffer respects freeze state on source" {
-    const allocator = std.testing.allocator;
-
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    const Buffer = ConcurrentWriteBuffer(64);
-    var source = Buffer.init(allocator, .{});
-    defer source.deinit();
-
-    var dest = Buffer.init(allocator, .{});
-    defer dest.deinit();
-
-    // Add data to source
-    try source.append("Hello");
-
-    // Freeze source
-    source.freeze();
-
-    // Moving from frozen source should return BufferFrozen
-    try std.testing.expectError(PushError.BufferFrozen, source.moveToBuffer(&dest));
-
-    // Data should still be in source
-    try std.testing.expectEqual(@as(usize, 5), source.getBytesAvailable());
-    try std.testing.expectEqual(@as(usize, 0), dest.getBytesAvailable());
-}
-
-test "moveToBuffer respects freeze state on destination" {
-    const allocator = std.testing.allocator;
-
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    const Buffer = ConcurrentWriteBuffer(64);
-    var source = Buffer.init(allocator, .{});
-    defer source.deinit();
-
-    var dest = Buffer.init(allocator, .{});
-    defer dest.deinit();
-
-    // Add data to source
-    try source.append("Hello");
-
-    // Freeze destination
-    dest.freeze();
-
-    // Moving to frozen destination should return BufferFrozen
-    try std.testing.expectError(PushError.BufferFrozen, source.moveToBuffer(&dest));
-
-    // Data should still be in source
-    try std.testing.expectEqual(@as(usize, 5), source.getBytesAvailable());
-    try std.testing.expectEqual(@as(usize, 0), dest.getBytesAvailable());
-}
-
 test "VectorGather detects buffer reset between gather and consume" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     try buffer.append("Hello, World!");
 
     var slices: [4][]const u8 = undefined;
-    const gather = try buffer.gatherReadSlices(&slices, 0);
+    const gather = try buffer.gatherReadSlices(&slices, .zero);
     try std.testing.expect(gather.slices.len > 0);
 
     // Reset the buffer which should increment reset_id
@@ -1769,22 +1391,19 @@ test "VectorGather detects buffer reset between gather and consume" {
 test "VectorGather detects concurrent consumer advancing buffer" {
     const allocator = std.testing.allocator;
 
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     const Buffer = ConcurrentWriteBuffer(64);
-    var buffer = Buffer.init(allocator, .{});
+    var buffer = Buffer.init(allocator, std.testing.io, .{});
     defer buffer.deinit();
 
     try buffer.append("Hello, World!");
 
     var slices: [4][]const u8 = undefined;
-    const gather = try buffer.gatherReadSlices(&slices, 0);
+    const gather = try buffer.gatherReadSlices(&slices, .zero);
     try std.testing.expect(gather.slices.len > 0);
     try std.testing.expect(gather.total_bytes > 0);
 
     // Simulate another consumer advancing the read position
-    var view = try buffer.getSlice(0);
+    var view = try buffer.getSlice(.zero);
     view.consume(2); // Advance read_pos by 2 bytes
 
     // Now trying to consume with the original gather should fail with ConcurrentConsumer

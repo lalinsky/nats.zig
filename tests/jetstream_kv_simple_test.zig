@@ -1,14 +1,12 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "KV simple put and get" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

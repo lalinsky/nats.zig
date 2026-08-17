@@ -14,14 +14,12 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "KV history retrieval" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -64,10 +62,9 @@ test "KV history retrieval" {
 }
 
 test "KV keys listing" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -113,10 +110,9 @@ test "KV keys listing" {
 }
 
 test "KV keys with filters" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -161,10 +157,9 @@ test "KV keys with filters" {
 }
 
 test "KV watch basic functionality" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -190,7 +185,7 @@ test "KV watch basic functionality" {
     defer watcher.deinit();
 
     // Should get initial value (with timeout)
-    const maybe_entry = try watcher.next(1000);
+    const maybe_entry = try watcher.next(.fromSeconds(1));
     try testing.expect(maybe_entry != null); // Should not be the completion marker
     var entry = maybe_entry.?;
     defer entry.deinit();
@@ -200,10 +195,10 @@ test "KV watch basic functionality" {
     try testing.expect(entry.operation == .PUT);
 
     // Should get completion marker (null) indicating initial data is done
-    const completion_marker = try watcher.next(1000);
+    const completion_marker = try watcher.next(.fromSeconds(1));
     try testing.expect(completion_marker == null);
 
     // After completion marker, should timeout on further attempts
-    const result = watcher.next(1000);
-    try testing.expect(result == error.Timeout or result == error.QueueEmpty);
+    const result = watcher.next(.fromSeconds(1));
+    try testing.expect(result == error.Timeout);
 }

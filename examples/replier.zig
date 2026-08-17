@@ -1,20 +1,11 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
+pub fn main(init: std.process.Init) !void {
     std.debug.print("Listening for requests on subject 'help'\n", .{});
 
-    // Initialize zio runtime
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
     // Creates a connection to the default NATS URL
-    var conn = nats.Connection.init(allocator, .{});
+    var conn = nats.Connection.init(init.gpa, init.io, .{});
     defer conn.deinit();
 
     conn.connect("nats://localhost:4222") catch |err| {
@@ -37,7 +28,7 @@ pub fn main() !void {
     // Wait for messages in a loop
     while (true) {
         // Wait for the next message (blocks until one arrives)
-        var msg = sub.nextMsg(1000) catch continue; // continue on timeout
+        var msg = sub.nextMsg(.fromSeconds(1)) catch continue; // continue on timeout
         defer msg.deinit();
 
         std.debug.print("Received msg: {s} - {s}\n", .{ msg.subject, msg.data });

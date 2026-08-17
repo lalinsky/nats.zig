@@ -1,6 +1,5 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 const log = std.log.default;
@@ -32,20 +31,19 @@ fn noResponseHandler(msg: *nats.Message, connection: *nats.Connection) void {
 }
 
 test "basic request reply" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     const replier_sub = try conn.subscribe("test.echo", echoHandler, .{conn});
     defer replier_sub.deinit();
 
     // Give the subscription time to register
-    try rt.sleep(.fromMilliseconds(10));
+    try io.sleep(.fromMilliseconds(10), .awake);
 
     // Send a request
-    var msg = try conn.request("test.echo", "hello world", 1000);
+    var msg = try conn.request("test.echo", "hello world", .fromSeconds(1));
     defer msg.deinit();
 
     // Verify the echo response
@@ -53,10 +51,9 @@ test "basic request reply" {
 }
 
 test "simple request reply functionality" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create a replier that echoes back the request
@@ -64,27 +61,26 @@ test "simple request reply functionality" {
     defer replier_sub.deinit();
 
     // Give the subscription time to register
-    try rt.sleep(.fromMilliseconds(10));
+    try io.sleep(.fromMilliseconds(10), .awake);
 
     // Send a request
-    var msg = try conn.request("test.simple.echo", "hello world", 1000);
+    var msg = try conn.request("test.simple.echo", "hello world", .fromSeconds(1));
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("hello world", msg.data);
 }
 
 test "concurrent request reply" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create echo handler
     const replier_sub = try conn.subscribe("test.concurrent", echoHandler, .{conn});
     defer replier_sub.deinit();
 
-    try rt.sleep(.fromMilliseconds(10));
+    try io.sleep(.fromMilliseconds(10), .awake);
 
     // Send multiple requests concurrently
     var requests: [5]*nats.Message = undefined;
@@ -92,7 +88,7 @@ test "concurrent request reply" {
         const data = try std.fmt.allocPrint(std.testing.allocator, "request-{d}", .{i});
         defer std.testing.allocator.free(data);
 
-        request.* = try conn.request("test.concurrent", data, 1000);
+        request.* = try conn.request("test.concurrent", data, .fromSeconds(1));
     }
 
     // Verify all responses
@@ -107,44 +103,41 @@ test "concurrent request reply" {
 }
 
 test "request with no responders" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Send a request to a subject with no responder - should return NoResponders error
-    const response = conn.request("test.no.responder", "no responder test", 1000);
+    const response = conn.request("test.no.responder", "no responder test", .fromSeconds(1));
 
     // Should get NoResponders error
     try std.testing.expectError(error.NoResponders, response);
 }
 
 test "request timeout with no responder" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Set up a handler that never responds
     const slow_sub = try conn.subscribe("test.slow", noResponseHandler, .{conn});
     defer slow_sub.deinit();
 
-    try rt.sleep(.fromMilliseconds(10));
+    try io.sleep(.fromMilliseconds(10), .awake);
 
     // Send request with 100ms timeout - will timeout since handler never responds
-    const response = conn.request("test.slow", "timeout test", 100);
+    const response = conn.request("test.slow", "timeout test", .fromMilliseconds(100));
 
     // Should return timeout error
     try std.testing.expectError(error.Timeout, response);
 }
 
 test "request with different subjects" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Set up multiple echo handlers on different subjects
@@ -154,30 +147,29 @@ test "request with different subjects" {
     const replier2 = try conn.subscribe("test.subject2", echoHandler, .{conn});
     defer replier2.deinit();
 
-    try rt.sleep(.fromMilliseconds(10));
+    try io.sleep(.fromMilliseconds(10), .awake);
 
     // Test requests to different subjects
-    const response1 = try conn.request("test.subject1", "message1", 1000);
+    const response1 = try conn.request("test.subject1", "message1", .fromSeconds(1));
     defer response1.deinit();
     try std.testing.expectEqualStrings("echo: message1", response1.data);
 
-    const response2 = try conn.request("test.subject2", "message2", 1000);
+    const response2 = try conn.request("test.subject2", "message2", .fromSeconds(1));
     defer response2.deinit();
     try std.testing.expectEqualStrings("echo: message2", response2.data);
 }
 
 test "requestMsg basic functionality" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create echo handler
     const replier_sub = try conn.subscribe("test.requestmsg", simpleEchoHandler, .{conn});
     defer replier_sub.deinit();
 
-    try rt.sleep(.fromMilliseconds(10));
+    try io.sleep(.fromMilliseconds(10), .awake);
 
     var request_msg = try conn.newMsg();
     defer request_msg.deinit();
@@ -186,7 +178,7 @@ test "requestMsg basic functionality" {
     try request_msg.setPayload("requestMsg test data", true);
 
     // Send request using requestMsg
-    const response = try conn.requestMsg(request_msg, 1000);
+    const response = try conn.requestMsg(request_msg, .fromSeconds(1));
     defer response.deinit();
 
     // Verify response
@@ -194,17 +186,16 @@ test "requestMsg basic functionality" {
 }
 
 test "requestMsg with headers" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Create handler that echoes back with headers
     const replier_sub = try conn.subscribe("test.requestmsg.headers", echoHandler, .{conn});
     defer replier_sub.deinit();
 
-    try rt.sleep(.fromMilliseconds(10));
+    try io.sleep(.fromMilliseconds(10), .awake);
 
     var request_msg = try conn.newMsg();
     defer request_msg.deinit();
@@ -217,7 +208,7 @@ test "requestMsg with headers" {
     try request_msg.headerSet("X-Request-ID", "12345");
 
     // Send request using requestMsg
-    const response = try conn.requestMsg(request_msg, 1000);
+    const response = try conn.requestMsg(request_msg, .fromSeconds(1));
     defer response.deinit();
 
     // Verify response
@@ -225,10 +216,9 @@ test "requestMsg with headers" {
 }
 
 test "requestMsg validation errors" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var request_msg = try conn.newMsg();
@@ -238,7 +228,7 @@ test "requestMsg validation errors" {
     try request_msg.setSubject("", false);
     try request_msg.setPayload("test data", true);
 
-    const result = conn.requestMsg(request_msg, 1000);
+    const result = conn.requestMsg(request_msg, .fromSeconds(1));
     try std.testing.expectError(error.InvalidSubject, result);
 }
 
@@ -256,10 +246,9 @@ fn multiResponder(msg: *nats.Message, connection: *nats.Connection) void {
 }
 
 test "requestMany with max_messages" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Set up handler that sends multiple responses
@@ -267,7 +256,7 @@ test "requestMany with max_messages" {
     defer replier_sub.deinit();
 
     // Request with max 2 messages
-    var messages = try conn.requestMany("test.many", "get many", 1000, .{ .max_messages = 2 });
+    var messages = try conn.requestMany("test.many", "get many", .fromSeconds(1), .{ .max_messages = 2 });
     defer {
         // Clean up messages
         while (messages.pop()) |msg| {
@@ -280,10 +269,9 @@ test "requestMany with max_messages" {
 }
 
 test "requestMany with timeout collecting all" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Set up handler that sends multiple responses
@@ -291,7 +279,7 @@ test "requestMany with timeout collecting all" {
     defer replier_sub.deinit();
 
     // Request with no max, should collect all 3 and timeout
-    var messages = try conn.requestMany("test.many.all", "get all", 100, .{});
+    var messages = try conn.requestMany("test.many.all", "get all", .fromMilliseconds(100), .{});
 
     // Should get all 3 messages
     try std.testing.expectEqual(3, messages.len);
@@ -320,17 +308,16 @@ fn sentinelResponder(msg: *nats.Message, connection: *nats.Connection) void {
 }
 
 test "requestMany with sentinel function" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Set up handler that sends responses with sentinel
     const replier_sub = try conn.subscribe("test.sentinel", sentinelResponder, .{conn});
     defer replier_sub.deinit();
 
-    try rt.sleep(.fromMilliseconds(10));
+    try io.sleep(.fromMilliseconds(10), .awake);
 
     // Sentinel function that stops when it sees "END" message (ADR-47: false = stop)
     const sentinel = struct {
@@ -340,7 +327,7 @@ test "requestMany with sentinel function" {
     }.check;
 
     // Request with sentinel function
-    var messages = try conn.requestMany("test.sentinel", "get until end", 1000, .{ .sentinelFn = sentinel });
+    var messages = try conn.requestMany("test.sentinel", "get until end", .fromSeconds(1), .{ .sentinelFn = &sentinel });
 
     // Should get all 4 messages including the sentinel
     try std.testing.expectEqual(@as(usize, 4), messages.len);
@@ -356,32 +343,30 @@ test "requestMany with sentinel function" {
 }
 
 test "requestMany with no responders" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
-    const result = conn.requestMany("test.no.responder.many", "no one", 100, .{});
+    const result = conn.requestMany("test.no.responder.many", "no one", .fromMilliseconds(100), .{});
     try std.testing.expectError(error.NoResponders, result);
 }
 
 test "requestMany with stall timeout" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     // Set up sync subscription to handle the request manually
     const replier_sub = try conn.subscribeSync("test.stall");
     defer replier_sub.deinit();
 
-    // Fiber that will send delayed responses
-    const ResponderFiber = struct {
-        fn run(runtime: *zio.Runtime, connection: *nats.Connection, sub: *nats.Subscription) void {
+    // Task that will send delayed responses
+    const Responder = struct {
+        fn run(task_io: std.Io, connection: *nats.Connection, sub: *nats.Subscription) void {
             // Wait for the request message
-            const request_msg = sub.nextMsg(1000) catch return;
+            const request_msg = sub.nextMsg(.fromSeconds(1)) catch return;
             defer request_msg.deinit();
 
             const reply_subject = request_msg.reply orelse return;
@@ -390,23 +375,23 @@ test "requestMany with stall timeout" {
             connection.publish(reply_subject, "response-1") catch return;
 
             // Send second response after 10ms (within stall timeout)
-            runtime.sleep(.fromMilliseconds(10)) catch return;
+            task_io.sleep(.fromMilliseconds(10), .awake) catch return;
             connection.publish(reply_subject, "response-2") catch return;
 
             // Wait 150ms (longer than 100ms stall timeout) then try to send third response
-            runtime.sleep(.fromMilliseconds(150)) catch return;
+            task_io.sleep(.fromMilliseconds(150), .awake) catch return;
             connection.publish(reply_subject, "response-3") catch return;
         }
     };
 
-    // Start responder fiber
-    var responder_task = try rt.spawn(ResponderFiber.run, .{ rt, conn, replier_sub });
-    defer responder_task.cancel();
+    // Start responder task
+    var responder_task = try io.concurrent(Responder.run, .{ io, conn, replier_sub });
+    defer responder_task.cancel(io);
 
-    try rt.sleep(.fromMilliseconds(10)); // 10ms to ensure subscription is ready
+    try io.sleep(.fromMilliseconds(10), .awake); // 10ms to ensure subscription is ready
 
     // Request with 100ms stall timeout - should get only first 2 responses
-    var messages = try conn.requestMany("test.stall", "get with stall", 1000, .{ .stall_ms = 100 });
+    var messages = try conn.requestMany("test.stall", "get with stall", .fromSeconds(1), .{ .stall = std.Io.Duration.fromMilliseconds(100) });
     defer {
         while (messages.pop()) |response| {
             response.deinit();

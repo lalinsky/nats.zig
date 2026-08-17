@@ -1,14 +1,12 @@
 const std = @import("std");
 const testing = std.testing;
 const nats = @import("nats");
-const zio = @import("zio");
 const utils = @import("utils.zig");
 
 test "get message by sequence" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -28,10 +26,9 @@ test "get message by sequence" {
     defer stream_info.deinit();
 
     // Publish test messages
-    try conn.publish(subject, "First message");
-    try conn.publish(subject, "Second message");
-    try conn.publish(subject, "Third message");
-    try conn.flush();
+    try utils.jsPublish(&js, subject, "First message");
+    try utils.jsPublish(&js, subject, "Second message");
+    try utils.jsPublish(&js, subject, "Third message");
 
     // Get message by sequence
     const msg = try js.getMsg(stream_name, .{ .seq = 1 });
@@ -50,10 +47,9 @@ test "get message by sequence" {
 }
 
 test "get last message by subject" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -83,12 +79,11 @@ test "get last message by subject" {
     defer stream_info.deinit();
 
     // Publish messages to different subjects
-    try conn.publish(foo_subject, "First foo");
-    try conn.publish(bar_subject, "First bar");
-    try conn.publish(foo_subject, "Second foo");
-    try conn.publish(bar_subject, "Second bar");
-    try conn.publish(foo_subject, "Third foo - last");
-    try conn.flush();
+    try utils.jsPublish(&js, foo_subject, "First foo");
+    try utils.jsPublish(&js, bar_subject, "First bar");
+    try utils.jsPublish(&js, foo_subject, "Second foo");
+    try utils.jsPublish(&js, bar_subject, "Second bar");
+    try utils.jsPublish(&js, foo_subject, "Third foo - last");
 
     // Get last message for foo subject
     const last_foo = try js.getMsg(stream_name, .{ .last_by_subj = foo_subject });
@@ -108,10 +103,9 @@ test "get last message by subject" {
 }
 
 test "get next message by subject" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -141,13 +135,12 @@ test "get next message by subject" {
     defer stream_info.deinit();
 
     // Publish interleaved messages
-    try conn.publish(other_subject, "other 1"); // seq 1
-    try conn.publish(target_subject, "target 1"); // seq 2
-    try conn.publish(other_subject, "other 2"); // seq 3
-    try conn.publish(target_subject, "target 2"); // seq 4
-    try conn.publish(other_subject, "other 3"); // seq 5
-    try conn.publish(target_subject, "target 3"); // seq 6
-    try conn.flush();
+    try utils.jsPublish(&js, other_subject, "other 1"); // seq 1
+    try utils.jsPublish(&js, target_subject, "target 1"); // seq 2
+    try utils.jsPublish(&js, other_subject, "other 2"); // seq 3
+    try utils.jsPublish(&js, target_subject, "target 2"); // seq 4
+    try utils.jsPublish(&js, other_subject, "other 3"); // seq 5
+    try utils.jsPublish(&js, target_subject, "target 3"); // seq 6
 
     // Get first target message at or after sequence 1
     const next_target_1 = try js.getMsg(stream_name, .{ .seq = 1, .next_by_subj = target_subject });
@@ -175,10 +168,9 @@ test "get next message by subject" {
 }
 
 test "get message with headers" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -229,10 +221,9 @@ test "get message with headers" {
 }
 
 test "message operations error cases" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -256,8 +247,7 @@ test "message operations error cases" {
     defer stream_info.deinit();
 
     // Publish one message
-    try conn.publish(subject, "Test message");
-    try conn.flush();
+    try utils.jsPublish(&js, subject, "Test message");
 
     // Test getting non-existent message by sequence
     const get_nonexistent_msg = js.getMsg(stream_name, .{ .seq = 999 });
@@ -269,10 +259,9 @@ test "message operations error cases" {
 }
 
 test "invalid option combinations" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});
@@ -303,10 +292,9 @@ test "invalid option combinations" {
 }
 
 test "getMsgs stub returns not implemented" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    const conn = try utils.createDefaultConnection();
+    const conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     var js = conn.jetstream(.{});

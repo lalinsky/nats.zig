@@ -1,14 +1,13 @@
 const std = @import("std");
 const nats = @import("nats");
-const zio = @import("zio");
+const xsync = @import("xsync");
 const utils = @import("utils.zig");
 const Message = nats.Message;
 
 test "autounsubscribe sync basic functionality" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("auto.test");
@@ -29,7 +28,7 @@ test "autounsubscribe sync basic functionality" {
     // Should receive exactly 3 messages
     var received_count: u32 = 0;
     for (0..3) |_| {
-        const msg = try sub.nextMsg(1000);
+        const msg = try sub.nextMsg(.fromSeconds(1));
         defer msg.deinit();
         received_count += 1;
     }
@@ -37,17 +36,16 @@ test "autounsubscribe sync basic functionality" {
     try std.testing.expectEqual(@as(u32, 3), received_count);
 
     // Fourth message should timeout (subscription auto-unsubscribed)
-    try std.testing.expectError(error.Timeout, sub.nextMsg(100));
+    try std.testing.expectError(error.Timeout, sub.nextMsg(.fromMilliseconds(100)));
 }
 
 test "autounsubscribe async basic functionality" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
-    var messages_received = std.ArrayList(*Message){};
+    var messages_received = std.ArrayList(*Message).empty;
     defer {
         for (messages_received.items) |msg| {
             msg.deinit();
@@ -58,11 +56,11 @@ test "autounsubscribe async basic functionality" {
     const TestContext = struct {
         messages: *std.ArrayList(*Message),
         allocator: std.mem.Allocator,
-        mutex: zio.Mutex = .{},
+        mutex: xsync.Mutex = .init,
 
         pub fn handleMessage(msg: *Message, self: *@This()) !void {
-            try self.mutex.lock();
-            defer self.mutex.unlock();
+            try self.mutex.lock(std.testing.io);
+            defer self.mutex.unlock(std.testing.io);
             try self.messages.append(self.allocator, msg);
         }
     };
@@ -85,24 +83,23 @@ test "autounsubscribe async basic functionality" {
     try conn.flush();
 
     // Wait for message processing with bounded wait loop
-    const deadline_ms = std.time.milliTimestamp() + 1000;
+    const wait_start = std.Io.Timestamp.now(io, .awake);
     var count: usize = 0;
-    while (std.time.milliTimestamp() < deadline_ms) {
-        try ctx.mutex.lock();
+    while (wait_start.untilNow(io, .awake).nanoseconds < std.time.ns_per_s) {
+        try ctx.mutex.lock(std.testing.io);
         count = messages_received.items.len;
-        ctx.mutex.unlock();
+        ctx.mutex.unlock(std.testing.io);
         if (count >= 2) break;
-        try rt.sleep(.fromMilliseconds(10));
+        try io.sleep(.fromMilliseconds(10), .awake);
     }
 
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
 test "autounsubscribe error conditions" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("error.test");
@@ -115,7 +112,7 @@ test "autounsubscribe error conditions" {
     try conn.publish("error.test", "first message");
     try conn.flush();
 
-    const msg = try sub.nextMsg(1000);
+    const msg = try sub.nextMsg(.fromSeconds(1));
     defer msg.deinit();
 
     // Now try to set autounsubscribe to 1 (should fail since we already received 1)
@@ -123,10 +120,9 @@ test "autounsubscribe error conditions" {
 }
 
 test "autounsubscribe delivered message counter" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
-    var conn = try utils.createDefaultConnection();
+    var conn = try utils.createDefaultConnection(io);
     defer utils.closeConnection(conn);
 
     const sub = try conn.subscribeSync("counter.test");
@@ -142,50 +138,49 @@ test "autounsubscribe delivered message counter" {
     try conn.publish("counter.test", "message 1");
     try conn.flush();
 
-    const msg1 = try sub.nextMsg(1000);
+    const msg1 = try sub.nextMsg(.fromSeconds(1));
     defer msg1.deinit();
     try std.testing.expectEqual(@as(u64, 1), sub.delivered_msgs.load(.acquire));
 
     try conn.publish("counter.test", "message 2");
     try conn.flush();
 
-    const msg2 = try sub.nextMsg(1000);
+    const msg2 = try sub.nextMsg(.fromSeconds(1));
     defer msg2.deinit();
     try std.testing.expectEqual(@as(u64, 2), sub.delivered_msgs.load(.acquire));
 
     // Third message should timeout due to autounsubscribe
     try conn.publish("counter.test", "message 3");
     try conn.flush();
-    try std.testing.expectError(error.Timeout, sub.nextMsg(100));
+    try std.testing.expectError(error.Timeout, sub.nextMsg(.fromMilliseconds(100)));
 }
 
 const ReconnectTracker = struct {
     var reconnected_called: u32 = 0;
-    var mutex: zio.Mutex = .{};
+    var mutex: xsync.Mutex = .init;
 
     fn reset() void {
-        mutex.lockUncancelable();
-        defer mutex.unlock();
+        mutex.lockUncancelable(std.testing.io);
+        defer mutex.unlock(std.testing.io);
         reconnected_called = 0;
     }
 
     fn reconnectedCallback(_: *nats.Connection) void {
-        mutex.lockUncancelable();
-        defer mutex.unlock();
+        mutex.lockUncancelable(std.testing.io);
+        defer mutex.unlock(std.testing.io);
         reconnected_called += 1;
     }
 };
 
 test "autounsubscribe with reconnection" {
-    const rt = try zio.Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const io = std.testing.io;
 
     ReconnectTracker.reset();
 
-    const conn = try utils.createConnection(.node1, .{
+    const conn = try utils.createConnection(io, .node1, .{
         .reconnect = .{
             .allow_reconnect = true,
-            .reconnect_wait_ms = 100,
+            .reconnect_wait = .fromMilliseconds(100),
         },
         .callbacks = .{
             .reconnected_cb = ReconnectTracker.reconnectedCallback,
@@ -210,7 +205,7 @@ test "autounsubscribe with reconnection" {
 
     // Receive the 3 messages
     for (0..3) |_| {
-        const msg = try sub.nextMsg(1000);
+        const msg = try sub.nextMsg(.fromSeconds(1));
         defer msg.deinit();
     }
 
@@ -221,12 +216,12 @@ test "autounsubscribe with reconnection" {
     try conn.reconnect();
 
     // Wait for reconnection to complete
-    var timer = try std.time.Timer.start();
+    const start = std.Io.Timestamp.now(io, .awake);
     while (ReconnectTracker.reconnected_called == 0) {
-        if (timer.read() >= 5000 * std.time.ns_per_ms) {
+        if (start.untilNow(io, .awake).nanoseconds >= 5 * std.time.ns_per_s) {
             return error.ReconnectionTimeout;
         }
-        try rt.sleep(.fromMilliseconds(10));
+        try io.sleep(.fromMilliseconds(10), .awake);
     }
 
     // Publish more messages after reconnection (should only receive 2 more to reach limit of 5)
@@ -240,7 +235,7 @@ test "autounsubscribe with reconnection" {
     // Should receive exactly 2 more messages (5 total - 3 already received = 2 remaining)
     var received_after_reconnect: u32 = 0;
     for (0..2) |_| {
-        const msg = try sub.nextMsg(1000);
+        const msg = try sub.nextMsg(.fromSeconds(1));
         defer msg.deinit();
         received_after_reconnect += 1;
     }
@@ -249,5 +244,5 @@ test "autounsubscribe with reconnection" {
     try std.testing.expectEqual(@as(u64, 5), sub.delivered_msgs.load(.acquire));
 
     // Next message should timeout (autounsubscribe limit reached)
-    try std.testing.expectError(error.Timeout, sub.nextMsg(500));
+    try std.testing.expectError(error.Timeout, sub.nextMsg(.fromMilliseconds(500)));
 }
