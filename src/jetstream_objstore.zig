@@ -97,7 +97,7 @@ pub const ObjectInfo = struct {
     /// Number of chunks
     chunks: u32,
     /// Last modified time (from message timestamp, not stored in JSON)
-    mtime: u64 = 0,
+    mtime: std.Io.Timestamp = .zero,
     /// SHA-256 digest hex string
     digest: []const u8,
     /// True if object is deleted
@@ -191,8 +191,8 @@ pub const ObjectResult = struct {
             }
 
             // Get next chunk from subscription
-            const timeout_ms = sub.js.nc.options.timeout_ms;
-            const js_msg = try sub.nextMsg(timeout_ms);
+            const request_timeout = sub.js.nc.options.timeout;
+            const js_msg = try sub.nextMsg(request_timeout);
 
             // Store the message pointer and reset position
             self.current_msg = js_msg;
@@ -642,9 +642,9 @@ pub const ObjectStore = struct {
         var objects = try std.ArrayList(ObjectInfo).initCapacity(arena_allocator, 64);
 
         // Collect all objects (including deleted ones, to be filtered later)
-        const timeout_ms = self.js.nc.options.timeout_ms;
+        const request_timeout = self.js.nc.options.timeout;
         while (true) {
-            const js_msg = sub.nextMsg(timeout_ms) catch |err| {
+            const js_msg = sub.nextMsg(request_timeout) catch |err| {
                 if (err == error.Timeout) {
                     break;
                 }

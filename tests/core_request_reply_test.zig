@@ -45,7 +45,7 @@ test "basic request reply" {
     try rt.sleep(.fromMilliseconds(10));
 
     // Send a request
-    var msg = try conn.request("test.echo", "hello world", 1000);
+    var msg = try conn.request("test.echo", "hello world", .fromSeconds(1));
     defer msg.deinit();
 
     // Verify the echo response
@@ -67,7 +67,7 @@ test "simple request reply functionality" {
     try rt.sleep(.fromMilliseconds(10));
 
     // Send a request
-    var msg = try conn.request("test.simple.echo", "hello world", 1000);
+    var msg = try conn.request("test.simple.echo", "hello world", .fromSeconds(1));
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("hello world", msg.data);
@@ -92,7 +92,7 @@ test "concurrent request reply" {
         const data = try std.fmt.allocPrint(std.testing.allocator, "request-{d}", .{i});
         defer std.testing.allocator.free(data);
 
-        request.* = try conn.request("test.concurrent", data, 1000);
+        request.* = try conn.request("test.concurrent", data, .fromSeconds(1));
     }
 
     // Verify all responses
@@ -114,7 +114,7 @@ test "request with no responders" {
     defer utils.closeConnection(conn);
 
     // Send a request to a subject with no responder - should return NoResponders error
-    const response = conn.request("test.no.responder", "no responder test", 1000);
+    const response = conn.request("test.no.responder", "no responder test", .fromSeconds(1));
 
     // Should get NoResponders error
     try std.testing.expectError(error.NoResponders, response);
@@ -134,7 +134,7 @@ test "request timeout with no responder" {
     try rt.sleep(.fromMilliseconds(10));
 
     // Send request with 100ms timeout - will timeout since handler never responds
-    const response = conn.request("test.slow", "timeout test", 100);
+    const response = conn.request("test.slow", "timeout test", .fromMilliseconds(100));
 
     // Should return timeout error
     try std.testing.expectError(error.Timeout, response);
@@ -157,11 +157,11 @@ test "request with different subjects" {
     try rt.sleep(.fromMilliseconds(10));
 
     // Test requests to different subjects
-    const response1 = try conn.request("test.subject1", "message1", 1000);
+    const response1 = try conn.request("test.subject1", "message1", .fromSeconds(1));
     defer response1.deinit();
     try std.testing.expectEqualStrings("echo: message1", response1.data);
 
-    const response2 = try conn.request("test.subject2", "message2", 1000);
+    const response2 = try conn.request("test.subject2", "message2", .fromSeconds(1));
     defer response2.deinit();
     try std.testing.expectEqualStrings("echo: message2", response2.data);
 }
@@ -186,7 +186,7 @@ test "requestMsg basic functionality" {
     try request_msg.setPayload("requestMsg test data", true);
 
     // Send request using requestMsg
-    const response = try conn.requestMsg(request_msg, 1000);
+    const response = try conn.requestMsg(request_msg, .fromSeconds(1));
     defer response.deinit();
 
     // Verify response
@@ -217,7 +217,7 @@ test "requestMsg with headers" {
     try request_msg.headerSet("X-Request-ID", "12345");
 
     // Send request using requestMsg
-    const response = try conn.requestMsg(request_msg, 1000);
+    const response = try conn.requestMsg(request_msg, .fromSeconds(1));
     defer response.deinit();
 
     // Verify response
@@ -238,7 +238,7 @@ test "requestMsg validation errors" {
     try request_msg.setSubject("", false);
     try request_msg.setPayload("test data", true);
 
-    const result = conn.requestMsg(request_msg, 1000);
+    const result = conn.requestMsg(request_msg, .fromSeconds(1));
     try std.testing.expectError(error.InvalidSubject, result);
 }
 
@@ -267,7 +267,7 @@ test "requestMany with max_messages" {
     defer replier_sub.deinit();
 
     // Request with max 2 messages
-    var messages = try conn.requestMany("test.many", "get many", 1000, .{ .max_messages = 2 });
+    var messages = try conn.requestMany("test.many", "get many", .fromSeconds(1), .{ .max_messages = 2 });
     defer {
         // Clean up messages
         while (messages.pop()) |msg| {
@@ -291,7 +291,7 @@ test "requestMany with timeout collecting all" {
     defer replier_sub.deinit();
 
     // Request with no max, should collect all 3 and timeout
-    var messages = try conn.requestMany("test.many.all", "get all", 100, .{});
+    var messages = try conn.requestMany("test.many.all", "get all", .fromMilliseconds(100), .{});
 
     // Should get all 3 messages
     try std.testing.expectEqual(3, messages.len);
@@ -340,7 +340,7 @@ test "requestMany with sentinel function" {
     }.check;
 
     // Request with sentinel function
-    var messages = try conn.requestMany("test.sentinel", "get until end", 1000, .{ .sentinelFn = sentinel });
+    var messages = try conn.requestMany("test.sentinel", "get until end", .fromSeconds(1), .{ .sentinelFn = &sentinel });
 
     // Should get all 4 messages including the sentinel
     try std.testing.expectEqual(@as(usize, 4), messages.len);
@@ -362,7 +362,7 @@ test "requestMany with no responders" {
     const conn = try utils.createDefaultConnection(rt.io());
     defer utils.closeConnection(conn);
 
-    const result = conn.requestMany("test.no.responder.many", "no one", 100, .{});
+    const result = conn.requestMany("test.no.responder.many", "no one", .fromMilliseconds(100), .{});
     try std.testing.expectError(error.NoResponders, result);
 }
 
@@ -381,7 +381,7 @@ test "requestMany with stall timeout" {
     const ResponderFiber = struct {
         fn run(runtime: *zio.Runtime, connection: *nats.Connection, sub: *nats.Subscription) void {
             // Wait for the request message
-            const request_msg = sub.nextMsg(1000) catch return;
+            const request_msg = sub.nextMsg(.fromSeconds(1)) catch return;
             defer request_msg.deinit();
 
             const reply_subject = request_msg.reply orelse return;
@@ -406,7 +406,7 @@ test "requestMany with stall timeout" {
     try rt.sleep(.fromMilliseconds(10)); // 10ms to ensure subscription is ready
 
     // Request with 100ms stall timeout - should get only first 2 responses
-    var messages = try conn.requestMany("test.stall", "get with stall", 1000, .{ .stall_ms = 100 });
+    var messages = try conn.requestMany("test.stall", "get with stall", .fromSeconds(1), .{ .stall = std.Io.Duration.fromMilliseconds(100) });
     defer {
         while (messages.pop()) |response| {
             response.deinit();

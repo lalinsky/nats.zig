@@ -52,7 +52,7 @@ const sub = try nc.subscribeSync("hello");
 
 // Wait for message with 5 second timeout
 while (true) {
-    var msg = sub.nextMsg(5000) catch |err| {
+    var msg = sub.nextMsg(.fromSeconds(5)) catch |err| {
         if (err == error.Timeout) continue;
         return err;
     };
@@ -83,7 +83,7 @@ const sub = try nc.subscribe("hello", messageHandler, .{&counter});
 
 ```zig
 // Send request and wait for reply with 5 second timeout
-const reply = try nc.request("help", "need assistance", 5000);
+const reply = try nc.request("help", "need assistance", .fromSeconds(5));
 defer reply.deinit();
 
 std.debug.print("Received reply: {s}\n", .{reply.data});
@@ -93,9 +93,9 @@ std.debug.print("Received reply: {s}\n", .{reply.data});
 
 ```zig
 // Request multiple responses from different responders
-var messages = try nc.requestMany("services.status", "ping all", 5000, .{
-    .max_messages = 10,    // Stop after 10 responses
-    .stall_ms = 100,       // Stop if no new responses for 100ms
+var messages = try nc.requestMany("services.status", "ping all", .fromSeconds(5), .{
+    .max_messages = 10,             // Stop after 10 responses
+    .stall = .fromMilliseconds(100), // Stop if no new responses for 100ms
 });
 
 while (messages.pop()) |msg| {
@@ -182,7 +182,7 @@ var pull_sub = try js.pullSubscribe("orders.*", "batch_processor", .{
 });
 defer pull_sub.deinit();
 
-var batch = try pull_sub.fetch(10, 5000); // Fetch up to 10 msgs, 5s timeout
+var batch = try pull_sub.fetch(10, .fromSeconds(5)); // Fetch up to 10 msgs, 5s timeout
 defer batch.deinit();
 for (batch.messages) |js_msg| {
     try js_msg.ack();

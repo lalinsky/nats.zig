@@ -19,7 +19,7 @@ test "subscribeSync smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try sub.nextMsg(1000);
+    const msg = try sub.nextMsg(.fromSeconds(1));
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test", msg.subject);
@@ -39,7 +39,7 @@ test "queueSubscribeSync smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try sub.nextMsg(1000);
+    const msg = try sub.nextMsg(.fromSeconds(1));
     defer msg.deinit();
 
     try std.testing.expectEqualStrings("test", msg.subject);
@@ -63,18 +63,17 @@ const MessageCollector = struct {
         self.cond.broadcast();
     }
 
-    pub fn timedWait(self: *@This(), timeout_ms: u64) !*Message {
+    pub fn timedWait(self: *@This(), io: std.Io, timeout: std.Io.Duration) !*Message {
         try self.mutex.lock();
         defer self.mutex.unlock();
 
-        const timeout_ns = timeout_ms * std.time.ns_per_ms;
-        var timer = zio.Stopwatch.start();
+        const start = std.Io.Timestamp.now(io, .awake);
         while (self.result == null) {
-            const elapsed_ns = timer.read().toNanoseconds();
-            if (elapsed_ns >= timeout_ns) {
+            const elapsed = start.untilNow(io, .awake);
+            if (elapsed.nanoseconds >= timeout.nanoseconds) {
                 return error.Timeout;
             }
-            try self.cond.timedWait(&self.mutex, .fromNanoseconds(timeout_ns - elapsed_ns));
+            try self.cond.timedWait(&self.mutex, .fromNanoseconds(@intCast(timeout.nanoseconds - elapsed.nanoseconds)));
         }
         return self.result.?;
     }
@@ -96,7 +95,7 @@ test "subscribe smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try collector.timedWait(1000);
+    const msg = try collector.timedWait(rt.io(), .fromSeconds(1));
     try std.testing.expectEqualStrings("test", msg.subject);
     try std.testing.expectEqualStrings("Hello world!", msg.data);
 }
@@ -117,7 +116,7 @@ test "queueSubscribe smoke test" {
     try conn.publish("test", "Hello world!");
     try conn.flush();
 
-    const msg = try collector.timedWait(1000);
+    const msg = try collector.timedWait(rt.io(), .fromSeconds(1));
     try std.testing.expectEqualStrings("test", msg.subject);
     try std.testing.expectEqualStrings("Hello world!", msg.data);
 }

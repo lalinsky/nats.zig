@@ -13,22 +13,22 @@ pub const BenchStats = struct {
     last_msg_count: u64 = 0,
     last_success_count: u64 = 0,
     last_error_count: u64 = 0,
-    start_time: i128 = 0,
-    last_report_time: i128 = 0,
+    io: std.Io,
+    start_time: std.Io.Timestamp = .zero,
+    last_report_time: std.Io.Timestamp = .zero,
 
-    pub fn init() BenchStats {
-        const now = zio.Timestamp.now(.monotonic).toNanoseconds();
+    pub fn init(io: std.Io) BenchStats {
+        const now = std.Io.Timestamp.now(io, .awake);
         return BenchStats{
+            .io = io,
             .start_time = now,
             .last_report_time = now,
         };
     }
 
-    pub fn elapsedS(self: *const BenchStats, start_time: i128) f64 {
-        _ = self;
-        const now = zio.Timestamp.now(.monotonic).toNanoseconds();
-        const elapsed_ns = now - start_time;
-        return @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
+    pub fn elapsedS(self: *const BenchStats, start_time: std.Io.Timestamp) f64 {
+        const elapsed = start_time.untilNow(self.io, .awake);
+        return @as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s;
     }
 
     pub fn printThroughput(self: *BenchStats, action: []const u8) void {
@@ -47,7 +47,7 @@ pub const BenchStats = struct {
         self.last_msg_count = self.msg_count;
         self.last_success_count = self.success_count;
         self.last_error_count = self.error_count;
-        self.last_report_time = zio.Timestamp.now(.monotonic).toNanoseconds();
+        self.last_report_time = std.Io.Timestamp.now(self.io, .awake);
     }
 
     pub fn printError(self: *BenchStats, err: anyerror) void {

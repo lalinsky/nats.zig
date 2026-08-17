@@ -18,11 +18,12 @@ pub fn main() !void {
     try bench_util.setupSignals();
 
     // Initialize statistics
-    var stats = bench_util.BenchStats.init();
 
     // Creates a connection to the default NATS URL
     var conn = try bench_util.connect(allocator, null);
     defer bench_util.cleanup(conn);
+
+    var stats = bench_util.BenchStats.init(conn.io);
 
     // Creates a synchronous subscription on subject "echo",
     // waiting for requests. When a message arrives, echo it back.
@@ -38,7 +39,7 @@ pub fn main() !void {
     // Wait for messages in a loop
     while (bench_util.keep_running) {
         // Wait for the next message (with timeout)
-        var msg = sub.nextMsg(1000) catch continue; // continue on timeout
+        var msg = sub.nextMsg(.fromSeconds(1)) catch continue; // continue on timeout
         defer msg.deinit();
 
         stats.msg_count += 1;

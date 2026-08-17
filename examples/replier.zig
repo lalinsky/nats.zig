@@ -37,7 +37,7 @@ pub fn main() !void {
     // Wait for messages in a loop
     while (true) {
         // Wait for the next message (blocks until one arrives)
-        var msg = sub.nextMsg(1000) catch continue; // continue on timeout
+        var msg = sub.nextMsg(.fromSeconds(1)) catch continue; // continue on timeout
         defer msg.deinit();
 
         std.debug.print("Received msg: {s} - {s}\n", .{ msg.subject, msg.data });

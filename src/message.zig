@@ -70,7 +70,7 @@ pub const Message = struct {
     // Metadata
     sid: u64 = 0,
     seq: u64 = 0, // TODO this doesn't really belong here
-    time: u64 = 0,
+    time: Io.Timestamp = .zero,
     status_code: u16 = 0,
 
     // Headers
@@ -307,7 +307,7 @@ pub const Message = struct {
         self.data = &[_]u8{};
         self.sid = 0;
         self.seq = 0;
-        self.time = 0;
+        self.time = .zero;
         self.status_code = 0;
         self.headers = .{}; // Completely reset HashMap instead of clearRetainingCapacity()
         self.raw_headers = null;

@@ -37,8 +37,6 @@ const zio = @import("zio");
 const xsync = @import("xsync");
 const Io = std.Io;
 const io_util = @import("io_util.zig");
-const nsTimeout = io_util.nsTimeout;
-const msTimeout = io_util.msTimeout;
 
 const log = @import("log.zig").log;
 
@@ -199,12 +197,12 @@ pub const HandshakeState = enum {
 
 pub const ReconnectOptions = struct {
     max_reconnect: u32 = 60,
-    reconnect_wait_ms: u64 = 2000, // milliseconds
-    reconnect_jitter_ms: u64 = 100,
-    reconnect_jitter_tls_ms: u64 = 1000,
+    reconnect_wait: Io.Duration = .fromSeconds(2),
+    reconnect_jitter: Io.Duration = .fromMilliseconds(100),
+    reconnect_jitter_tls: Io.Duration = .fromSeconds(1),
     reconnect_buf_size: usize = 8 * 1024 * 1024,
     allow_reconnect: bool = true,
-    custom_reconnect_delay_cb: ?*const fn (attempts: u32) u64 = null,
+    custom_reconnect_delay_cb: ?*const fn (attempts: u32) Io.Duration = null,
 };
 
 pub const ConnectionCallbacks = struct {
@@ -244,7 +242,7 @@ const ExitSignal = struct {
 
 pub const ConnectionOptions = struct {
     name: ?[]const u8 = null,
-    timeout_ms: u64 = 5000,
+    timeout: Io.Duration = .fromMilliseconds(5000),
     verbose: bool = false,
     send_asap: bool = false,
     reconnect: ReconnectOptions = .{},
@@ -252,7 +250,7 @@ pub const ConnectionOptions = struct {
     trace: bool = false,
     no_responders: bool = true,
     max_scratch_size: usize = 1024 * 1024 * 10,
-    ping_interval_ms: u64 = 120000, // 2 minutes default, 0 = disabled
+    ping_interval: Io.Duration = .fromSeconds(120), // .zero = disabled
     max_pings_out: u32 = 2, // max unanswered keep-alive PINGs
 
     // Authentication
@@ -300,7 +298,7 @@ pub const Connection = struct {
     pong_condition: xsync.Condition = .init,
 
     // PING/PONG keep-alive tracking
-    ping_timer: zio.Stopwatch, // Timer for tracking ping intervals
+    ping_time: Io.Timestamp, // Time of the last keep-alive PING interval mark
     pings_out: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Outstanding keep-alive pings (atomic)
 
     // Write buffer (thread-safe, 64KB chunk size)
@@ -342,7 +340,7 @@ pub const Connection = struct {
             .response_manager = ResponseManager.init(allocator, io),
             .parser = Parser.init(allocator, io),
             .scratch = std.heap.ArenaAllocator.init(allocator),
-            .ping_timer = zio.Stopwatch.start(),
+            .ping_time = io_util.now(io),
         };
     }
 
@@ -800,8 +798,7 @@ pub const Connection = struct {
 
         log.debug("Sent PING with ping_id={}, waiting for PONG", .{our_ping_id});
 
-        const timeout_ns = self.options.timeout_ms * std.time.ns_per_ms;
-        var timer = zio.Stopwatch.start();
+        const deadline = io_util.deadline(self.io, self.options.timeout);
 
         while (self.incoming_pongs < our_ping_id) {
             if (self.status != .connected) {
@@ -809,32 +806,30 @@ pub const Connection = struct {
                 return ConnectionError.ConnectionClosed;
             }
 
-            const elapsed_ns = timer.read().toNanoseconds();
-            if (elapsed_ns >= timeout_ns) {
+            if (io_util.expired(self.io, deadline)) {
                 log.warn("Flush timeout waiting for PONG", .{});
                 return ConnectionError.Timeout;
             }
 
-            const remaining_ns = timeout_ns - elapsed_ns;
-            self.pong_condition.waitTimeout(self.io, &self.mutex, nsTimeout(remaining_ns)) catch {};
+            self.pong_condition.waitTimeout(self.io, &self.mutex, deadline) catch {};
         }
 
         log.debug("Flush completed, received PONG for ping_id={}", .{our_ping_id});
     }
 
-    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64) !*Message {
+    pub fn request(self: *Self, subject: []const u8, data: []const u8, timeout: Io.Duration) !*Message {
         var msg = Message{
             .subject = subject,
             .data = data,
             .pool = null,
             .arena = undefined,
         };
-        return self.requestMsg(&msg, timeout_ms);
+        return self.requestMsg(&msg, timeout);
     }
 
-    pub fn requestMsg(self: *Self, msg: *Message, timeout_ms: u64) !*Message {
+    pub fn requestMsg(self: *Self, msg: *Message, timeout: Io.Duration) !*Message {
         if (self.options.trace) {
-            log.debug("Sending request message to {s} with timeout {d}ms", .{ msg.subject, timeout_ms });
+            log.debug("Sending request message to {s} with timeout {f}", .{ msg.subject, timeout });
         }
 
         // Ensure response system is initialized (without mutex held)
@@ -852,7 +847,7 @@ pub const Connection = struct {
         try self.publishRequestMsg(msg, reply_subject);
 
         // Wait for response
-        const reply_msg = try self.response_manager.waitForResponse(handle, timeout_ms * std.time.ns_per_ms);
+        const reply_msg = try self.response_manager.waitForResponse(handle, timeout);
 
         // Check for "no responders" like C library
         if (reply_msg.isNoResponders()) {
@@ -865,19 +860,19 @@ pub const Connection = struct {
 
     pub const RequestManyOptions = ResponseManager.WaitForMultiResponseOptions;
 
-    pub fn requestMany(self: *Self, subject: []const u8, data: []const u8, timeout_ms: u64, options: RequestManyOptions) !MessageList {
+    pub fn requestMany(self: *Self, subject: []const u8, data: []const u8, timeout: Io.Duration, options: RequestManyOptions) !MessageList {
         var msg = Message{
             .subject = subject,
             .data = data,
             .pool = null,
             .arena = undefined,
         };
-        return self.requestManyMsg(&msg, timeout_ms, options);
+        return self.requestManyMsg(&msg, timeout, options);
     }
 
-    pub fn requestManyMsg(self: *Self, msg: *Message, timeout_ms: u64, options: RequestManyOptions) !MessageList {
+    pub fn requestManyMsg(self: *Self, msg: *Message, timeout: Io.Duration, options: RequestManyOptions) !MessageList {
         if (self.options.trace) {
-            log.debug("Sending request-many message to {s} with timeout {d}ms", .{ msg.subject, timeout_ms });
+            log.debug("Sending request-many message to {s} with timeout {f}", .{ msg.subject, timeout });
         }
 
         // Ensure response system is initialized (without mutex held)
@@ -895,7 +890,7 @@ pub const Connection = struct {
         try self.publishRequestMsg(msg, reply_subject);
 
         // Wait for multiple responses
-        const messages = try self.response_manager.waitForMultiResponse(handle, timeout_ms * std.time.ns_per_ms, options);
+        const messages = try self.response_manager.waitForMultiResponse(handle, timeout, options);
 
         if (self.options.trace) {
             log.debug("Received {} responses for request-many to {s}", .{ messages.len, msg.subject });
@@ -971,9 +966,9 @@ pub const Connection = struct {
             // established connection is immediate.
             attempts += 1;
             if (attempts > 1) {
-                const delay_ms = self.calculateReconnectDelay(attempts - 1);
-                log.debug("Waiting {}ms before reconnection attempt {}", .{ delay_ms, attempts });
-                try self.io.sleep(.fromMilliseconds(@intCast(delay_ms)), .awake);
+                const delay = self.calculateReconnectDelay(attempts - 1);
+                log.debug("Waiting {f} before reconnection attempt {}", .{ delay, attempts });
+                try self.io.sleep(delay, .awake);
             }
         }
     }
@@ -1162,7 +1157,7 @@ pub const Connection = struct {
     fn flusherIteration(self: *Self, stream: *zio.net.Stream) !void {
         // Try to gather data from buffer first
         var slices: [16][]const u8 = undefined;
-        const gather = self.write_buffer.gatherReadSlices(&slices, self.options.timeout_ms) catch |err| switch (err) {
+        const gather = self.write_buffer.gatherReadSlices(&slices, self.options.timeout) catch |err| switch (err) {
             error.QueueEmpty => {
                 // No data to write
                 return;
@@ -1442,18 +1437,17 @@ pub const Connection = struct {
     }
 
     fn checkAndSendPing(self: *Self) !void {
-        if (self.options.ping_interval_ms == 0) return;
+        if (self.options.ping_interval.nanoseconds == 0) return;
 
-        const interval_ns = self.options.ping_interval_ms * std.time.ns_per_ms;
-        const elapsed_ns = self.ping_timer.read().toNanoseconds();
-        if (elapsed_ns >= interval_ns) {
+        const current_time = io_util.now(self.io);
+        if (self.ping_time.durationTo(current_time).nanoseconds >= self.options.ping_interval.nanoseconds) {
             _ = try self.sendPing(true);
             const current_pings = self.pings_out.fetchAdd(1, .monotonic) + 1;
             if (self.options.max_pings_out > 0 and current_pings > self.options.max_pings_out) {
                 log.warn("Stale connection: {} unanswered PINGs", .{current_pings});
                 return error.StaleConnection;
             }
-            self.ping_timer.reset();
+            self.ping_time = current_time;
         }
     }
 
@@ -1490,21 +1484,21 @@ pub const Connection = struct {
         try self.write_buffer.append("PONG\r\n");
     }
 
-    fn calculateReconnectDelay(self: *Self, attempts: u32) u64 {
+    fn calculateReconnectDelay(self: *Self, attempts: u32) Io.Duration {
         if (self.options.reconnect.custom_reconnect_delay_cb) |callback| {
             return callback(attempts);
         }
 
-        var base_wait = self.options.reconnect.reconnect_wait_ms;
-        const jitter = self.options.reconnect.reconnect_jitter_ms;
+        var delay = self.options.reconnect.reconnect_wait;
+        const jitter = self.options.reconnect.reconnect_jitter;
 
-        if (jitter > 0) {
-            var rng = std.Random.DefaultPrng.init(@intCast(zio.Timestamp.now(.monotonic).toNanoseconds()));
-            const random_jitter = rng.random().uintLessThan(u64, jitter);
-            base_wait += random_jitter;
+        if (jitter.nanoseconds > 0) {
+            var rng = std.Random.DefaultPrng.init(@intCast(io_util.now(self.io).nanoseconds));
+            const random_jitter = rng.random().uintLessThan(u64, @intCast(jitter.nanoseconds));
+            delay.nanoseconds += random_jitter;
         }
 
-        return base_wait;
+        return delay;
     }
 
     fn resendSubscriptions(self: *Self) !void {
@@ -1575,14 +1569,12 @@ pub const Connection = struct {
     /// Waits for handshake completion with timeout (assumes mutex is held)
     /// Returns error if handshake fails or times out
     fn waitForHandshakeCompletion(self: *Self) !void {
-        const timeout_ns = self.options.timeout_ms * std.time.ns_per_ms;
-        var timer = zio.Stopwatch.start();
+        const deadline = io_util.deadline(self.io, self.options.timeout);
 
         while (!self.handshake_state.isFinished()) {
             log.debug("Handshake state: {}", .{self.handshake_state});
 
-            const elapsed_ns = timer.read().toNanoseconds();
-            if (elapsed_ns >= timeout_ns) {
+            if (io_util.expired(self.io, deadline)) {
                 log.err("Handshake timeout", .{});
                 self.handshake_error = ConnectionError.Timeout;
                 self.handshake_state = .failed;
@@ -1590,8 +1582,7 @@ pub const Connection = struct {
                 break;
             }
 
-            const remaining_ns = timeout_ns - elapsed_ns;
-            self.handshake_cond.waitTimeout(self.io, &self.mutex, nsTimeout(remaining_ns)) catch {};
+            self.handshake_cond.waitTimeout(self.io, &self.mutex, deadline) catch {};
         }
 
         // Return the handshake error if it failed, or void if successful
@@ -1645,7 +1636,9 @@ pub const Connection = struct {
         }
     }
 
-    pub fn waitForDrainCompletion(self: *Self, timeout_ms: ?u64) !void {
+    /// Wait for the connection drain to finish. A null timeout waits
+    /// indefinitely.
+    pub fn waitForDrainCompletion(self: *Self, timeout: ?Io.Duration) !void {
         const state = self.drain_state.load(.acquire);
         switch (state) {
             .not_draining => return error.NotDraining,
@@ -1653,8 +1646,8 @@ pub const Connection = struct {
             else => {},
         }
 
-        if (timeout_ms) |timeout| {
-            try self.drain_completion.waitTimeout(self.io, msTimeout(timeout));
+        if (timeout) |t| {
+            try self.drain_completion.waitTimeout(self.io, io_util.timeout(t));
         } else {
             try self.drain_completion.wait(self.io);
         }

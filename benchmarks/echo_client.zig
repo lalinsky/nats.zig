@@ -4,7 +4,7 @@ const zio = @import("zio");
 const bench_util = @import("bench_util.zig");
 
 const REPORT_INTERVAL = 1000;
-const REQUEST_TIMEOUT_MS = std.time.ms_per_s * 5; // 5 second timeout
+const REQUEST_TIMEOUT: std.Io.Duration = .fromSeconds(5);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -20,13 +20,14 @@ pub fn main() !void {
     try bench_util.setupSignals();
 
     // Initialize statistics
-    var stats = bench_util.BenchStats.init();
 
     // Creates a connection to the default NATS URL
     var conn = bench_util.connect(allocator, null) catch |err| {
         return err;
     };
     defer bench_util.cleanup(conn);
+
+    var stats = bench_util.BenchStats.init(conn.io);
 
     const message_data = "Hello, NATS Echo Server!";
 
@@ -38,7 +39,7 @@ pub fn main() !void {
         stats.msg_count += 1;
 
         // Send request and wait for echo reply
-        const reply = conn.request("echo", message_data, REQUEST_TIMEOUT_MS) catch |err| {
+        const reply = conn.request("echo", message_data, REQUEST_TIMEOUT) catch |err| {
             stats.printError(err);
             continue;
         };
@@ -64,7 +65,7 @@ pub fn main() !void {
             stats.last_msg_count = stats.msg_count;
             stats.last_success_count = stats.success_count;
             stats.last_error_count = stats.error_count;
-            stats.last_report_time = zio.Timestamp.now(.monotonic).toNanoseconds();
+            stats.last_report_time = std.Io.Timestamp.now(conn.io, .awake);
         }
     }
 

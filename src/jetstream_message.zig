@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const Message = @import("message.zig").Message;
 const Connection = @import("connection.zig").Connection;
 
@@ -38,7 +39,7 @@ pub const MsgMetadata = struct {
     sequence: SequencePair = .{}, // Consumer and stream sequence numbers
     num_delivered: u64 = 0, // Number of times this message has been delivered
     num_pending: u64 = 0, // Number of pending messages for this consumer
-    timestamp: u64 = 0, // Message timestamp (nanoseconds since epoch) from reply subject
+    timestamp: Io.Timestamp = .zero, // Message timestamp (wall clock) from reply subject
     stream: []const u8 = "", // Stream name
     consumer: []const u8 = "", // Consumer name
     domain: []const u8 = "", // JetStream domain (for clustered JetStream)
@@ -69,8 +70,8 @@ pub const JetStreamMessage = struct {
     }
 
     /// Negative acknowledge with delay - request redelivery after specified duration (in milliseconds)
-    pub fn nakWithDelay(self: *JetStreamMessage, delay_ms: u64) !void {
-        try self.sendAck(.nak, delay_ms);
+    pub fn nakWithDelay(self: *JetStreamMessage, delay: Io.Duration) !void {
+        try self.sendAck(.nak, delay);
     }
 
     /// Terminate delivery - don't redeliver this message
@@ -90,7 +91,7 @@ pub const JetStreamMessage = struct {
     }
 
     /// Send acknowledgment to JetStream
-    fn sendAck(self: *JetStreamMessage, ack_type: AckType, delay_ms: ?u64) !void {
+    fn sendAck(self: *JetStreamMessage, ack_type: AckType, delay: ?Io.Duration) !void {
         if (self.msg.reply) |reply_subject| {
             if (ack_type.isFinal()) {
                 // Check if already acknowledged using atomic compare-and-swap
@@ -105,11 +106,10 @@ pub const JetStreamMessage = struct {
 
             // Format the acknowledgment message with optional delay
             var ack_message: [256]u8 = undefined;
-            const ack_body = if (delay_ms) |delay| blk: {
-                if (delay > 0) {
-                    // Convert milliseconds to nanoseconds for the protocol message
-                    const delay_ns = delay * std.time.ns_per_ms;
-                    const formatted = try std.fmt.bufPrint(&ack_message, "{s} {{\"delay\": {d}}}", .{ ack_type.toString(), delay_ns });
+            const ack_body = if (delay) |d| blk: {
+                if (d.nanoseconds > 0) {
+                    // The protocol message carries the delay in nanoseconds
+                    const formatted = try std.fmt.bufPrint(&ack_message, "{s} {{\"delay\": {d}}}", .{ ack_type.toString(), d.toNanoseconds() });
                     break :blk formatted;
                 } else {
                     break :blk ack_type.toString();
@@ -136,7 +136,7 @@ fn parseAckV1(subject: []const u8, metadata: *MsgMetadata) !void {
             4 => metadata.num_delivered = try std.fmt.parseInt(u64, token, 10),
             5 => metadata.sequence.stream = try std.fmt.parseInt(u64, token, 10),
             6 => metadata.sequence.consumer = try std.fmt.parseInt(u64, token, 10),
-            7 => metadata.timestamp = try std.fmt.parseInt(u64, token, 10),
+            7 => metadata.timestamp = .{ .nanoseconds = try std.fmt.parseInt(u64, token, 10) },
             8 => metadata.num_pending = try std.fmt.parseInt(u64, token, 10),
             else => break,
         }
@@ -164,7 +164,7 @@ fn parseAckV2(subject: []const u8, metadata: *MsgMetadata) !void {
             6 => metadata.num_delivered = try std.fmt.parseInt(u64, token, 10),
             7 => metadata.sequence.stream = try std.fmt.parseInt(u64, token, 10),
             8 => metadata.sequence.consumer = try std.fmt.parseInt(u64, token, 10),
-            9 => metadata.timestamp = try std.fmt.parseInt(u64, token, 10),
+            9 => metadata.timestamp = .{ .nanoseconds = try std.fmt.parseInt(u64, token, 10) },
             10 => metadata.num_pending = try std.fmt.parseInt(u64, token, 10),
             11 => {}, // Skip token
             else => break,
@@ -206,7 +206,7 @@ test "parseAckSubject v1" {
     try std.testing.expectEqual(123, meta.num_delivered);
     try std.testing.expectEqual(456, meta.sequence.stream);
     try std.testing.expectEqual(789, meta.sequence.consumer);
-    try std.testing.expectEqual(10, meta.timestamp);
+    try std.testing.expectEqual(10, meta.timestamp.nanoseconds);
     try std.testing.expectEqual(11, meta.num_pending);
 }
 
@@ -222,7 +222,7 @@ test "parseAckSubject v2" {
     try std.testing.expectEqual(123, meta.num_delivered);
     try std.testing.expectEqual(456, meta.sequence.stream);
     try std.testing.expectEqual(789, meta.sequence.consumer);
-    try std.testing.expectEqual(10, meta.timestamp);
+    try std.testing.expectEqual(10, meta.timestamp.nanoseconds);
     try std.testing.expectEqual(11, meta.num_pending);
 }
 

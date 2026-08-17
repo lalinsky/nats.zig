@@ -26,7 +26,7 @@ pub fn main() !void {
     // Sends a request on "help" and expects a reply.
     // Will wait only for a given number of milliseconds,
     // say for 5 seconds in this example.
-    const reply = conn.request("help", "really need some", std.time.ns_per_s * 5) catch |err| {
+    const reply = conn.request("help", "really need some", .fromSeconds(5)) catch |err| {
         std.debug.print("Request failed: {}\n", .{err});
         std.process.exit(2);
     };

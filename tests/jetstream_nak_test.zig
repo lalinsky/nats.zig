@@ -369,11 +369,13 @@ test "NAK with delay redelivery timing" {
         second_delivery_time: i64 = 0,
         mutex: zio.Mutex = .{},
         allocator: std.mem.Allocator,
+        io: std.Io,
 
-        fn init(allocator: std.mem.Allocator) @This() {
+        fn init(allocator: std.mem.Allocator, io: std.Io) @This() {
             return .{
                 .delivery_times = std.ArrayList(i64).empty,
                 .allocator = allocator,
+                .io = io,
             };
         }
 
@@ -382,7 +384,7 @@ test "NAK with delay redelivery timing" {
         }
     };
 
-    var test_data = DelayTestData.init(testing.allocator);
+    var test_data = DelayTestData.init(testing.allocator, rt.io());
     defer test_data.deinit();
 
     // Message handler that NAKs with delay on first delivery
@@ -393,7 +395,7 @@ test "NAK with delay redelivery timing" {
             data.mutex.lockUncancelable();
             defer data.mutex.unlock();
 
-            const current_time: i64 = @intCast(@divTrunc(zio.Timestamp.now(.monotonic).toNanoseconds(), std.time.ns_per_ms));
+            const current_time: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(data.io, .awake).nanoseconds, std.time.ns_per_ms));
             data.delivery_times.append(data.allocator, current_time) catch return;
 
             const delivery_count = js_msg.metadata.num_delivered;
@@ -404,7 +406,7 @@ test "NAK with delay redelivery timing" {
             if (delivery_count == 1) {
                 // First delivery - NAK with 500ms delay
                 data.first_delivery_time = current_time;
-                js_msg.nakWithDelay(500) catch |err| {
+                js_msg.nakWithDelay(.fromMilliseconds(500)) catch |err| {
                     log.err("Failed to NAK with delay: {}", .{err});
                 };
                 log.info("NAK'd message with 500ms delay", .{});
@@ -501,7 +503,7 @@ test "NAK with zero delay behaves like regular NAK" {
 
             if (delivery_num == 1) {
                 // First delivery - NAK with zero delay (should behave like regular NAK)
-                js_msg.nakWithDelay(0) catch |err| {
+                js_msg.nakWithDelay(.zero) catch |err| {
                     log.err("Failed to NAK with zero delay: {}", .{err});
                 };
                 log.info("NAK'd message with zero delay", .{});

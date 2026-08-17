@@ -27,7 +27,7 @@ pub fn main() !void {
     std.log.info("Waiting for messages...", .{});
 
     while (true) {
-        var msg = sub.nextMsg(1000) catch |err| {
+        var msg = sub.nextMsg(.fromSeconds(1)) catch |err| {
             if (err == error.Timeout) continue;
             return err;
         };

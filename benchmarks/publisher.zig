@@ -18,11 +18,12 @@ pub fn main() !void {
     try bench_util.setupSignals();
 
     // Initialize statistics
-    var stats = bench_util.BenchStats.init();
 
     // Creates a connection to the default NATS URL
     var conn = try bench_util.connect(allocator, null);
     defer bench_util.cleanup(conn);
+
+    var stats = bench_util.BenchStats.init(conn.io);
 
     const subject = "benchmark.data";
     const message_data = "Hello, NATS Subscribers! This is benchmark data.";

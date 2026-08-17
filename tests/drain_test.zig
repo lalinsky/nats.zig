@@ -26,7 +26,7 @@ test "subscription drain sync - immediate completion" {
     try std.testing.expect(sub.isDrainComplete());
 
     // Wait should return immediately
-    try sub.waitForDrainCompletion(1000);
+    try sub.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "subscription drain sync - with pending messages" {
@@ -64,7 +64,7 @@ test "subscription drain sync - with pending messages" {
     try std.testing.expect(!sub.isDrainComplete());
 
     // Consume first message
-    var msg1 = try sub.nextMsg(1000);
+    var msg1 = try sub.nextMsg(.fromSeconds(1));
     defer msg1.deinit();
     try std.testing.expect(std.mem.eql(u8, msg1.data, msg1_data));
 
@@ -74,7 +74,7 @@ test "subscription drain sync - with pending messages" {
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 1);
 
     // Consume second message
-    var msg2 = try sub.nextMsg(1000);
+    var msg2 = try sub.nextMsg(.fromSeconds(1));
     defer msg2.deinit();
     try std.testing.expect(std.mem.eql(u8, msg2.data, msg2_data));
 
@@ -84,7 +84,7 @@ test "subscription drain sync - with pending messages" {
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 0);
 
     // Wait should return immediately
-    try sub.waitForDrainCompletion(1000);
+    try sub.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "subscription drain async - with callback processing" {
@@ -145,7 +145,7 @@ test "subscription drain async - with callback processing" {
     try std.testing.expect(sub.isDraining());
 
     // Wait for drain completion
-    try sub.waitForDrainCompletion(5000); // 5 second timeout
+    try sub.waitForDrainCompletion(.fromSeconds(5)); // 5 second timeout
 
     // Should be complete
     try std.testing.expect(sub.isDrainComplete());
@@ -188,7 +188,7 @@ test "subscription drain blocks new messages" {
     try std.testing.expect(sub.pending_msgs.load(.acquire) == 1);
 
     // Consume the original message
-    var msg = try sub.nextMsg(1000);
+    var msg = try sub.nextMsg(.fromSeconds(1));
     defer msg.deinit();
     try std.testing.expect(std.mem.eql(u8, msg.data, "before drain"));
 
@@ -196,7 +196,7 @@ test "subscription drain blocks new messages" {
     try std.testing.expect(sub.isDrainComplete());
 
     // And no extra messages should be retrievable
-    const maybe = sub.nextMsg(50);
+    const maybe = sub.nextMsg(.fromMilliseconds(50));
     try std.testing.expectError(error.Timeout, maybe);
 }
 
@@ -221,7 +221,7 @@ test "subscription drain timeout" {
     sub.drain();
 
     // waitForDrainCompletion should timeout
-    const result = sub.waitForDrainCompletion(100); // 100ms timeout
+    const result = sub.waitForDrainCompletion(.fromMilliseconds(100)); // 100ms timeout
     try std.testing.expectError(error.Timeout, result);
 }
 
@@ -236,7 +236,7 @@ test "subscription drain not draining error" {
     defer sub.deinit();
 
     // Should error if not draining
-    const result = sub.waitForDrainCompletion(100);
+    const result = sub.waitForDrainCompletion(.fromMilliseconds(100));
     try std.testing.expectError(error.NotDraining, result);
 }
 
@@ -254,7 +254,7 @@ test "connection drain - no subscriptions" {
     try conn.drain();
 
     // Wait should return quickly as drain completes immediately
-    try conn.waitForDrainCompletion(1000);
+    try conn.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "connection drain - single subscription" {
@@ -289,13 +289,13 @@ test "connection drain - single subscription" {
     try std.testing.expect(!sub.isDrainComplete());
 
     // Consume messages to complete drain
-    var msg1 = try sub.nextMsg(1000);
+    var msg1 = try sub.nextMsg(.fromSeconds(1));
     defer msg1.deinit();
-    var msg2 = try sub.nextMsg(1000);
+    var msg2 = try sub.nextMsg(.fromSeconds(1));
     defer msg2.deinit();
 
     // Wait for connection drain completion
-    try conn.waitForDrainCompletion(1000);
+    try conn.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "connection drain - multiple subscriptions" {
@@ -333,7 +333,7 @@ test "connection drain - multiple subscriptions" {
     try std.testing.expect(sub2.isDraining());
 
     // Consume first subscription's message
-    var msg1 = try sub1.nextMsg(1000);
+    var msg1 = try sub1.nextMsg(.fromSeconds(1));
     defer msg1.deinit();
 
     // First subscription should be complete, but connection still draining
@@ -341,12 +341,12 @@ test "connection drain - multiple subscriptions" {
     try std.testing.expect(!sub2.isDrainComplete());
 
     // Consume second subscription's message
-    var msg2 = try sub2.nextMsg(1000);
+    var msg2 = try sub2.nextMsg(.fromSeconds(1));
     defer msg2.deinit();
 
     // Now both should be complete and connection drain should complete
     try std.testing.expect(sub2.isDrainComplete());
-    try conn.waitForDrainCompletion(1000);
+    try conn.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "connection drain - already draining" {
@@ -362,7 +362,7 @@ test "connection drain - already draining" {
     // Second drain call should be a no-op (not error)
     try conn.drain();
 
-    try conn.waitForDrainCompletion(1000);
+    try conn.waitForDrainCompletion(.fromSeconds(1));
 }
 
 test "connection drain not draining error" {
@@ -373,6 +373,6 @@ test "connection drain not draining error" {
     defer utils.closeConnection(conn);
 
     // Should error if not draining
-    const result = conn.waitForDrainCompletion(100);
+    const result = conn.waitForDrainCompletion(.fromMilliseconds(100));
     try std.testing.expectError(error.NotDraining, result);
 }

@@ -56,26 +56,26 @@ const CallbackTracker = struct {
         _ = msg;
     }
 
-    fn waitForDisconnected(self: *@This(), timeout_ms: u64) !void {
+    fn waitForDisconnected(self: *@This(), io: std.Io, timeout: std.Io.Duration) !void {
         try self.mutex.lock();
         defer self.mutex.unlock();
 
-        var timer = zio.Stopwatch.start();
+        const start = std.Io.Timestamp.now(io, .awake);
         while (self.disconnected_called == 0) {
-            if (timer.read().toNanoseconds() >= timeout_ms * std.time.ns_per_ms) {
+            if (start.untilNow(io, .awake).nanoseconds >= timeout.nanoseconds) {
                 return error.DisconnectTimeout;
             }
             self.cond.timedWait(&self.mutex, .fromMilliseconds(100)) catch {};
         }
     }
 
-    fn waitForReconnected(self: *@This(), timeout_ms: u64) !void {
+    fn waitForReconnected(self: *@This(), io: std.Io, timeout: std.Io.Duration) !void {
         try self.mutex.lock();
         defer self.mutex.unlock();
 
-        var timer = zio.Stopwatch.start();
+        const start = std.Io.Timestamp.now(io, .awake);
         while (self.reconnected_called == 0) {
-            if (timer.read().toNanoseconds() >= timeout_ms * std.time.ns_per_ms) {
+            if (start.untilNow(io, .awake).nanoseconds >= timeout.nanoseconds) {
                 return error.ReconnectionTimeout;
             }
             self.cond.timedWait(&self.mutex, .fromMilliseconds(100)) catch {};
@@ -111,8 +111,8 @@ test "basic reconnection when server stops" {
     try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
 
     // Wait for disconnect and reconnection callbacks
-    try tracker.waitForDisconnected(10000);
-    try tracker.waitForReconnected(10000);
+    try tracker.waitForDisconnected(rt.io(), .fromSeconds(10));
+    try tracker.waitForReconnected(rt.io(), .fromSeconds(10));
 
     // Verify connection works after reconnection
     log.debug("Publishing after reconnection", .{});
@@ -135,7 +135,7 @@ test "manual reconnection with nc.reconnect()" {
         .trace = true,
         .reconnect = .{
             .allow_reconnect = true,
-            .reconnect_wait_ms = 100,
+            .reconnect_wait = .fromMilliseconds(100),
         },
         .callbacks = .{
             .disconnected_cb = CallbackTracker.disconnectedCallback,
@@ -157,7 +157,7 @@ test "manual reconnection with nc.reconnect()" {
 
     // Verify message was received
     {
-        const msg = try sub.nextMsg(1000);
+        const msg = try sub.nextMsg(.fromSeconds(1));
         defer msg.deinit();
         try testing.expectEqualStrings("before reconnect", msg.data);
     }
@@ -167,7 +167,7 @@ test "manual reconnection with nc.reconnect()" {
     try nc.reconnect();
 
     // Wait for reconnection to complete
-    try tracker.waitForReconnected(5000);
+    try tracker.waitForReconnected(rt.io(), .fromSeconds(5));
     log.debug("Manual reconnection completed", .{});
 
     // Verify callbacks were called
@@ -183,7 +183,7 @@ test "manual reconnection with nc.reconnect()" {
 
     // Verify subscription survived reconnection
     {
-        const msg = try sub.nextMsg(1000);
+        const msg = try sub.nextMsg(.fromSeconds(1));
         defer msg.deinit();
         try testing.expectEqualStrings("after reconnect", msg.data);
     }
