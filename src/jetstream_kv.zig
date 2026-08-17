@@ -253,7 +253,7 @@ pub const KVWatcher = struct {
         while (true) {
             const remaining = io_util.remaining(io, deadline) orelse return error.Timeout;
             log.debug("nextMsg({f})", .{remaining});
-            var msg = try self.sub.nextMsgTimeout(remaining);
+            var msg = try self.sub.nextMsg(remaining);
             var delete_msg = true;
             defer if (delete_msg) msg.deinit();
 
