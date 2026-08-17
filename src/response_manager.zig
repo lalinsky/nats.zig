@@ -241,7 +241,10 @@ pub const ResponseManager = struct {
 
             // After this call, any entry pointers become invalid due to potential HashMap modifications
             cleanup = false;
-            self.pending_condition.waitTimeout(self.io, &self.pending_mutex, deadline) catch {};
+            self.pending_condition.waitTimeout(self.io, &self.pending_mutex, deadline) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Timeout => {}, // Continue loop to check conditions
+            };
         }
     }
 
@@ -346,13 +349,18 @@ pub const ResponseManager = struct {
             }
 
             // After this call, any entry pointers become invalid due to potential HashMap modifications
-            self.pending_condition.waitTimeout(self.io, &self.pending_mutex, wait_deadline) catch {
-                // Timeout occurred - return what we have collected so far
-                cleanup = true;
-                if (msgs.len > 0) {
-                    return msgs;
-                }
-                return error.Timeout;
+            self.pending_condition.waitTimeout(self.io, &self.pending_mutex, wait_deadline) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Timeout => {
+                    // Timeout or stall - return what we have collected so
+                    // far. The map entry is left for the caller's
+                    // cleanupRequest; `entry` may be stale at this point and
+                    // must not be touched.
+                    if (msgs.len > 0) {
+                        return msgs;
+                    }
+                    return error.Timeout;
+                },
             };
         }
     }
