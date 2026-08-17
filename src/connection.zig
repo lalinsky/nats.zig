@@ -268,9 +268,16 @@ pub const ConnectionOptions = struct {
     /// credentials are picked up automatically. Takes precedence over
     /// `user_jwt` and `nkey_seed`.
     user_creds: ?[]const u8 = null,
-    /// User JWT to present in CONNECT. Requires `nkey_seed` for signing
-    /// the server nonce.
+    /// User JWT to present in CONNECT. Requires `nkey_seed` or
+    /// `nkey_sign_cb` for signing the server nonce.
     user_jwt: ?[]const u8 = null,
+    /// Public NKey ("U..."), for use with `nkey_sign_cb` so the seed never
+    /// has to be in this process. Ignored when a seed or JWT is configured.
+    nkey: ?[]const u8 = null,
+    /// Custom signer: receives the server nonce and returns the raw Ed25519
+    /// signature. Used with `nkey` (or `user_jwt`) instead of `nkey_seed`;
+    /// a configured seed takes precedence.
+    nkey_sign_cb: ?*const fn (nonce: []const u8) anyerror![64]u8 = null,
 };
 
 /// Maximum accepted size of a credentials file.
@@ -414,12 +421,18 @@ pub const Connection = struct {
             const credentials = try creds_mod.parse(content);
             var seed_kp = try nkeys.SeedKeyPair.fromSeed(credentials.seed);
             seed_kp.wipe();
-        } else if (self.options.user_jwt != null and self.options.nkey_seed == null) {
-            // A JWT alone cannot authenticate; the nonce must be signed.
-            return error.MissingNKeySeed;
-        } else if (self.options.nkey_seed) |seed| {
-            var seed_kp = try nkeys.SeedKeyPair.fromSeed(seed);
-            seed_kp.wipe();
+        } else {
+            if (self.options.user_jwt != null and self.options.nkey_seed == null and self.options.nkey_sign_cb == null) {
+                // A JWT alone cannot authenticate; the nonce must be signed.
+                return error.MissingNKeySeed;
+            }
+            if (self.options.nkey_seed) |seed| {
+                var seed_kp = try nkeys.SeedKeyPair.fromSeed(seed);
+                seed_kp.wipe();
+            } else if (self.options.nkey_sign_cb != null and self.options.user_jwt == null and self.options.nkey == null) {
+                // A signer without a JWT needs the public key to present.
+                return error.MissingNKey;
+            }
         }
 
         try self.mutex.lock(self.io);
@@ -1101,9 +1114,23 @@ pub const Connection = struct {
 
         try self.mutex.lock(self.io);
         self.waitForHandshakeCompletion() catch |err| {
+            // Track authentication errors per server: a server that rejects
+            // the same credentials twice in a row will keep rejecting them,
+            // so stop burning reconnect attempts on it (nats.go behavior).
+            if (isAuthError(err)) {
+                if (server.last_auth_error) |last| {
+                    if (last == err) {
+                        self.mutex.unlock(self.io);
+                        log.err("Same authentication error twice from {s}, giving up: {}", .{ server.parsed_url.full_url, err });
+                        return error.ShouldClose;
+                    }
+                }
+                server.last_auth_error = err;
+            }
             self.mutex.unlock(self.io);
             return err;
         };
+        server.last_auth_error = null;
         if (self.status == .reconnecting) {
             was_reconnect = true;
         }
@@ -1372,13 +1399,15 @@ pub const Connection = struct {
             signing_seed = credentials.seed;
         } else if (self.options.user_jwt) |user_jwt| {
             jwt = user_jwt;
-            signing_seed = self.options.nkey_seed orelse return error.MissingNKeySeed;
+            signing_seed = self.options.nkey_seed;
+            if (signing_seed == null and self.options.nkey_sign_cb == null) return error.MissingNKeySeed;
         } else if (self.options.nkey_seed) |seed| {
             signing_seed = seed;
         }
 
-        if (signing_seed) |seed| {
-            if (self.server_info.nonce) |nonce| {
+        if (self.server_info.nonce) |nonce| {
+            var raw_sig: ?[64]u8 = null;
+            if (signing_seed) |seed| {
                 var seed_kp = try nkeys.SeedKeyPair.fromSeed(seed);
                 defer seed_kp.wipe();
 
@@ -1386,11 +1415,18 @@ pub const Connection = struct {
                     const nkey_buf = try allocator.create([nkeys.public_key_text_len]u8);
                     nkey = seed_kp.publicKeyText(nkey_buf);
                 }
+                raw_sig = try seed_kp.sign(nonce);
+            } else if (self.options.nkey_sign_cb) |sign_cb| {
+                if (jwt == null) {
+                    nkey = self.options.nkey orelse return error.MissingNKey;
+                }
+                raw_sig = try sign_cb(nonce);
+            }
 
-                const raw_sig = try seed_kp.sign(nonce);
+            if (raw_sig) |*signature| {
                 const Base64Encoder = std.base64.url_safe_no_pad.Encoder;
-                const sig_buf = try allocator.alloc(u8, Base64Encoder.calcSize(raw_sig.len));
-                sig = Base64Encoder.encode(sig_buf, &raw_sig);
+                const sig_buf = try allocator.alloc(u8, Base64Encoder.calcSize(signature.len));
+                sig = Base64Encoder.encode(sig_buf, signature);
             }
         }
 
@@ -1492,6 +1528,19 @@ pub const Connection = struct {
         // No action needed for now
     }
 
+    /// Whether an error reported by the server means the credentials were
+    /// rejected (as opposed to a transient or protocol problem).
+    fn isAuthError(err: anyerror) bool {
+        return switch (err) {
+            ProtocolError.AuthorizationViolation,
+            ProtocolError.AuthExpired,
+            ProtocolError.AuthRevoked,
+            ProtocolError.AccountAuthExpired,
+            => true,
+            else => false,
+        };
+    }
+
     /// Maps -ERR message to specific ProtocolError (similar to nats.go approach)
     fn parseProtocolError(err_msg: []const u8, allocator: std.mem.Allocator) ProtocolError {
         const lower_err = std.ascii.allocLowerString(allocator, err_msg) catch return ProtocolError.UnknownServerError;
@@ -1559,6 +1608,12 @@ pub const Connection = struct {
             self.handshake_state = .failed;
             self.handshake_cond.broadcast(self.io); // Signal handshake failure
             log.debug("Handshake failed: {}", .{protocol_err});
+            // During reconnection there is no caller waiting on connect()
+            // to see the error, so report it through the error callback
+            // (in the defer, outside the mutex).
+            if (self.status == .reconnecting) {
+                callback = self.options.callbacks.error_cb;
+            }
             return;
         }
 
