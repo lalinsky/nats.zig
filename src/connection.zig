@@ -33,6 +33,7 @@ const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
 const ResponseManager = @import("response_manager.zig").ResponseManager;
 const MAX_CONTROL_LINE_SIZE = @import("parser.zig").MAX_CONTROL_LINE_SIZE;
 const validation = @import("validation.zig");
+const nkeys = @import("nkeys.zig");
 const xsync = @import("xsync");
 const Io = std.Io;
 const io_util = @import("io_util.zig");
@@ -258,6 +259,9 @@ pub const ConnectionOptions = struct {
     password: ?[]const u8 = null,
     token: ?[]const u8 = null,
     token_handler: ?*const fn () []const u8 = null,
+    /// NKey seed ("SU..."); the client signs the server nonce with it and
+    /// sends the derived public key and signature in CONNECT.
+    nkey_seed: ?[]const u8 = null,
 };
 
 pub const Connection = struct {
@@ -385,6 +389,13 @@ pub const Connection = struct {
         errdefer self.close();
 
         try io_util.ensureAwakeClock(self.io);
+
+        // Validate the NKey seed up front so a bad seed fails immediately
+        // instead of surfacing as a handshake error on every server.
+        if (self.options.nkey_seed) |seed| {
+            var seed_kp = try nkeys.SeedKeyPair.fromSeed(seed);
+            seed_kp.wipe();
+        }
 
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -1316,6 +1327,25 @@ pub const Connection = struct {
             }
         }
 
+        // NKey authentication: sign the server-provided nonce and send the
+        // public key alongside the signature.
+        var nkey: ?[]const u8 = null;
+        var sig: ?[]const u8 = null;
+        if (self.options.nkey_seed) |seed| {
+            if (self.server_info.nonce) |nonce| {
+                var seed_kp = try nkeys.SeedKeyPair.fromSeed(seed);
+                defer seed_kp.wipe();
+
+                const nkey_buf = try allocator.create([nkeys.public_key_text_len]u8);
+                nkey = seed_kp.publicKeyText(nkey_buf);
+
+                const raw_sig = try seed_kp.sign(nonce);
+                const Base64Encoder = std.base64.url_safe_no_pad.Encoder;
+                const sig_buf = try allocator.alloc(u8, Base64Encoder.calcSize(raw_sig.len));
+                sig = Base64Encoder.encode(sig_buf, &raw_sig);
+            }
+        }
+
         // Create CONNECT JSON object
         const connect_obj = .{
             .verbose = self.options.verbose,
@@ -1329,6 +1359,8 @@ pub const Connection = struct {
             .user = user,
             .pass = password,
             .auth_token = auth_token,
+            .nkey = nkey,
+            .sig = sig,
         };
 
         try buffer.writer.writeAll("CONNECT ");

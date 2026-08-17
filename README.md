@@ -244,6 +244,15 @@ try nc2.connect("nats://s3cr3t-t0ken@localhost:4222");
 Credentials in the server URL take precedence over the options, matching the
 behavior of the official NATS clients.
 
+For NKey authentication, provide the seed and the client signs the server's
+connection nonce with the derived Ed25519 key:
+
+```zig
+var nc = nats.Connection.init(init.gpa, init.io, .{
+    .nkey_seed = "SUACSSL3UAHUDXKFSNVUZRF5UHPMWZ6BFDTJ7M6USDXIEDNPPQYYYCU3VY",
+});
+```
+
 ## Selecting the I/O Backend
 
 The examples above use `init.io`, the threaded I/O implementation from the stdlib. This is suitable for development

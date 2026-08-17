@@ -175,6 +175,55 @@ test "url token authentication" {
     try conn.flush();
 }
 
+// Fixture seeds; the nkey server config (tests/configs/nkey.conf)
+// authorizes only the public key derived from the first one.
+const nkey_seed = "SUABCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEKPBU";
+const wrong_nkey_seed = "SUACEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIU6OY";
+
+test "nkey authentication success" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .nkey_seed = nkey_seed,
+    };
+
+    const conn = try utils.createConnection(io, .nkey_auth, opts);
+    defer utils.closeConnection(conn);
+
+    try conn.publish("test.auth.nkey", "nkey authenticated");
+    try conn.flush();
+}
+
+test "nkey authentication failure with unauthorized key" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .nkey_seed = wrong_nkey_seed,
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+    };
+
+    const result = utils.createConnection(io, .nkey_auth, opts);
+
+    if (result) |conn| {
+        defer utils.closeConnection(conn);
+        try std.testing.expect(false);
+    } else |err| {
+        try std.testing.expect(err == nats.ProtocolError.AuthorizationViolation);
+    }
+}
+
+test "invalid nkey seed fails before connecting" {
+    const io = std.testing.io;
+
+    const opts = nats.ConnectionOptions{
+        .nkey_seed = "SUANOTAVALIDSEED",
+    };
+
+    // Even the unused port works here: the seed is validated before dialing.
+    const result = utils.createConnection(io, .unknown, opts);
+    try std.testing.expectError(nats.nkeys.Error.InvalidSeed, result);
+}
+
 test "no authentication options against auth server" {
     const io = std.testing.io;
 
