@@ -54,8 +54,8 @@ pub const Subscription = struct {
     // Callback support
     handler: ?MsgHandler = null,
 
-    // Handler fiber group (for async subscriptions only)
-    handler_group: zio.Group = .init,
+    // Handler task group (for async subscriptions only)
+    handler_group: Io.Group = .init,
 
     // Track pending messages and bytes for both sync and async subscriptions
     pending_msgs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -104,7 +104,7 @@ pub const Subscription = struct {
     pub fn startHandler(self: *Subscription) !void {
         if (self.handler == null) return; // Sync subscription, no handler fiber needed
 
-        try self.handler_group.spawn(handlerLoop, .{self});
+        try self.handler_group.concurrent(self.nc.io, handlerLoop, .{self});
     }
 
     /// Handler fiber loop - waits for messages and calls the handler
@@ -162,8 +162,8 @@ pub const Subscription = struct {
     }
 
     fn destroy(self: *Subscription) void {
-        // Cancel handler fiber group and wait for completion
-        self.handler_group.cancel();
+        // Cancel handler task group and wait for completion
+        self.handler_group.cancel(self.nc.io);
 
         self.nc.allocator.free(self.subject);
 
