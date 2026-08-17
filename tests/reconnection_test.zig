@@ -187,6 +187,88 @@ test "manual reconnection with nc.reconnect()" {
     }
 }
 
+const PendingFlushTracker = struct {
+    var disconnected: std.atomic.Value(bool) = .init(false);
+    var reconnected: std.atomic.Value(bool) = .init(false);
+
+    fn reset() void {
+        disconnected.store(false, .release);
+        reconnected.store(false, .release);
+    }
+
+    fn disconnectedCallback(_: *nats.Connection) void {
+        disconnected.store(true, .release);
+    }
+
+    fn reconnectedCallback(nc: *nats.Connection) void {
+        // The callback must observe a fully restored connection: this
+        // publish has to arrive after the restored subscription and after
+        // the publishes buffered while the server was down.
+        nc.publish("test.pending.flush", "from-callback") catch |err| {
+            log.err("Publish from reconnected callback failed: {}", .{err});
+        };
+        reconnected.store(true, .release);
+    }
+
+    fn waitFor(io: std.Io, flag: *std.atomic.Value(bool), timeout: std.Io.Duration) !void {
+        const start = std.Io.Timestamp.now(io, .awake);
+        while (!flag.load(.acquire)) {
+            if (start.untilNow(io, .awake).nanoseconds >= timeout.nanoseconds) {
+                return error.CallbackTimeout;
+            }
+            try io.sleep(.fromMilliseconds(50), .awake);
+        }
+    }
+};
+
+test "publishes buffered during reconnect are flushed after restoration" {
+    const io = std.testing.io;
+
+    PendingFlushTracker.reset();
+
+    // The standalone token server has no cluster peers, so the client can
+    // only ever reconnect to this one server; that makes the buffered
+    // publish path deterministic.
+    const nc = try utils.createConnection(io, .token_auth, .{
+        .token = "test_token_123",
+        .reconnect = .{
+            .allow_reconnect = true,
+            .reconnect_wait = .fromMilliseconds(100),
+            .max_reconnect = 300,
+        },
+        .callbacks = .{
+            .disconnected_cb = PendingFlushTracker.disconnectedCallback,
+            .reconnected_cb = PendingFlushTracker.reconnectedCallback,
+        },
+    });
+    defer utils.closeConnection(nc);
+
+    const sub = try nc.subscribeSync("test.pending.flush");
+    defer sub.deinit();
+
+    log.debug("Stopping nats-token-auth", .{});
+    try utils.runDockerCompose(std.testing.allocator, &.{ "stop", "nats-token-auth" });
+    try PendingFlushTracker.waitFor(io, &PendingFlushTracker.disconnected, .fromSeconds(10));
+
+    // These are buffered in pending_buffer while the server is down.
+    try nc.publish("test.pending.flush", "buffered 1");
+    try nc.publish("test.pending.flush", "buffered 2");
+
+    log.debug("Starting nats-token-auth", .{});
+    try utils.runDockerCompose(std.testing.allocator, &.{ "start", "nats-token-auth" });
+    try PendingFlushTracker.waitFor(io, &PendingFlushTracker.reconnected, .fromSeconds(30));
+
+    // All three messages must arrive, in order: the buffered publishes
+    // first (flushed after the subscription was restored), then the
+    // publish made inside the reconnected callback.
+    const expected = [_][]const u8{ "buffered 1", "buffered 2", "from-callback" };
+    for (expected) |want| {
+        const msg = try sub.nextMsgTimeout(utils.ioTimeout(.fromSeconds(5)));
+        defer msg.deinit();
+        try testing.expectEqualStrings(want, msg.data);
+    }
+}
+
 test "reconnect() errors when disabled" {
     const io = std.testing.io;
 

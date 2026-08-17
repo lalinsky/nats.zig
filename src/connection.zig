@@ -791,7 +791,18 @@ pub const Connection = struct {
             writer.print("UNSUB {d}\r\n", .{sid}) catch unreachable; // Will always fit
         }
 
-        try self.write_buffer.append(writer.buffered());
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        // Route like publishes: while reconnecting the command goes to
+        // pending_buffer so it survives the connection switch (the live
+        // write buffer is per-connection) and is applied after the
+        // restored subscriptions.
+        if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
+            try self.pending_buffer.append(writer.buffered());
+        } else {
+            try self.write_buffer.append(writer.buffered());
+        }
     }
 
     pub fn unsubscribe(self: *Self, sub: *Subscription) void {
@@ -1069,6 +1080,15 @@ pub const Connection = struct {
         // Reset parser for clean state
         self.parser.reset();
 
+        // Discard whatever the previous connection left unsent: the head may
+        // even be the tail of a partially written frame (the flusher consumes
+        // byte-wise), so replaying it would corrupt the new protocol stream,
+        // and any stale complete frames would precede our CONNECT. Dropping
+        // unflushed frames on connection loss matches the at-most-once
+        // semantics of the official clients. Publishes made while
+        // reconnecting are preserved separately in pending_buffer.
+        self.write_buffer.reset();
+
         // Reset ping/pong counters for fresh connection
         self.outgoing_pings = 0;
         self.incoming_pongs = 0;
@@ -1134,24 +1154,36 @@ pub const Connection = struct {
         if (self.status == .reconnecting) {
             was_reconnect = true;
         }
-        self.status = .connected;
-        self.status_cond.broadcast(self.io);
         self.mutex.unlock(self.io);
+
+        // Restore subscriptions while the status is still not `connected`:
+        // publishes keep going to pending_buffer, so the server sees our
+        // interest (including the request/reply inbox) before any buffered
+        // publish. Only then move the pending commands into the live buffer
+        // and flip the status - atomically with respect to publishers, so a
+        // new publish can never overtake a buffered one.
+        try self.resendSubscriptions();
+
+        {
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.pending_buffer.moveToBuffer(&self.write_buffer);
+            self.status = .connected;
+            self.status_cond.broadcast(self.io);
+        }
 
         attempts.* = 0;
 
         log.info("Connected successfully to {s}", .{server.parsed_url.full_url});
 
-        // Invoke reconnected callback if this is a reconnection
+        // Invoke reconnected callback last, so it observes a connection with
+        // subscriptions restored and buffered publishes already queued ahead
+        // of anything it sends (the flusher writes them out asynchronously).
         if (was_reconnect) {
             if (self.options.callbacks.reconnected_cb) |cb| {
                 cb(self);
             }
         }
-
-        try self.resendSubscriptions();
-
-        try self.pending_buffer.moveToBuffer(&self.write_buffer);
 
         try exit_signal.event.wait(self.io);
 
@@ -1705,14 +1737,17 @@ pub const Connection = struct {
         var to_remove = ArrayList(u64).empty;
         defer to_remove.deinit(self.allocator);
 
+        // Use a local arena rather than the shared scratch arena: scratch is
+        // guarded by the connection mutex, which is not held here, and
+        // publishes may use it concurrently during reconnection.
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
         {
             self.subs_mutex.lockUncancelable(self.io);
             defer self.subs_mutex.unlock(self.io);
 
-            const allocator = self.scratch.allocator();
-            defer self.resetScratch();
-
-            var buffer: std.Io.Writer.Allocating = .init(allocator);
+            var buffer: std.Io.Writer.Allocating = .init(arena.allocator());
             defer buffer.deinit();
 
             var iter = self.subscriptions.iterator();
