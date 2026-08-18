@@ -60,6 +60,14 @@ pub const Subscription = struct {
     pending_msgs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     pending_bytes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
+    // Slow-consumer protection: when either pending limit is exceeded,
+    // incoming messages for this subscription are dropped and counted
+    // (0 = unlimited). Defaults match nats.go.
+    pending_msgs_limit: std.atomic.Value(u32) = std.atomic.Value(u32).init(default_pending_msgs_limit),
+    pending_bytes_limit: std.atomic.Value(u64) = std.atomic.Value(u64).init(default_pending_bytes_limit),
+    dropped_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    slow_consumer: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
     // Autounsubscribe state
     max_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0), // 0 means no limit
     delivered_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -69,6 +77,10 @@ pub const Subscription = struct {
     drain_complete: xsync.Event = .init,
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
+
+    // Default pending limits, matching nats.go.
+    pub const default_pending_msgs_limit: u32 = 500_000;
+    pub const default_pending_bytes_limit: u64 = 64 * 1024 * 1024;
 
     pub fn create(nc: *Connection, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
         const sub = try nc.allocator.create(Subscription);
@@ -198,6 +210,20 @@ pub const Subscription = struct {
         self.messages.deinit();
 
         self.nc.allocator.destroy(self);
+    }
+
+    /// Set the pending limits for this subscription (0 = unlimited).
+    /// Messages arriving while a limit is exceeded are dropped and counted
+    /// in `dropped()`, and the connection's error callback is notified.
+    pub fn setPendingLimits(self: *Subscription, msgs_limit: u32, bytes_limit: u64) void {
+        self.pending_msgs_limit.store(msgs_limit, .release);
+        self.pending_bytes_limit.store(bytes_limit, .release);
+    }
+
+    /// Number of known messages dropped for this subscription because a
+    /// pending limit was exceeded (or a message could not be enqueued).
+    pub fn dropped(self: *const Subscription) u64 {
+        return self.dropped_msgs.load(.acquire);
     }
 
     pub fn retain(self: *Subscription) void {

@@ -139,3 +139,80 @@ test "pending_msgs counter async subscription" {
     const expected_bytes = msg1_data.len + msg2_data.len + msg3_data.len;
     try std.testing.expect(total_bytes_processed.load(.acquire) == expected_bytes);
 }
+
+const SlowConsumerTracker = struct {
+    var error_count: std.atomic.Value(u32) = .init(0);
+
+    fn errorCallback(_: *nats.Connection, _: []const u8) void {
+        _ = error_count.fetchAdd(1, .monotonic);
+    }
+};
+
+test "slow consumer drops messages over the pending message limit" {
+    const io = std.testing.io;
+
+    SlowConsumerTracker.error_count.store(0, .monotonic);
+
+    var conn = try utils.createConnection(io, .node1, .{
+        .callbacks = .{ .error_cb = SlowConsumerTracker.errorCallback },
+    });
+    defer utils.closeConnection(conn);
+
+    const sub = try conn.subscribeSync("test.slowconsumer.msgs");
+    defer sub.deinit();
+    sub.setPendingLimits(2, 0);
+
+    for (0..5) |_| {
+        try conn.publish("test.slowconsumer.msgs", "payload");
+    }
+    try conn.flush();
+
+    // All five messages were processed by the reader before flush returned:
+    // two delivered, three dropped, one slow-consumer episode reported.
+    try std.testing.expectEqual(@as(u32, 2), sub.pending_msgs.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 3), sub.dropped());
+    try std.testing.expectEqual(@as(u32, 1), SlowConsumerTracker.error_count.load(.monotonic));
+
+    // Consuming ends the episode; new messages are delivered again.
+    for (0..2) |_| {
+        const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+        msg.deinit();
+    }
+
+    try conn.publish("test.slowconsumer.msgs", "after");
+    try conn.flush();
+
+    const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    defer msg.deinit();
+    try std.testing.expectEqualStrings("after", msg.data);
+
+    // A second overflow is a new episode with its own callback.
+    for (0..5) |_| {
+        try conn.publish("test.slowconsumer.msgs", "payload");
+    }
+    try conn.flush();
+
+    try std.testing.expectEqual(@as(u32, 2), SlowConsumerTracker.error_count.load(.monotonic));
+    try std.testing.expect(sub.dropped() > 3);
+}
+
+test "slow consumer drops messages over the pending bytes limit" {
+    const io = std.testing.io;
+
+    var conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    const sub = try conn.subscribeSync("test.slowconsumer.bytes");
+    defer sub.deinit();
+    sub.setPendingLimits(0, 10);
+
+    // 8 bytes fit; the second and third message would exceed 10 bytes.
+    for (0..3) |_| {
+        try conn.publish("test.slowconsumer.bytes", "8bytes!!");
+    }
+    try conn.flush();
+
+    try std.testing.expectEqual(@as(u32, 1), sub.pending_msgs.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 8), sub.pending_bytes.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), sub.dropped());
+}
