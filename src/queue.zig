@@ -309,11 +309,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 return PushError.Closed;
             }
 
-            // Soft-limited queues only meter bulk appends (appendMany);
-            // single items and slices are small control data.
-            if (!self.soft_limit) {
-                try self.reserveSpaceLocked(1);
-            }
+            try self.reserveSpaceLocked(1);
 
             const chunk = try self.ensureWritableChunk();
             const success = chunk.pushItem(item);
@@ -329,6 +325,18 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
         /// Push multiple items (fiber-safe, cancelable)
         pub fn pushSlice(self: *Self, items: []const T) (Io.Cancelable || PushError)!void {
+            return self.pushSliceInner(items, true);
+        }
+
+        /// Push multiple items bypassing any size limit. For protocol
+        /// control data that must never be refused once the caller has
+        /// decided it should be sent (PING/PONG/CONNECT/(UN)SUB and
+        /// subscription restoration).
+        pub fn pushSliceUnmetered(self: *Self, items: []const T) (Io.Cancelable || PushError)!void {
+            return self.pushSliceInner(items, false);
+        }
+
+        fn pushSliceInner(self: *Self, items: []const T, metered: bool) (Io.Cancelable || PushError)!void {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
 
@@ -336,8 +344,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 return PushError.Closed;
             }
 
-            // See push: control-sized appends bypass a soft limit.
-            if (!self.soft_limit) {
+            if (metered) {
                 try self.reserveSpaceLocked(items.len);
             }
 
@@ -735,6 +742,13 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
         /// Get readable byte slice
         pub fn tryGetSlice(self: *Self) ?Queue.View {
             return self.queue.tryGetSlice();
+        }
+
+        /// Append protocol control data, bypassing any soft limit: control
+        /// frames and connection-restoration data must never be refused
+        /// once the connection state says they should be sent.
+        pub fn appendControl(self: *Self, data: []const u8) (Io.Cancelable || PushError)!void {
+            return self.queue.pushSliceUnmetered(data);
         }
 
         /// Get readable byte slice with timeout
@@ -1511,8 +1525,11 @@ test "soft limit meters bulk appends with NoSpace" {
     // Over the high-water mark: bulk appends are rejected with NoSpace...
     try std.testing.expectError(PushError.NoSpace, buffer.appendMany(&.{"x"}));
 
-    // ...but control-sized appends always go through (overshoot allowed).
-    try buffer.append("PING");
+    // ...and metered single appends as well...
+    try std.testing.expectError(PushError.NoSpace, buffer.append("PING"));
+
+    // ...but control appends always go through (overshoot allowed).
+    try buffer.appendControl("PING");
     try std.testing.expectEqual(@as(usize, 12), buffer.queue.getItemsAvailable());
 
     // Drain completely; a lone bulk append larger than the whole limit is

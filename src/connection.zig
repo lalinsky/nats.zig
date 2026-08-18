@@ -628,16 +628,18 @@ pub const Connection = struct {
     }
 
     fn publishMsgInternal(self: *Self, msg: *Message, reply_override: ?[]const u8) !void {
+        var frame_size: usize = 0;
         while (true) {
-            return self.publishMsgAttempt(msg, reply_override) catch |err| switch (err) {
+            return self.publishMsgAttempt(msg, reply_override, &frame_size) catch |err| switch (err) {
                 error.NoSpace => {
                     // The live write buffer is over its high-water mark.
                     // Wait for the flusher outside of Connection.mutex, so
                     // reconnect and close can always proceed (both wake the
                     // waiters), then retry with the connection state
                     // re-checked (it may route to the pending buffer now).
-                    const estimated_size = msg.data.len + 512;
-                    self.write_buffer.queue.waitForSpace(estimated_size) catch |wait_err| switch (wait_err) {
+                    // The failed attempt reported the exact frame size, so
+                    // the wait cannot return before the frame actually fits.
+                    self.write_buffer.queue.waitForSpace(frame_size) catch |wait_err| switch (wait_err) {
                         error.Closed => return ConnectionError.ConnectionClosed,
                         error.Canceled => |e| return e,
                     };
@@ -648,7 +650,7 @@ pub const Connection = struct {
         }
     }
 
-    fn publishMsgAttempt(self: *Self, msg: *Message, reply_override: ?[]const u8) !void {
+    fn publishMsgAttempt(self: *Self, msg: *Message, reply_override: ?[]const u8, frame_size: *usize) !void {
         if (self.drain_state.load(.acquire) == .draining_pubs) {
             return error.DrainInProgress;
         }
@@ -708,6 +710,7 @@ pub const Connection = struct {
 
         // Append control+headers, data, and trailer without copying msg.data
         const slices = &[_][]const u8{ buffer_writer.buffered(), msg.data, "\r\n" };
+        frame_size.* = buffer_writer.buffered().len + msg.data.len + 2;
 
         // Published messages go to pending_buffer during reconnection, otherwise write_buffer
         if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
@@ -748,7 +751,7 @@ pub const Connection = struct {
         } else {
             try buffer.writer.print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
         }
-        try self.write_buffer.append(buffer.written());
+        try self.write_buffer.appendControl(buffer.written());
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
@@ -835,7 +838,7 @@ pub const Connection = struct {
         if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
             try self.pending_buffer.append(writer.buffered());
         } else {
-            try self.write_buffer.append(writer.buffered());
+            try self.write_buffer.appendControl(writer.buffered());
         }
     }
 
@@ -1062,6 +1065,13 @@ pub const Connection = struct {
 
                 self.status = .reconnecting;
                 self.status_cond.broadcast(self.io);
+
+                // Discard whatever was buffered for the dead socket. This
+                // also wakes publishers blocked in waitForSpace, so they
+                // re-check the status and reroute into pending_buffer
+                // instead of waiting out the whole reconnect. The reader
+                // and flusher tasks are already joined at this point.
+                self.write_buffer.reset();
 
                 if (self.options.callbacks.disconnected_cb) |cb| {
                     callback = cb;
@@ -1563,7 +1573,7 @@ pub const Connection = struct {
         try buffer.writer.writeAll("PING\r\n");
 
         // Send via buffer (mutex already held)
-        try self.write_buffer.append(buffer.written());
+        try self.write_buffer.appendControl(buffer.written());
 
         log.debug("Sent CONNECT+PING during handshake", .{});
     }
@@ -1733,7 +1743,7 @@ pub const Connection = struct {
     }
 
     fn sendPing(self: *Self, comptime lock: bool) !u64 {
-        try self.write_buffer.append("PING\r\n");
+        try self.write_buffer.appendControl("PING\r\n");
 
         if (lock) try self.mutex.lock(self.io);
         defer if (lock) self.mutex.unlock(self.io);
@@ -1795,7 +1805,7 @@ pub const Connection = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
-        try self.write_buffer.append("PONG\r\n");
+        try self.write_buffer.appendControl("PONG\r\n");
     }
 
     fn calculateReconnectDelay(self: *Self, attempts: u32) Io.Duration {
@@ -1873,7 +1883,7 @@ pub const Connection = struct {
 
             // Send all subscription commands via write buffer
             if (buffer.written().len > 0) {
-                try self.write_buffer.append(buffer.written());
+                try self.write_buffer.appendControl(buffer.written());
             }
         }
 
