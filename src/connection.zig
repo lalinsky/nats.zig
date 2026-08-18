@@ -751,7 +751,7 @@ pub const Connection = struct {
         } else {
             try buffer.writer.print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
         }
-        try self.write_buffer.appendControl(buffer.written());
+        try self.write_buffer.appendUnmetered(buffer.written());
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
@@ -838,7 +838,7 @@ pub const Connection = struct {
         if (self.status == .reconnecting and self.options.reconnect.allow_reconnect) {
             try self.pending_buffer.append(writer.buffered());
         } else {
-            try self.write_buffer.appendControl(writer.buffered());
+            try self.write_buffer.appendUnmetered(writer.buffered());
         }
     }
 
@@ -1573,7 +1573,7 @@ pub const Connection = struct {
         try buffer.writer.writeAll("PING\r\n");
 
         // Send via buffer (mutex already held)
-        try self.write_buffer.appendControl(buffer.written());
+        try self.write_buffer.appendUnmetered(buffer.written());
 
         log.debug("Sent CONNECT+PING during handshake", .{});
     }
@@ -1743,7 +1743,7 @@ pub const Connection = struct {
     }
 
     fn sendPing(self: *Self, comptime lock: bool) !u64 {
-        try self.write_buffer.appendControl("PING\r\n");
+        try self.write_buffer.appendUnmetered("PING\r\n");
 
         if (lock) try self.mutex.lock(self.io);
         defer if (lock) self.mutex.unlock(self.io);
@@ -1805,7 +1805,7 @@ pub const Connection = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
-        try self.write_buffer.appendControl("PONG\r\n");
+        try self.write_buffer.appendUnmetered("PONG\r\n");
     }
 
     fn calculateReconnectDelay(self: *Self, attempts: u32) Io.Duration {
@@ -1883,7 +1883,7 @@ pub const Connection = struct {
 
             // Send all subscription commands via write buffer
             if (buffer.written().len > 0) {
-                try self.write_buffer.appendControl(buffer.written());
+                try self.write_buffer.appendUnmetered(buffer.written());
             }
         }
 
