@@ -520,6 +520,10 @@ pub const Connection = struct {
             return;
         }
 
+        // A terminal reconnect failure already reported closure through
+        // failTerminally; don't fire the closed callback a second time.
+        const already_reported = self.status == .connection_failed;
+
         // Mark the connection as permanently closed
         self.status = .closed;
         self.status_cond.broadcast(self.io);
@@ -532,8 +536,10 @@ pub const Connection = struct {
         self.pong_condition.broadcast(self.io);
 
         // Make sure we invoke the closed callback
-        if (self.options.callbacks.closed_cb) |cb| {
-            callback = cb;
+        if (!already_reported) {
+            if (self.options.callbacks.closed_cb) |cb| {
+                callback = cb;
+            }
         }
     }
 
@@ -905,7 +911,7 @@ pub const Connection = struct {
         defer self.mutex.unlock(self.io);
 
         while (self.status != .connected) {
-            if (self.status == .closed) {
+            if (self.status == .closed or self.status == .connection_failed) {
                 log.debug("Flush skipped, no longer connected", .{});
                 return error.ConnectionClosed;
             }
@@ -1045,6 +1051,15 @@ pub const Connection = struct {
 
         var attempts: u32 = 0;
 
+        // Number of explicitly configured servers; the pool itself shrinks
+        // as servers exceed max_reconnect, so the initial-connect iteration
+        // must not compare against the live size.
+        const initial_pool_size = blk: {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            break :blk self.server_pool.getSize();
+        };
+
         while (true) {
             var conn_err: ?anyerror = null;
             self.runConnection(&attempts) catch |err| {
@@ -1076,12 +1091,12 @@ pub const Connection = struct {
                 }
 
                 if (self.status == .connecting) {
-                    // Initial connection: try each server in the pool once
-                    // (selectNextServer rotates through it), then report the
-                    // failure through connect(). No callbacks fire here; the
-                    // connection was never established.
+                    // Initial connection: try each configured server once
+                    // (selectNextServer rotates through the pool), then
+                    // report the failure through connect(). No callbacks
+                    // fire here; the connection was never established.
                     attempts += 1;
-                    if (pool_exhausted or attempts >= self.server_pool.getSize()) {
+                    if (pool_exhausted or attempts >= initial_pool_size) {
                         return;
                     }
                     continue;
@@ -1090,6 +1105,11 @@ pub const Connection = struct {
                 if (pool_exhausted or !self.options.reconnect.allow_reconnect) {
                     // Terminal; handled outside the mutex below.
                 } else {
+                    // The disconnected callback fires only when an
+                    // established connection is lost, not after every
+                    // failed reconnection attempt.
+                    const was_established = self.status == .connected;
+
                     self.status = .reconnecting;
                     self.status_cond.broadcast(self.io);
 
@@ -1100,8 +1120,10 @@ pub const Connection = struct {
                     // and flusher tasks are already joined at this point.
                     self.write_buffer.reset();
 
-                    if (self.options.callbacks.disconnected_cb) |cb| {
-                        callback = cb;
+                    if (was_established) {
+                        if (self.options.callbacks.disconnected_cb) |cb| {
+                            callback = cb;
+                        }
                     }
                 }
             }
