@@ -744,10 +744,11 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
             return self.queue.tryGetSlice();
         }
 
-        /// Append protocol control data, bypassing any soft limit: control
-        /// frames and connection-restoration data must never be refused
-        /// once the connection state says they should be sent.
-        pub fn appendControl(self: *Self, data: []const u8) (Io.Cancelable || PushError)!void {
+        /// Append bypassing any soft limit. For data that must never be
+        /// refused once the caller has decided it should be sent (the
+        /// connection uses this for protocol control frames and
+        /// subscription restoration).
+        pub fn appendUnmetered(self: *Self, data: []const u8) (Io.Cancelable || PushError)!void {
             return self.queue.pushSliceUnmetered(data);
         }
 
@@ -1528,8 +1529,8 @@ test "soft limit meters bulk appends with NoSpace" {
     // ...and metered single appends as well...
     try std.testing.expectError(PushError.NoSpace, buffer.append("PING"));
 
-    // ...but control appends always go through (overshoot allowed).
-    try buffer.appendControl("PING");
+    // ...but unmetered appends always go through (overshoot allowed).
+    try buffer.appendUnmetered("PING");
     try std.testing.expectEqual(@as(usize, 12), buffer.queue.getItemsAvailable());
 
     // Drain completely; a lone bulk append larger than the whole limit is
