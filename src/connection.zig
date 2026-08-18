@@ -572,7 +572,6 @@ pub const Connection = struct {
                 callback = cb;
             }
         }
-
     }
 
     pub fn getStatus(self: *Self) ConnectionStatus {
