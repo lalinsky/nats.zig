@@ -2233,7 +2233,14 @@ pub const Connection = struct {
 
         self.drain_ping_id = self.sendPing(false) catch |err| {
             if (err == error.Canceled) return error.Canceled;
-            log.err("Failed to send drain ping: {}", .{err});
+            // If a tiny control frame cannot even be appended, the write
+            // path is broken and there is no retry opportunity: publishes
+            // are rejected while draining, so no data will arrive to wake
+            // the parked flusher. Complete the drain instead of leaving
+            // waitForDrainCompletion blocked; the flush this ping was
+            // meant to confirm cannot succeed anyway.
+            log.err("Failed to send drain ping, completing drain: {}", .{err});
+            self.notifyPublishDrainComplete() catch {};
             return;
         };
     }
