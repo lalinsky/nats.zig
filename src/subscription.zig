@@ -214,14 +214,15 @@ pub const Subscription = struct {
 
     /// Set the pending limits for this subscription (0 = unlimited).
     /// Messages arriving while a limit is exceeded are dropped and counted
-    /// in `dropped()`, and the connection's error callback is notified.
+    /// in `dropped()`, and the connection's `slow_consumer_cb` is notified
+    /// once per slow-consumer episode.
     pub fn setPendingLimits(self: *Subscription, msgs_limit: u32, bytes_limit: u64) void {
         self.pending_msgs_limit.store(msgs_limit, .release);
         self.pending_bytes_limit.store(bytes_limit, .release);
     }
 
-    /// Number of known messages dropped for this subscription because a
-    /// pending limit was exceeded (or a message could not be enqueued).
+    /// Number of messages dropped for this subscription because a pending
+    /// limit was exceeded.
     pub fn dropped(self: *const Subscription) u64 {
         return self.dropped_msgs.load(.acquire);
     }
