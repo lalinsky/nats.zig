@@ -434,6 +434,10 @@ pub const Connection = struct {
 
     pub fn connect(self: *Self, url: []const u8) !void {
         errdefer self.close();
+        // Registered before the mutex-unlock defer below, so error unwinding
+        // releases the mutex before synchronously joining the manager task.
+        var manager_started = false;
+        errdefer if (manager_started) self.manager_task.cancel(self.io);
 
         try io_util.ensureAwakeClock(self.io);
 
@@ -491,7 +495,7 @@ pub const Connection = struct {
         if (added == 0) return error.InvalidUrl;
 
         try self.manager_task.concurrent(self.io, managerTask, .{self});
-        errdefer self.manager_task.cancel(self.io);
+        manager_started = true;
 
         while (true) {
             if (self.status == .closed) return error.ConnectionClosed;
@@ -611,11 +615,11 @@ pub const Connection = struct {
                 log.info("Already reconnecting, ignoring manual reconnect request", .{});
                 return ConnectionError.AlreadyReconnecting;
             },
-            .initialized, .closed => {
+            .initialized, .closed, .connection_failed => {
                 log.warn("Cannot reconnect: connection is closed", .{});
                 return ConnectionError.ConnectionClosed;
             },
-            .connecting, .connection_failed => {
+            .connecting => {
                 log.warn("Cannot reconnect: initial connection not yet established", .{});
                 return ConnectionError.NotConnected;
             },
@@ -932,6 +936,7 @@ pub const Connection = struct {
 
         if (self.subscriptions.fetchRemove(sid)) |kv| {
             log.debug("Removed subscription {d} ({s}) from connection", .{ sid, kv.value.subject });
+            kv.value.closeFromConnection();
             // Release connection's reference to the subscription
             kv.value.release();
         }
@@ -2382,12 +2387,32 @@ test "terminal connection failure wakes all operation waiters exactly once" {
     try std.testing.expectEqual(Result.connection_closed, subscription_drain_result.load(.acquire));
     try std.testing.expectEqual(@as(u32, 1), CallbackCounter.disconnected.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 1), CallbackCounter.closed.load(.monotonic));
+    try std.testing.expectError(error.ConnectionClosed, connection.reconnect());
 
     // Repeated terminal paths must not repeat callbacks.
     connection.failTerminally(true);
     connection.close();
     try std.testing.expectEqual(@as(u32, 1), CallbackCounter.disconnected.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 1), CallbackCounter.closed.load(.monotonic));
+}
+
+test "detaching a subscription wakes its drain waiter" {
+    const io = std.testing.io;
+    var connection = Connection.init(std.testing.allocator, io, .{});
+    defer connection.deinit();
+    connection.status = .connected;
+
+    const subscription = try connection.subscribeSync("lifetime.detached-drain");
+    defer subscription.deinit();
+
+    // Keep drain pending, then detach the subscription from the connection's
+    // active table. It must become terminal even though closeWaiters can no
+    // longer discover it through that table.
+    subscription_mod.incrementPending(subscription, 0);
+    subscription.drain();
+    connection.removeSubscriptionInternal(subscription.sid);
+
+    try std.testing.expectError(error.ConnectionClosed, subscription.waitForDrainCompletion(.none));
 }
 
 test "close is reentrant from manager callbacks" {
@@ -2449,6 +2474,7 @@ test "close is reentrant from manager callbacks" {
 
     // reconnected_cb is also invoked directly by manager_task.
     {
+        CallbackCounter.closed.store(0, .monotonic);
         var connection = Connection.init(std.testing.allocator, io, .{
             .callbacks = .{
                 .reconnected_cb = CallbackCounter.onReconnected,
@@ -2463,7 +2489,7 @@ test "close is reentrant from manager callbacks" {
 
         try std.testing.expectEqual(ConnectionStatus.closed, connection.getStatus());
         try std.testing.expectEqual(@as(u32, 1), CallbackCounter.reconnected.load(.monotonic));
-        try std.testing.expectEqual(@as(u32, 2), CallbackCounter.closed.load(.monotonic));
+        try std.testing.expectEqual(@as(u32, 1), CallbackCounter.closed.load(.monotonic));
     }
 }
 

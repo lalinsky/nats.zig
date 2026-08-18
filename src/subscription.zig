@@ -437,15 +437,15 @@ pub const Subscription = struct {
         // Increment delivered counter with proper memory ordering
         const delivered = self.delivered_msgs.fetchAdd(1, .acq_rel) + 1;
 
+        // Decrement pending counters when message is consumed
+        decrementPending(self, msg.data.len);
+
         // Check if we've reached the autounsubscribe limit
         const max_limit = self.max_msgs.load(.acquire);
         if (max_limit > 0 and delivered >= max_limit) {
             // Remove subscription from connection
             self.nc.removeSubscriptionInternal(self.sid);
         }
-
-        // Decrement pending counters when message is consumed
-        decrementPending(self, msg.data.len);
     }
 };
 

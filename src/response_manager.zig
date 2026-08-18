@@ -347,6 +347,9 @@ pub const ResponseManager = struct {
 
             if (self.is_closed) {
                 cleanup = true;
+                if (msgs.len > 0) {
+                    return msgs;
+                }
                 return error.ConnectionClosed;
             }
 
@@ -495,4 +498,43 @@ test "multi-response request creation and timeout" {
     const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } };
     const result = manager.waitForMultiResponse(handle, timeout, .{});
     try testing.expectError(error.Timeout, result);
+}
+
+test "multi-response returns collected messages when manager closes" {
+    const testing = std.testing;
+    const CloseAfterFirst = struct {
+        var collected: xsync.Event = .init;
+
+        fn keepCollecting(_: *Message) bool {
+            collected.set(std.testing.io);
+            return true;
+        }
+
+        fn close(manager: *ResponseManager) void {
+            collected.wait(std.testing.io) catch return;
+            manager.close();
+        }
+    };
+
+    const io = std.testing.io;
+    var manager = ResponseManager.init(std.testing.allocator, io);
+    defer manager.deinit();
+
+    const handle = try manager.createMultiRequest();
+    defer manager.cleanupRequest(handle);
+
+    var msg = Message.init(std.testing.allocator);
+    msg.subject = "0";
+    msg.data = "partial";
+    try manager.responseHandler(&msg);
+
+    var closer = try io.concurrent(CloseAfterFirst.close, .{&manager});
+    defer closer.cancel(io);
+
+    var messages = try manager.waitForMultiResponse(handle, .none, .{ .sentinelFn = CloseAfterFirst.keepCollecting });
+    closer.await(io);
+    defer while (messages.pop()) |returned| returned.deinit();
+
+    try testing.expectEqual(@as(usize, 1), messages.len);
+    try testing.expectEqualStrings("partial", messages.head.?.data);
 }
