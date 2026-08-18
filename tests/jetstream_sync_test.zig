@@ -160,3 +160,57 @@ test "JetStream synchronous queue subscription basic functionality" {
     // Verify message content
     try testing.expectEqualStrings(test_message, js_msg.msg.data);
 }
+
+test "JetStream pending limits remain bounded and track large ack windows" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    const stream_name = try utils.generateUniqueStreamName(std.testing.allocator);
+    defer std.testing.allocator.free(stream_name);
+    const subject_filter = try utils.generateSubjectFromStreamName(std.testing.allocator, stream_name);
+    defer std.testing.allocator.free(subject_filter);
+
+    var stream_info = try js.addStream(.{
+        .name = stream_name,
+        .subjects = &.{subject_filter},
+    });
+    defer stream_info.deinit();
+
+    // AckNone has no redelivery safety, but it must remain bounded: otherwise
+    // an unread subscription recreates the unbounded-memory problem.
+    var no_ack_sub = try js.subscribeSync(subject_filter, .{
+        .stream = stream_name,
+        .config = .{ .ack_policy = .none, .max_ack_pending = 0 },
+    });
+    defer no_ack_sub.deinit();
+
+    try std.testing.expectEqual(nats.Subscription.default_pending_msgs_limit, no_ack_sub.subscription.pending_msgs_limit.load(.acquire));
+    try std.testing.expectEqual(nats.Subscription.default_pending_bytes_limit, no_ack_sub.subscription.pending_bytes_limit.load(.acquire));
+
+    // Match nats.go by raising the client message limit when the server's
+    // max-ack-pending window exceeds the default. This reduces avoidable
+    // client-side drops without claiming that MaxAckPending guarantees none.
+    var big_window_sub = try js.subscribeSync(subject_filter, .{
+        .stream = stream_name,
+        .durable = "big_window",
+        .config = .{ .ack_policy = .explicit, .max_ack_pending = 600_000 },
+    });
+    defer big_window_sub.deinit();
+
+    try std.testing.expectEqual(@as(u32, 600_000), big_window_sub.subscription.pending_msgs_limit.load(.acquire));
+    try std.testing.expect(big_window_sub.subscription.pending_bytes_limit.load(.acquire) >= 600_000 * 1024 * 1024);
+
+    // A default-sized ack window keeps the default limits.
+    var default_sub = try js.subscribeSync(subject_filter, .{
+        .stream = stream_name,
+        .durable = "default_window",
+        .config = .{ .ack_policy = .explicit },
+    });
+    defer default_sub.deinit();
+
+    try std.testing.expectEqual(nats.Subscription.default_pending_msgs_limit, default_sub.subscription.pending_msgs_limit.load(.acquire));
+}
