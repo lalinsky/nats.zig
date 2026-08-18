@@ -127,8 +127,8 @@ pub const Url = struct {
             return UrlError.InvalidUrl;
         }
 
-        // Only accept "nats" scheme
-        if (!std.mem.eql(u8, components.scheme, "nats")) {
+        // Only accept "nats" and "tls" schemes
+        if (!std.mem.eql(u8, components.scheme, "nats") and !std.mem.eql(u8, components.scheme, "tls")) {
             return UrlError.InvalidUrlScheme;
         }
 
@@ -190,6 +190,19 @@ test "url parsing with scheme" {
     try std.testing.expectEqualStrings("nats", parsed_url.scheme);
     try std.testing.expectEqualStrings("localhost", parsed_url.host);
     try std.testing.expectEqual(@as(u16, 4223), parsed_url.port);
+}
+
+test "url parsing with tls scheme" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed_url = try Url.parse(allocator, "tls://localhost:4443");
+    defer parsed_url.deinit();
+
+    try std.testing.expectEqualStrings("tls", parsed_url.scheme);
+    try std.testing.expectEqualStrings("localhost", parsed_url.host);
+    try std.testing.expectEqual(@as(u16, 4443), parsed_url.port);
 }
 
 test "url parsing with user info" {

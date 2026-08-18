@@ -290,6 +290,37 @@ error twice in a row, the client stops reconnecting to it instead of
 exhausting the reconnect budget; reconnect-time authentication errors are
 also reported through the `error_cb` callback.
 
+### TLS
+
+TLS is enabled with the `tls://` URL scheme, or explicitly through the
+connection options (via [tls.zig](https://github.com/ianic/tls.zig)):
+
+```zig
+// tls:// scheme, server certificate verified against the system trust store
+try nc.connect("tls://demo.nats.io:4443");
+
+// Custom CA bundle; the file is re-read on every (re)connect,
+// so rotated certificates are picked up automatically
+var nc2 = nats.Connection.init(init.gpa, init.io, .{
+    .tls = .{ .ca_file = "/path/to/ca.pem" },
+});
+
+// For servers running in handshake-first mode (TLS before the server INFO)
+var nc3 = nats.Connection.init(init.gpa, init.io, .{
+    .tls = .{ .ca_file = "/path/to/ca.pem", .handshake_first = true },
+});
+```
+
+By default, the upgrade follows the NATS protocol: the server INFO arrives
+in plaintext, the TLS handshake runs, and only then is CONNECT sent - so
+credentials never touch the socket unencrypted. A server that requires TLS
+is rejected with `error.SecureConnectionRequired` when the client has no
+TLS configured.
+
+TLS support can be compiled out with `-Duse_tls=false`, in which case TLS
+connections fail with `error.TlsNotConfigured` and the tls.zig dependency
+is not fetched.
+
 ## Selecting the I/O Backend
 
 The examples above use `init.io`, the threaded I/O implementation from the stdlib. This is suitable for development

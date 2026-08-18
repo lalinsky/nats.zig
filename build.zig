@@ -15,6 +15,8 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const use_tls = b.option(bool, "use_tls", "Build with TLS support via tls.zig") orelse true;
+
     // Parse build.zig.zon to extract version information
     const zon_content = @embedFile("build.zig.zon");
     const BuildZon = struct {
@@ -44,6 +46,7 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "version", parsed_zon.version);
     options.addOption([]const u8, "name", parsed_zon.name orelse "nats.zig");
     options.addOption([]const u8, "lang", "zig");
+    options.addOption(bool, "use_tls", use_tls);
 
     // This creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -58,6 +61,22 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     lib_mod.addImport("xsync", xsync.module("xsync"));
+
+    // TLS support is a lazy dependency: only fetched when `use_tls` is set
+    // (the default). With TLS compiled out, the stub module keeps the code
+    // type-checking and TLS connections fail with error.TlsNotConfigured.
+    if (use_tls) {
+        if (b.lazyDependency("tls", .{
+            .target = target,
+            .optimize = optimize,
+        })) |tls_dep| {
+            lib_mod.addImport("tls", tls_dep.module("tls"));
+        }
+    } else {
+        lib_mod.addAnonymousImport("tls", .{
+            .root_source_file = b.path("src/tls_stub.zig"),
+        });
+    }
 
     // Add build options to the module
     lib_mod.addOptions("build_options", options);

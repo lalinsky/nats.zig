@@ -40,6 +40,11 @@
             .url = "git+https://github.com/lalinsky/xsync.zig?ref=v1.0.0#2ab0801071f1918d799c115542b8121486dc2520",
             .hash = "xsync-1.0.0-CcXcL3DCAQA0FPLdBPhtTB182kN-COorlMw_cabmgHJm",
         },
+        .tls = .{
+            .url = "git+https://github.com/lalinsky/tls.zig#ef6780e5882f008bd5ba938b4e343f4b0b406de5",
+            .hash = "tls-0.1.0-ER2e0ohKBgB7GXQcaJFsyFtv7QKx2tJ462L8iTbsGD46",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",
