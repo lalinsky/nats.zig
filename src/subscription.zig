@@ -60,6 +60,18 @@ pub const Subscription = struct {
     pending_msgs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     pending_bytes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
+    // Slow-consumer protection: when either pending limit is exceeded,
+    // incoming messages for this subscription are dropped and counted
+    // (0 = unlimited). Defaults match nats.go.
+    pending_msgs_limit: std.atomic.Value(u32) = std.atomic.Value(u32).init(default_pending_msgs_limit),
+    pending_bytes_limit: std.atomic.Value(u64) = std.atomic.Value(u64).init(default_pending_bytes_limit),
+    dropped_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    slow_consumer: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    // Armed when a synchronous subscription enters a slow-consumer episode;
+    // consumed by the next synchronous receive. Multiple episodes before a
+    // receive coalesce into one report; dropped_msgs provides the exact count.
+    sc_error_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
     // Autounsubscribe state
     max_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0), // 0 means no limit
     delivered_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -69,6 +81,10 @@ pub const Subscription = struct {
     drain_complete: xsync.Event = .init,
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
+
+    // Default pending limits, matching nats.go.
+    pub const default_pending_msgs_limit: u32 = 500_000;
+    pub const default_pending_bytes_limit: u64 = 64 * 1024 * 1024;
 
     pub fn create(nc: *Connection, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
         const sub = try nc.allocator.create(Subscription);
@@ -200,6 +216,21 @@ pub const Subscription = struct {
         self.nc.allocator.destroy(self);
     }
 
+    /// Set the pending limits for this subscription (0 = unlimited).
+    /// Messages arriving while a limit is exceeded are dropped and counted
+    /// in `dropped()`, and the connection's `slow_consumer_cb` is notified
+    /// once per slow-consumer episode.
+    pub fn setPendingLimits(self: *Subscription, msgs_limit: u32, bytes_limit: u64) void {
+        self.pending_msgs_limit.store(msgs_limit, .release);
+        self.pending_bytes_limit.store(bytes_limit, .release);
+    }
+
+    /// Number of messages dropped for this subscription because a pending
+    /// limit was exceeded.
+    pub fn dropped(self: *const Subscription) u64 {
+        return self.dropped_msgs.load(.acquire);
+    }
+
     pub fn retain(self: *Subscription) void {
         self.ref_counter.incr();
     }
@@ -284,6 +315,11 @@ pub const Subscription = struct {
 
     pub const ReceiveError = Io.Cancelable || error{
         ConnectionClosed,
+        /// One or more messages were dropped for this subscription because a
+        /// pending limit was exceeded. Reports the start of a slow-consumer
+        /// episode; multiple episodes may coalesce if the error is not
+        /// consumed between them. See `dropped()` for exact loss accounting.
+        SlowConsumer,
     };
 
     pub const ReceiveTimeoutError = ReceiveError || Io.Timeout.Error;
@@ -303,6 +339,12 @@ pub const Subscription = struct {
     }
 
     fn nextMsgInternal(self: *Subscription, timeout: Io.Timeout) ReceiveTimeoutError!*Message {
+        // Report dropped messages in-band so synchronous consumers learn
+        // about the loss even without a slow_consumer_cb.
+        if (self.sc_error_pending.swap(false, .acq_rel)) {
+            return error.SlowConsumer;
+        }
+
         // Check if subscription has reached autounsubscribe limit
         const max = self.max_msgs.load(.acquire);
         if (max > 0 and self.delivered_msgs.load(.acquire) >= max) {
