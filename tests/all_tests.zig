@@ -12,6 +12,7 @@ test {
     _ = @import("drain_test.zig");
     _ = @import("core_request_reply_test.zig");
     _ = @import("reconnection_test.zig");
+    _ = @import("reconnect_limits_test.zig");
     _ = @import("keepalive_test.zig");
     _ = @import("jetstream_test.zig");
     _ = @import("jetstream_stream_test.zig");

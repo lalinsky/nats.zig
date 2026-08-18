@@ -459,7 +459,17 @@ pub const Connection = struct {
         self.status = .connecting;
         self.status_cond.broadcast(self.io);
 
-        _ = try self.server_pool.addServer(url, false);
+        // The URL may be a comma-separated list of servers; the initial
+        // connection tries them in order until one succeeds.
+        var added: usize = 0;
+        var url_it = std.mem.splitScalar(u8, url, ',');
+        while (url_it.next()) |part| {
+            const trimmed = std.mem.trim(u8, part, " \t");
+            if (trimmed.len == 0) continue;
+            _ = try self.server_pool.addServer(trimmed, false);
+            added += 1;
+        }
+        if (added == 0) return error.InvalidUrl;
 
         try self.manager_task.concurrent(self.io, managerTask, .{self});
         errdefer self.manager_task.cancel(self.io);
@@ -1042,10 +1052,16 @@ pub const Connection = struct {
                     return err;
                 }
                 if (err == error.ShouldClose) {
+                    // Deliberate give-up (e.g. repeated auth failures):
+                    // terminal, the disconnected callback already fired
+                    // when reconnection started.
+                    self.failTerminally(false);
                     return;
                 }
                 conn_err = err;
             };
+
+            const pool_exhausted = if (conn_err) |err| err == error.NoServerAvailable else false;
 
             var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
 
@@ -1060,22 +1076,50 @@ pub const Connection = struct {
                 }
 
                 if (self.status == .connecting) {
-                    return;
+                    // Initial connection: try each server in the pool once
+                    // (selectNextServer rotates through it), then report the
+                    // failure through connect(). No callbacks fire here; the
+                    // connection was never established.
+                    attempts += 1;
+                    if (pool_exhausted or attempts >= self.server_pool.getSize()) {
+                        return;
+                    }
+                    continue;
                 }
 
-                self.status = .reconnecting;
-                self.status_cond.broadcast(self.io);
+                if (pool_exhausted or !self.options.reconnect.allow_reconnect) {
+                    // Terminal; handled outside the mutex below.
+                } else {
+                    self.status = .reconnecting;
+                    self.status_cond.broadcast(self.io);
 
-                // Discard whatever was buffered for the dead socket. This
-                // also wakes publishers blocked in waitForSpace, so they
-                // re-check the status and reroute into pending_buffer
-                // instead of waiting out the whole reconnect. The reader
-                // and flusher tasks are already joined at this point.
-                self.write_buffer.reset();
+                    // Discard whatever was buffered for the dead socket. This
+                    // also wakes publishers blocked in waitForSpace, so they
+                    // re-check the status and reroute into pending_buffer
+                    // instead of waiting out the whole reconnect. The reader
+                    // and flusher tasks are already joined at this point.
+                    self.write_buffer.reset();
 
-                if (self.options.callbacks.disconnected_cb) |cb| {
-                    callback = cb;
+                    if (self.options.callbacks.disconnected_cb) |cb| {
+                        callback = cb;
+                    }
                 }
+            }
+
+            if (pool_exhausted) {
+                // Every server exceeded max_reconnect and was removed from
+                // the pool. The disconnected callback fired when
+                // reconnection started.
+                log.warn("No servers left to reconnect to, giving up", .{});
+                self.failTerminally(false);
+                return;
+            }
+            if (!self.options.reconnect.allow_reconnect) {
+                // Fresh connection loss with reconnection disabled: report
+                // both the disconnect and the final closed state.
+                log.info("Reconnection is disabled, closing connection", .{});
+                self.failTerminally(true);
+                return;
             }
 
             if (callback) |cb| cb(self);
@@ -1089,6 +1133,38 @@ pub const Connection = struct {
                 try self.io.sleep(delay, .awake);
             }
         }
+    }
+
+    /// Take the connection to the terminal connection_failed state: no
+    /// further reconnection attempts will be made. Closes the buffers so
+    /// blocked publishers and drain waiters wake up, and fires the
+    /// disconnected (optionally) and closed callbacks, unless the user
+    /// already closed the connection.
+    fn failTerminally(self: *Self, fire_disconnected: bool) void {
+        var disconnected_cb: @TypeOf(self.options.callbacks.disconnected_cb) = null;
+        var closed_cb: @TypeOf(self.options.callbacks.closed_cb) = null;
+
+        {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+
+            if (self.status == .closed) return;
+
+            self.status = .connection_failed;
+            self.status_cond.broadcast(self.io);
+
+            if (fire_disconnected) {
+                disconnected_cb = self.options.callbacks.disconnected_cb;
+            }
+            closed_cb = self.options.callbacks.closed_cb;
+        }
+
+        // Wake anything blocked on the buffers (publishers, flush waiters).
+        self.pending_buffer.close();
+        self.write_buffer.close();
+
+        if (disconnected_cb) |cb| cb(self);
+        if (closed_cb) |cb| cb(self);
     }
 
     fn selectNextServer(self: *Self) !*Server {
@@ -1117,9 +1193,11 @@ pub const Connection = struct {
 
         std.debug.assert(self.status == .connecting or self.status == .reconnecting);
 
-        // Setup connection state
+        // Setup connection state. The reconnect counter is deliberately not
+        // reset here: a server that accepts TCP but fails the NATS handshake
+        // must still count against max_reconnect (the counter is reset after
+        // a successful handshake).
         server.did_connect = true;
-        server.reconnects = 0;
 
         // Reset parser for clean state
         self.parser.reset();
@@ -1195,6 +1273,7 @@ pub const Connection = struct {
             return err;
         };
         server.last_auth_error = null;
+        server.reconnects = 0;
         if (self.status == .reconnecting) {
             was_reconnect = true;
         }
