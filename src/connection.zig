@@ -1366,10 +1366,14 @@ pub const Connection = struct {
     /// with no locks held and the subscription retained.
     fn handleSlowConsumer(self: *Self, sub: *Subscription) void {
         const total_dropped = sub.dropped_msgs.fetchAdd(1, .monotonic) + 1;
-        // Arm the in-band error for synchronous receivers (re-armed by
-        // every drop, so a gap after a consumed error is still reported).
-        sub.sc_error_pending.store(true, .release);
         if (sub.slow_consumer.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+            // Arm the in-band error once when a synchronous subscription
+            // enters a slow-consumer episode. Further drops in the same
+            // episode must not prevent the receiver from draining queued
+            // messages; a successful enqueue ends the episode below.
+            if (sub.handler == null) {
+                sub.sc_error_pending.store(true, .release);
+            }
             log.warn("Slow consumer, messages dropped for subscription {d} ({s})", .{ sub.sid, sub.subject });
             if (self.options.callbacks.slow_consumer_cb) |cb| {
                 cb(self, sub, total_dropped);

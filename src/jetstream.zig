@@ -1280,28 +1280,21 @@ pub const JetStream = struct {
         };
     }
 
-    /// Subscribe to a JetStream push consumer with callback handler
-    /// Size a JetStream delivery subscription's pending limits so that
-    /// slow-consumer protection can never drop a JetStream message
-    /// (nats.go behavior): with acks, the server sends at most
-    /// max_ack_pending unacked messages, so the queue is guaranteed to
-    /// hold the full in-flight window. Consumers without acks (or with an
-    /// unlimited ack window) have no server-side in-flight bound and no
-    /// redelivery to recover a drop, so their limits are lifted entirely.
+    /// Keep JetStream delivery subscriptions bounded, while matching
+    /// nats.go's adjustment when the server's max-ack-pending window exceeds
+    /// the default message limit. MaxAckPending is not a no-drop guarantee:
+    /// byte limits, redeliveries, and control messages are independent of the
+    /// number of unique unacknowledged messages.
     fn applyPendingLimits(subscription: *Subscription, consumer_config: *const ConsumerConfig) void {
-        if (consumer_config.ack_policy == .none or consumer_config.max_ack_pending <= 0) {
-            subscription.setPendingLimits(0, 0);
-            return;
-        }
+        if (consumer_config.max_ack_pending <= Subscription.default_pending_msgs_limit) return;
 
         const max_ack_pending: u64 = @intCast(consumer_config.max_ack_pending);
-        if (max_ack_pending > Subscription.default_pending_msgs_limit) {
-            const msgs_limit: u32 = std.math.cast(u32, max_ack_pending) orelse std.math.maxInt(u32);
-            const bytes_limit = @max(max_ack_pending * 1024 * 1024, Subscription.default_pending_bytes_limit);
-            subscription.setPendingLimits(msgs_limit, bytes_limit);
-        }
+        const msgs_limit: u32 = std.math.cast(u32, max_ack_pending) orelse std.math.maxInt(u32);
+        const bytes_limit = @max(max_ack_pending *| @as(u64, 1024 * 1024), Subscription.default_pending_bytes_limit);
+        subscription.setPendingLimits(msgs_limit, bytes_limit);
     }
 
+    /// Subscribe to a JetStream push consumer with callback handler.
     pub fn subscribe(self: JetStream, subject: ?[]const u8, comptime handlerFn: anytype, handler_args: anytype, options: SubscribeOptions) !*JetStreamSubscription {
         // Resolve stream name
         const stream_name = if (options.stream) |s|
