@@ -65,6 +65,7 @@ const FlakyServer = struct {
 const ClosedTracker = struct {
     var closed_called: std.atomic.Value(u32) = .init(0);
     var reconnected_called: std.atomic.Value(u32) = .init(0);
+    var disconnected_called: std.atomic.Value(u32) = .init(0);
 
     fn closedCallback(_: *nats.Connection) void {
         _ = closed_called.fetchAdd(1, .monotonic);
@@ -72,6 +73,10 @@ const ClosedTracker = struct {
 
     fn reconnectedCallback(_: *nats.Connection) void {
         _ = reconnected_called.fetchAdd(1, .monotonic);
+    }
+
+    fn disconnectedCallback(_: *nats.Connection) void {
+        _ = disconnected_called.fetchAdd(1, .monotonic);
     }
 };
 
@@ -81,6 +86,7 @@ test "handshake failures count against max_reconnect" {
     FlakyServer.accepts.store(0, .monotonic);
     ClosedTracker.closed_called.store(0, .monotonic);
     ClosedTracker.reconnected_called.store(0, .monotonic);
+    ClosedTracker.disconnected_called.store(0, .monotonic);
 
     const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(fake_server_port) };
     var listener = try address.listen(io, .{ .reuse_address = true });
@@ -103,6 +109,7 @@ test "handshake failures count against max_reconnect" {
         .callbacks = .{
             .closed_cb = ClosedTracker.closedCallback,
             .reconnected_cb = ClosedTracker.reconnectedCallback,
+            .disconnected_cb = ClosedTracker.disconnectedCallback,
         },
     });
     defer utils.closeConnection(nc);
@@ -123,4 +130,7 @@ test "handshake failures count against max_reconnect" {
     try testing.expectEqual(@as(u32, 3), FlakyServer.accepts.load(.monotonic));
     try testing.expectEqual(@as(u32, 1), ClosedTracker.closed_called.load(.monotonic));
     try testing.expectEqual(@as(u32, 0), ClosedTracker.reconnected_called.load(.monotonic));
+    // The disconnected callback reports losing the established connection
+    // once; failed reconnection attempts must not re-fire it.
+    try testing.expectEqual(@as(u32, 1), ClosedTracker.disconnected_called.load(.monotonic));
 }
