@@ -182,14 +182,22 @@ test "slow consumer drops messages over the pending message limit" {
     try std.testing.expectEqual(@intFromPtr(sub), SlowConsumerTracker.last_sub.load(.acquire));
     try std.testing.expectEqual(@as(u64, 1), SlowConsumerTracker.last_dropped.load(.acquire));
 
-    // The first receive after the drops reports the gap in-band, exactly
-    // once; the queued messages are still delivered afterwards.
+    // The first receive after the drops reports the episode in-band; the
+    // queued messages are still delivered afterwards.
     try std.testing.expectError(
         error.SlowConsumer,
         sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } }),
     );
 
-    // Consuming ends the episode; new messages are delivered again.
+    // Another drop while still in the same episode must not re-arm the error
+    // and starve delivery of the messages already in the queue.
+    try conn.publish("test.slowconsumer.msgs", "still-full");
+    try conn.flush();
+    try std.testing.expectEqual(@as(u64, 4), sub.dropped());
+    try std.testing.expectEqual(@as(u32, 1), SlowConsumerTracker.episode_count.load(.monotonic));
+
+    // Draining the queued messages makes room. The next successful enqueue
+    // ends the episode, allowing a later overflow to report a new one.
     for (0..2) |_| {
         const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
         msg.deinit();

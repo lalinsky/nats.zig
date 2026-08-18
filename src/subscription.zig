@@ -67,8 +67,9 @@ pub const Subscription = struct {
     pending_bytes_limit: std.atomic.Value(u64) = std.atomic.Value(u64).init(default_pending_bytes_limit),
     dropped_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     slow_consumer: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    // Armed on every drop; consumed by the next synchronous receive, which
-    // reports it as error.SlowConsumer
+    // Armed when a synchronous subscription enters a slow-consumer episode;
+    // consumed by the next synchronous receive. Multiple episodes before a
+    // receive coalesce into one report; dropped_msgs provides the exact count.
     sc_error_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Autounsubscribe state
@@ -314,11 +315,10 @@ pub const Subscription = struct {
 
     pub const ReceiveError = Io.Cancelable || error{
         ConnectionClosed,
-        /// Messages were dropped for this subscription since the previous
-        /// receive because a pending limit was exceeded. Returned once per
-        /// drop burst, at the position of the gap in the stream; the next
-        /// call receives messages again (nats.go behavior). See `dropped()`
-        /// for exact loss accounting.
+        /// One or more messages were dropped for this subscription because a
+        /// pending limit was exceeded. Reports the start of a slow-consumer
+        /// episode; multiple episodes may coalesce if the error is not
+        /// consumed between them. See `dropped()` for exact loss accounting.
         SlowConsumer,
     };
 
@@ -339,9 +339,8 @@ pub const Subscription = struct {
     }
 
     fn nextMsgInternal(self: *Subscription, timeout: Io.Timeout) ReceiveTimeoutError!*Message {
-        // Report dropped messages in-band, at the stream position of the
-        // gap, so synchronous consumers learn about the loss even without
-        // a slow_consumer_cb.
+        // Report dropped messages in-band so synchronous consumers learn
+        // about the loss even without a slow_consumer_cb.
         if (self.sc_error_pending.swap(false, .acq_rel)) {
             return error.SlowConsumer;
         }

@@ -161,7 +161,7 @@ test "JetStream synchronous queue subscription basic functionality" {
     try testing.expectEqualStrings(test_message, js_msg.msg.data);
 }
 
-test "JetStream subscriptions are exempt from slow-consumer drops" {
+test "JetStream pending limits remain bounded and track large ack windows" {
     const io = std.testing.io;
 
     const conn = try utils.createDefaultConnection(io);
@@ -180,19 +180,20 @@ test "JetStream subscriptions are exempt from slow-consumer drops" {
     });
     defer stream_info.deinit();
 
-    // A consumer without acks has no server-side in-flight bound and no
-    // redelivery: its delivery subscription must have unlimited pending.
+    // AckNone has no redelivery safety, but it must remain bounded: otherwise
+    // an unread subscription recreates the unbounded-memory problem.
     var no_ack_sub = try js.subscribeSync(subject_filter, .{
         .stream = stream_name,
         .config = .{ .ack_policy = .none, .max_ack_pending = 0 },
     });
     defer no_ack_sub.deinit();
 
-    try std.testing.expectEqual(@as(u32, 0), no_ack_sub.subscription.pending_msgs_limit.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 0), no_ack_sub.subscription.pending_bytes_limit.load(.acquire));
+    try std.testing.expectEqual(nats.Subscription.default_pending_msgs_limit, no_ack_sub.subscription.pending_msgs_limit.load(.acquire));
+    try std.testing.expectEqual(nats.Subscription.default_pending_bytes_limit, no_ack_sub.subscription.pending_bytes_limit.load(.acquire));
 
-    // With acks, the pending limits must cover the server's full
-    // in-flight window (max_ack_pending), so a drop cannot happen.
+    // Match nats.go by raising the client message limit when the server's
+    // max-ack-pending window exceeds the default. This reduces avoidable
+    // client-side drops without claiming that MaxAckPending guarantees none.
     var big_window_sub = try js.subscribeSync(subject_filter, .{
         .stream = stream_name,
         .durable = "big_window",
