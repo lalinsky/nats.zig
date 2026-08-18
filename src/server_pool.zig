@@ -156,6 +156,16 @@ pub const ServerPool = struct {
         return self.servers.count();
     }
 
+    /// Whether any explicitly configured server uses the tls:// scheme.
+    /// Implicit (discovered) servers are ignored: they arrive as bare
+    /// host:port and carry no scheme information.
+    pub fn anyExplicitTls(self: *ServerPool) bool {
+        for (self.servers.values()) |server| {
+            if (!server.is_implicit and server.wantsTls()) return true;
+        }
+        return false;
+    }
+
     pub fn getFirstServer(self: *ServerPool) ?*Server {
         const values = self.servers.values();
         return if (values.len > 0) values[0] else null;

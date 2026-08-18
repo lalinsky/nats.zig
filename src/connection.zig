@@ -252,6 +252,16 @@ const ExitSignal = struct {
     }
 };
 
+/// The pool-wide TLS decision: explicit options win, otherwise a single
+/// explicit tls:// URL enables TLS with default options for every server
+/// in the pool (matching the global `secure` flag of the official
+/// clients). Null means plaintext everywhere.
+fn resolveTlsOptions(options_tls: ?TlsOptions, pool: *ServerPool) ?TlsOptions {
+    if (options_tls) |opts| return opts;
+    if (pool.anyExplicitTls()) return TlsOptions{};
+    return null;
+}
+
 /// TLS state for a single `runConnection` iteration.
 ///
 /// The reader task performs the handshake, then splits the resulting cipher
@@ -348,6 +358,11 @@ pub const TlsOptions = struct {
     cert_file: ?[]const u8 = null,
     /// Path to the PEM private key for `cert_file`.
     key_file: ?[]const u8 = null,
+    /// Expected server name, used for SNI and certificate verification
+    /// instead of the host from the URL. Useful when servers are dialed
+    /// by IP address (discovered cluster members, for example) while
+    /// their certificates carry host names.
+    server_name: ?[]const u8 = null,
     /// Skip server certificate verification. Testing only.
     insecure_skip_verify: bool = false,
     /// Perform the TLS handshake before expecting the server INFO,
@@ -434,6 +449,13 @@ pub const Connection = struct {
     // TLS state of the current runConnection iteration, null when the
     // current connection is plaintext (protected by mutex, like exit_signal)
     tls_rt: ?*TlsRuntime = null,
+
+    // TLS decision for the whole server pool, resolved in connect() and
+    // addServer() (protected by mutex). TLS is sticky: explicit options or
+    // a single explicit tls:// URL upgrade every connection, including
+    // servers discovered later through INFO connect_urls, which arrive as
+    // bare host:port and would otherwise silently fall back to plaintext.
+    resolved_tls: ?TlsOptions = null,
 
     // Server management
     server_pool: ServerPool,
@@ -626,6 +648,11 @@ pub const Connection = struct {
         }
         if (added == 0) return error.InvalidUrl;
 
+        self.resolved_tls = resolveTlsOptions(self.options.tls, &self.server_pool);
+        if (self.resolved_tls != null and !build_options.use_tls) {
+            return error.TlsNotConfigured;
+        }
+
         try self.manager_task.concurrent(self.io, managerTask, .{self});
         manager_started = true;
 
@@ -663,6 +690,14 @@ pub const Connection = struct {
         }
 
         _ = try self.server_pool.addServer(url, false);
+
+        // A tls:// URL upgrades the whole pool; TLS is never downgraded.
+        if (self.resolved_tls == null) {
+            self.resolved_tls = resolveTlsOptions(self.options.tls, &self.server_pool);
+            if (self.resolved_tls != null and !build_options.use_tls) {
+                return error.TlsNotConfigured;
+            }
+        }
     }
 
     /// Close the connection.
@@ -1460,15 +1495,19 @@ pub const Connection = struct {
     fn runConnection(self: *Self, attempts: *u32) !void {
         const server = try self.selectNextServer();
 
-        // TLS for this attempt: explicit options, or a tls:// URL scheme
-        // with default options.
-        const tls_opts: ?TlsOptions = self.options.tls orelse
-            (if (server.wantsTls()) TlsOptions{} else null);
+        // The pool-wide TLS decision from connect()/addServer(). Sticky:
+        // servers discovered through INFO connect_urls use TLS too.
+        const tls_opts: ?TlsOptions = blk: {
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
+            break :blk self.resolved_tls;
+        };
 
         var tls_rt: ?*TlsRuntime = null;
         if (tls_opts) |opts| {
             if (!build_options.use_tls) return error.TlsNotConfigured;
-            tls_rt = try TlsRuntime.create(self.allocator, opts, server.parsed_url.host);
+            const host = opts.server_name orelse server.parsed_url.host;
+            tls_rt = try TlsRuntime.create(self.allocator, opts, host);
         }
         defer if (tls_rt) |rt| rt.destroy(self.allocator);
 
@@ -2963,6 +3002,30 @@ test "close interrupts reconnect delay" {
     try connection.manager_task.await(io);
 
     try std.testing.expectEqual(Result.interrupted, result.load(.acquire));
+}
+
+test "resolveTlsOptions: tls is sticky across the whole pool" {
+    var pool = ServerPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    // Plaintext pool: no TLS.
+    _ = try pool.addServer("nats://one:4222", false);
+    try std.testing.expect(resolveTlsOptions(null, &pool) == null);
+
+    // A discovered (implicit) server never enables TLS by itself.
+    _ = try pool.addServer("127.0.0.1:4223", true);
+    try std.testing.expect(resolveTlsOptions(null, &pool) == null);
+
+    // One explicit tls:// URL upgrades every server, including the
+    // implicit ones that arrive as bare host:port.
+    _ = try pool.addServer("tls://two:4222", false);
+    const resolved = resolveTlsOptions(null, &pool);
+    try std.testing.expect(resolved != null);
+    try std.testing.expect(!resolved.?.insecure_skip_verify);
+
+    // Explicit options always win.
+    const custom: TlsOptions = .{ .insecure_skip_verify = true };
+    try std.testing.expect(resolveTlsOptions(custom, &pool).?.insecure_skip_verify);
 }
 
 test "connect with TLS options fails when TLS is compiled out" {

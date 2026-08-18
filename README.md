@@ -317,6 +317,19 @@ credentials never touch the socket unencrypted. A server that requires TLS
 is rejected with `error.SecureConnectionRequired` when the client has no
 TLS configured.
 
+TLS is sticky across the whole server pool: once enabled - through the
+options or a single `tls://` URL - every connection uses it, including
+cluster members discovered at runtime, which are announced as bare
+host:port. Since discovered servers are usually dialed by IP address,
+`server_name` sets the name used for SNI and certificate verification
+instead of the host from the URL:
+
+```zig
+var nc5 = nats.Connection.init(init.gpa, init.io, .{
+    .tls = .{ .ca_file = "/path/to/ca.pem", .server_name = "nats.example.com" },
+});
+```
+
 For mutual TLS, provide a client certificate and key (re-read on every
 (re)connect, like `ca_file`):
 

@@ -19,6 +19,7 @@
 const std = @import("std");
 const testing = std.testing;
 const tls = @import("tls");
+const xsync = @import("xsync");
 const Io = std.Io;
 const net = Io.net;
 
@@ -47,6 +48,10 @@ const ServerBehavior = enum {
     /// Like serve, but the handshake requires a valid client certificate
     /// (the self-signed testdata client certificate is the trust root).
     serve_mtls,
+    /// INFO gossiping another server via connect_urls, TLS upgrade, NATS
+    /// handshake, then close - so the client reconnects to the gossiped
+    /// server.
+    serve_gossip_then_close,
     /// Plaintext INFO, then read the ClientHello and never respond.
     stall_in_tls_handshake,
     /// Plaintext INFO, then respond to the ClientHello with garbage.
@@ -58,6 +63,8 @@ const FakeServer = struct {
     allocator: std.mem.Allocator,
     tcp_server: net.Server,
     behavior: ServerBehavior,
+    /// Advertised in INFO connect_urls for .serve_gossip_then_close.
+    gossip_port: u16 = 0,
     /// Payload received in the client's PUB frame, for the test to assert.
     received_pub: [64]u8 = undefined,
     received_pub_len: usize = 0,
@@ -99,7 +106,12 @@ const FakeServer = struct {
         var tcp_writer = stream.writer(io, &write_buf);
 
         if (self.behavior != .serve_handshake_first) {
-            try tcp_writer.interface.writeAll("INFO {\"tls_required\":true,\"headers\":true,\"max_payload\":1048576}\r\n");
+            var info_buf: [256]u8 = undefined;
+            const info = if (self.behavior == .serve_gossip_then_close)
+                try std.fmt.bufPrint(&info_buf, "INFO {{\"tls_required\":true,\"headers\":true,\"max_payload\":1048576,\"connect_urls\":[\"127.0.0.1:{d}\"]}}\r\n", .{self.gossip_port})
+            else
+                "INFO {\"tls_required\":true,\"headers\":true,\"max_payload\":1048576}\r\n";
+            try tcp_writer.interface.writeAll(info);
             try tcp_writer.interface.flush();
         }
 
@@ -160,6 +172,12 @@ const FakeServer = struct {
         _ = try readLine(reader); // PING
         try writer.writeAll("PONG\r\n");
         try writer.flush();
+
+        if (self.behavior == .serve_gossip_then_close) {
+            // The client is now connected and knows about the gossiped
+            // server; closing the stream sends it there.
+            return;
+        }
 
         // SUB <subject> <sid>
         const sub_line = try readLine(reader);
@@ -224,6 +242,9 @@ const RoundTripOptions = struct {
     handshake_first: bool = false,
     cert_file: ?[]const u8 = null,
     key_file: ?[]const u8 = null,
+    insecure_skip_verify: bool = true,
+    ca_file: ?[]const u8 = null,
+    server_name: ?[]const u8 = null,
 };
 
 fn testTlsRoundTrip(opts: RoundTripOptions) !void {
@@ -242,7 +263,9 @@ fn testTlsRoundTrip(opts: RoundTripOptions) !void {
 
     var nc = Connection.init(allocator, io, .{
         .tls = .{
-            .insecure_skip_verify = true,
+            .insecure_skip_verify = opts.insecure_skip_verify,
+            .ca_file = opts.ca_file,
+            .server_name = opts.server_name,
             .handshake_first = opts.handshake_first,
             .cert_file = opts.cert_file,
             .key_file = opts.key_file,
@@ -316,6 +339,111 @@ test "tls: mtls server rejects a client without a certificate" {
     try testing.expect(result != error.Timeout);
     try testing.expectError(error.TlsAlertCertificateRequired, result);
 }
+
+test "tls: server_name overrides the URL host for verification" {
+    // The URL dials the IP, but verification runs against server_name,
+    // which matches the certificate's DNS SAN (localhost). The
+    // self-signed server certificate acts as its own trust root.
+    try testTlsRoundTrip(.{
+        .behavior = .serve,
+        .insecure_skip_verify = false,
+        .ca_file = "src/testdata/test_cert.pem",
+        .server_name = "localhost",
+    });
+}
+
+test "tls: server_name mismatch fails verification" {
+    const io = testing.io;
+    const allocator = testing.allocator;
+
+    var server = try FakeServer.init(io, allocator, .serve);
+    defer server.deinit();
+
+    var server_err: ?anyerror = null;
+    var server_task = try io.concurrent(serverTask, .{ &server, &server_err });
+    defer server_task.cancel(io) catch {};
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "tls://127.0.0.1:{d}", .{server.port()});
+
+    var nc = Connection.init(allocator, io, .{
+        .tls = .{
+            .ca_file = "src/testdata/test_cert.pem",
+            .server_name = "wrong.example.com",
+        },
+    });
+    defer nc.deinit();
+
+    const result = nc.connect(url);
+    try testing.expect(result != error.Timeout);
+    try testing.expectError(error.CertificateHostMismatch, result);
+}
+
+test "tls: reconnect to a discovered server stays on tls" {
+    const io = testing.io;
+    const allocator = testing.allocator;
+
+    // server1 gossips server2 through INFO connect_urls and closes right
+    // after the NATS handshake; the client must reconnect to server2 -
+    // discovered as bare host:port - over TLS.
+    var server2 = try FakeServer.init(io, allocator, .serve);
+    defer server2.deinit();
+
+    var server1 = try FakeServer.init(io, allocator, .serve_gossip_then_close);
+    defer server1.deinit();
+    server1.gossip_port = server2.port();
+
+    var server1_err: ?anyerror = null;
+    var server1_task = try io.concurrent(serverTask, .{ &server1, &server1_err });
+    defer server1_task.cancel(io) catch {};
+
+    var server2_err: ?anyerror = null;
+    var server2_task = try io.concurrent(serverTask, .{ &server2, &server2_err });
+    defer server2_task.cancel(io) catch {};
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "tls://127.0.0.1:{d}", .{server1.port()});
+
+    reconnect_tracker = .{};
+    var nc = Connection.init(allocator, io, .{
+        .tls = .{ .insecure_skip_verify = true },
+        .callbacks = .{ .reconnected_cb = ReconnectTracker.reconnectedCallback },
+    });
+    defer nc.deinit();
+
+    try nc.connect(url);
+
+    try reconnect_tracker.reconnected.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
+
+    // The reconnected connection runs against server2, over a fresh TLS
+    // session; run the scripted exchange to prove it carries traffic.
+    const sub = try nc.subscribeSync("foo");
+    defer sub.deinit();
+
+    var msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    defer msg.deinit();
+    try testing.expectEqualStrings("hello", msg.data);
+
+    var msg2 = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    defer msg2.deinit();
+    try testing.expectEqualStrings("world", msg2.data);
+
+    try nc.publish("bar", "reply");
+
+    try server2_task.await(io);
+    if (server2_err) |err| return err;
+    try testing.expectEqualStrings("reply", server2.received_pub[0..server2.received_pub_len]);
+}
+
+const ReconnectTracker = struct {
+    reconnected: xsync.Event = .init,
+
+    fn reconnectedCallback(_: *Connection) void {
+        reconnect_tracker.reconnected.set(testing.io);
+    }
+};
+
+var reconnect_tracker: ReconnectTracker = .{};
 
 test "tls: a client certificate without its key is rejected upfront" {
     const io = testing.io;
