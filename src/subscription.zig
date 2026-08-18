@@ -129,14 +129,15 @@ pub const Subscription = struct {
         log.debug("Handler fiber started for subscription {}", .{self.sid});
 
         while (true) {
-            // Wait for a message with timeout (allows periodic checking)
-            const msg = self.messages.pop(.{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch |err| {
-                if (err == error.Closed or err == error.Canceled) {
+            // Park until a message arrives. No periodic ticking is needed:
+            // destroy() closes the queue before joining this task (waking
+            // the wait with Closed), and cancelation interrupts it.
+            const msg = self.messages.pop(.none) catch |err| switch (err) {
+                error.Closed, error.Canceled => {
                     log.debug("Subscription {} queue closed, stopping handler", .{self.sid});
                     break;
-                }
-                // Timeout - continue loop
-                continue;
+                },
+                error.Timeout => unreachable, // .none never times out
             };
 
             // Check autounsubscribe limit

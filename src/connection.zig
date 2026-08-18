@@ -1523,13 +1523,13 @@ pub const Connection = struct {
     }
 
     fn flusherIteration(self: *Self, stream_writer: *net.Stream.Writer) !void {
-        // Try to gather data from buffer first
+        // Park until there is data to write. No periodic ticking is needed:
+        // pushes signal the queue, close/reset broadcast it, and the flusher
+        // task is canceled on connection teardown. The drain ping is sent
+        // directly by startPublicationDrain and lands here as data.
         var slices: [16][]const u8 = undefined;
-        const gather = self.write_buffer.gatherReadSlices(&slices, self.options.timeout) catch |err| switch (err) {
-            error.Timeout => {
-                // No data to write
-                return;
-            },
+        const gather = self.write_buffer.gatherReadSlices(&slices, .none) catch |err| switch (err) {
+            error.Timeout => unreachable, // .none never times out
             error.Closed => return error.Closed,
             error.Canceled => return error.Canceled,
         };
@@ -2233,7 +2233,14 @@ pub const Connection = struct {
 
         self.drain_ping_id = self.sendPing(false) catch |err| {
             if (err == error.Canceled) return error.Canceled;
-            log.err("Failed to send drain ping: {}", .{err});
+            // If a tiny control frame cannot even be appended, the write
+            // path is broken and there is no retry opportunity: publishes
+            // are rejected while draining, so no data will arrive to wake
+            // the parked flusher. Complete the drain instead of leaving
+            // waitForDrainCompletion blocked; the flush this ping was
+            // meant to confirm cannot succeed anyway.
+            log.err("Failed to send drain ping, completing drain: {}", .{err});
+            self.notifyPublishDrainComplete() catch {};
             return;
         };
     }
