@@ -182,6 +182,13 @@ test "slow consumer drops messages over the pending message limit" {
     try std.testing.expectEqual(@intFromPtr(sub), SlowConsumerTracker.last_sub.load(.acquire));
     try std.testing.expectEqual(@as(u64, 1), SlowConsumerTracker.last_dropped.load(.acquire));
 
+    // The first receive after the drops reports the gap in-band, exactly
+    // once; the queued messages are still delivered afterwards.
+    try std.testing.expectError(
+        error.SlowConsumer,
+        sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } }),
+    );
+
     // Consuming ends the episode; new messages are delivered again.
     for (0..2) |_| {
         const msg = try sub.nextMsgTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });

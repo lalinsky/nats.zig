@@ -523,8 +523,11 @@ pub const PullSubscription = struct {
                     // Timeout occurred
                     batch_complete = true;
                 },
-                error.Canceled, error.ConnectionClosed => {
-                    // Propagate cancellation and closed connections
+                error.Canceled, error.ConnectionClosed, error.SlowConsumer => {
+                    // Propagate cancellation and closed connections.
+                    // SlowConsumer cannot occur here (the inbox limits are
+                    // sized to the consumer's ack window), but if it ever
+                    // does, surfacing it beats silently losing a gap.
                     return err;
                 },
             }

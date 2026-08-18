@@ -67,6 +67,9 @@ pub const Subscription = struct {
     pending_bytes_limit: std.atomic.Value(u64) = std.atomic.Value(u64).init(default_pending_bytes_limit),
     dropped_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     slow_consumer: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    // Armed on every drop; consumed by the next synchronous receive, which
+    // reports it as error.SlowConsumer
+    sc_error_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Autounsubscribe state
     max_msgs: std.atomic.Value(u64) = std.atomic.Value(u64).init(0), // 0 means no limit
@@ -311,6 +314,12 @@ pub const Subscription = struct {
 
     pub const ReceiveError = Io.Cancelable || error{
         ConnectionClosed,
+        /// Messages were dropped for this subscription since the previous
+        /// receive because a pending limit was exceeded. Returned once per
+        /// drop burst, at the position of the gap in the stream; the next
+        /// call receives messages again (nats.go behavior). See `dropped()`
+        /// for exact loss accounting.
+        SlowConsumer,
     };
 
     pub const ReceiveTimeoutError = ReceiveError || Io.Timeout.Error;
@@ -330,6 +339,13 @@ pub const Subscription = struct {
     }
 
     fn nextMsgInternal(self: *Subscription, timeout: Io.Timeout) ReceiveTimeoutError!*Message {
+        // Report dropped messages in-band, at the stream position of the
+        // gap, so synchronous consumers learn about the loss even without
+        // a slow_consumer_cb.
+        if (self.sc_error_pending.swap(false, .acq_rel)) {
+            return error.SlowConsumer;
+        }
+
         // Check if subscription has reached autounsubscribe limit
         const max = self.max_msgs.load(.acquire);
         if (max > 0 and self.delivered_msgs.load(.acquire) >= max) {
