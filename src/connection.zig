@@ -255,6 +255,11 @@ pub const ConnectionOptions = struct {
     ping_interval: Io.Duration = .fromSeconds(120), // .zero = disabled
     max_pings_out: u32 = 2, // max unanswered keep-alive PINGs
 
+    /// Maximum bytes buffered for writing on a live connection
+    /// (0 = unlimited). When full, publishers block (cancelable) until the
+    /// flusher catches up, like the buffered writers in nats.go and nats.c.
+    write_buffer_limit: usize = 8 * 1024 * 1024,
+
     // Authentication
     user: ?[]const u8 = null,
     password: ?[]const u8 = null,
@@ -360,7 +365,7 @@ pub const Connection = struct {
             .server_pool = ServerPool.init(allocator),
             .server_info_arena = std.heap.ArenaAllocator.init(allocator),
             .pending_buffer = WriteBuffer.init(allocator, io, .{ .max_size = options.reconnect.reconnect_buf_size }),
-            .write_buffer = WriteBuffer.init(allocator, io, .{}),
+            .write_buffer = WriteBuffer.init(allocator, io, .{ .max_size = options.write_buffer_limit, .block_when_full = true }),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .response_manager = ResponseManager.init(allocator, io),
             .parser = Parser.init(allocator, io),
@@ -1317,6 +1322,18 @@ pub const Connection = struct {
         try gather.consume(bytes_written);
     }
 
+    /// Count a dropped message and report the start of a slow-consumer
+    /// episode through the error callback (once per episode, like nats.go).
+    fn handleSlowConsumer(self: *Self, sub: *Subscription) void {
+        _ = sub.dropped_msgs.fetchAdd(1, .monotonic);
+        if (sub.slow_consumer.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+            log.warn("Slow consumer, messages dropped for subscription {d} ({s})", .{ sub.sid, sub.subject });
+            if (self.options.callbacks.error_cb) |cb| {
+                cb(self, "Slow Consumer, messages dropped");
+            }
+        }
+    }
+
     // Parser callback methods
     pub fn processMsg(self: *Self, message: *Message) !void {
         var owns_message = true;
@@ -1339,6 +1356,18 @@ pub const Connection = struct {
                 return;
             }
 
+            // Slow-consumer protection: drop the message when a pending
+            // limit is exceeded. Limits are measured on message counts and
+            // payload bytes, never on queue storage.
+            const msgs_limit = s.pending_msgs_limit.load(.acquire);
+            const bytes_limit = s.pending_bytes_limit.load(.acquire);
+            if ((msgs_limit > 0 and s.pending_msgs.load(.acquire) >= msgs_limit) or
+                (bytes_limit > 0 and s.pending_bytes.load(.acquire) + message.data.len > bytes_limit))
+            {
+                self.handleSlowConsumer(s);
+                return;
+            }
+
             // Increment pending message count and bytes for this subscription
             subscription_mod.incrementPending(s, message.data.len);
 
@@ -1358,15 +1387,19 @@ pub const Connection = struct {
                     },
                     error.Canceled => return error.Canceled,
                     else => {
-                        // Allocation or unexpected push failure; log and tear down the connection.
+                        // Allocation failure: drop this one message instead
+                        // of tearing down the connection for all
+                        // subscriptions.
                         log.err("Failed to enqueue message for sid {d}: {}", .{ message.sid, err });
-                        // Undo the pending counters since we failed to enqueue
                         subscription_mod.decrementPending(s, message.data.len);
-                        return err;
+                        self.handleSlowConsumer(s);
+                        return;
                     },
                 }
             };
             owns_message = false;
+            // A successful delivery ends a slow-consumer episode.
+            s.slow_consumer.store(false, .release);
         } else {
             // No sub subscription found, try to send UNSUB command
             self.unsubscribeInternal(message.sid, null) catch |err| {
