@@ -28,6 +28,12 @@ const ProtocolError = connection_mod.ProtocolError;
 
 const test_cert = @embedFile("testdata/test_cert.pem");
 const test_key = @embedFile("testdata/test_key.pem");
+const client_cert = @embedFile("testdata/client_cert.pem");
+
+/// Paths for the client under test; the test runner's working directory
+/// is the project root, like the paths used by the e2e tests.
+const client_cert_file = "src/testdata/client_cert.pem";
+const client_key_file = "src/testdata/client_key.pem";
 
 const ServerBehavior = enum {
     /// Plaintext INFO, TLS upgrade, NATS handshake, then a scripted
@@ -38,6 +44,9 @@ const ServerBehavior = enum {
     serve_key_update,
     /// TLS handshake first, INFO over TLS, then the scripted exchange.
     serve_handshake_first,
+    /// Like serve, but the handshake requires a valid client certificate
+    /// (the self-signed testdata client certificate is the trust root).
+    serve_mtls,
     /// Plaintext INFO, then read the ClientHello and never respond.
     stall_in_tls_handshake,
     /// Plaintext INFO, then respond to the ClientHello with garbage.
@@ -114,9 +123,22 @@ const FakeServer = struct {
         var auth = try tls.config.CertKeyPair.fromSlice(self.allocator, io, test_cert, test_key);
         defer auth.deinit(self.allocator);
 
+        // For mTLS, the self-signed client certificate is its own trust
+        // root, mirroring how the client trusts the self-signed server
+        // certificate via insecure_skip_verify.
+        var client_root_ca: std.crypto.Certificate.Bundle = .empty;
+        defer client_root_ca.deinit(self.allocator);
+        if (self.behavior == .serve_mtls) {
+            client_root_ca = try tls.config.cert.fromSlice(self.allocator, io, client_cert);
+        }
+
         var rng: std.Random.IoSource = .{ .io = io };
         var conn = try tls.server(&tcp_reader.interface, &tcp_writer.interface, .{
             .auth = &auth,
+            .client_auth = if (self.behavior == .serve_mtls) .{
+                .root_ca = client_root_ca,
+                .auth_type = .require,
+            } else null,
             .rng = rng.interface(),
             .now = Io.Clock.real.now(io),
         });
@@ -200,6 +222,8 @@ fn serverTask(server: *FakeServer, err_out: *?anyerror) Io.Cancelable!void {
 const RoundTripOptions = struct {
     behavior: ServerBehavior,
     handshake_first: bool = false,
+    cert_file: ?[]const u8 = null,
+    key_file: ?[]const u8 = null,
 };
 
 fn testTlsRoundTrip(opts: RoundTripOptions) !void {
@@ -220,6 +244,8 @@ fn testTlsRoundTrip(opts: RoundTripOptions) !void {
         .tls = .{
             .insecure_skip_verify = true,
             .handshake_first = opts.handshake_first,
+            .cert_file = opts.cert_file,
+            .key_file = opts.key_file,
         },
     });
     defer nc.deinit();
@@ -255,6 +281,51 @@ test "tls: server key updates are handled and answered" {
 
 test "tls: handshake-first mode" {
     try testTlsRoundTrip(.{ .behavior = .serve_handshake_first, .handshake_first = true });
+}
+
+test "tls: mtls client certificate round-trip" {
+    try testTlsRoundTrip(.{
+        .behavior = .serve_mtls,
+        .cert_file = client_cert_file,
+        .key_file = client_key_file,
+    });
+}
+
+test "tls: mtls server rejects a client without a certificate" {
+    const io = testing.io;
+    const allocator = testing.allocator;
+
+    var server = try FakeServer.init(io, allocator, .serve_mtls);
+    defer server.deinit();
+
+    // The server-side handshake fails too; that error is expected and
+    // deliberately not asserted on.
+    var server_err: ?anyerror = null;
+    var server_task = try io.concurrent(serverTask, .{ &server, &server_err });
+    defer server_task.cancel(io) catch {};
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "tls://127.0.0.1:{d}", .{server.port()});
+
+    var nc = Connection.init(allocator, io, .{
+        .tls = .{ .insecure_skip_verify = true },
+    });
+    defer nc.deinit();
+
+    const result = nc.connect(url);
+    try testing.expect(result != error.Timeout);
+    try testing.expectError(error.TlsAlertCertificateRequired, result);
+}
+
+test "tls: a client certificate without its key is rejected upfront" {
+    const io = testing.io;
+
+    var nc = Connection.init(testing.allocator, io, .{
+        .tls = .{ .cert_file = client_cert_file },
+    });
+    defer nc.deinit();
+
+    try testing.expectError(error.MissingTlsKeyPair, nc.connect("tls://127.0.0.1:4222"));
 }
 
 test "tls: close during a stalled handshake does not hang" {

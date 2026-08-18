@@ -338,6 +338,16 @@ pub const TlsOptions = struct {
     /// system trust store is used. Re-read on every (re)connect, so
     /// rotated certificates are picked up automatically.
     ca_file: ?[]const u8 = null,
+    /// Path to a PEM client certificate (chain) presented to the server
+    /// (mTLS), resolved against the current working directory. Requires
+    /// `key_file`. Like `ca_file`, re-read on every (re)connect. With
+    /// the server's `verify_and_map`, the certificate is also the
+    /// authentication: the server maps its email SAN, DNS SAN, or
+    /// subject DN to a configured user, and CONNECT needs no other
+    /// credentials.
+    cert_file: ?[]const u8 = null,
+    /// Path to the PEM private key for `cert_file`.
+    key_file: ?[]const u8 = null,
     /// Skip server certificate verification. Testing only.
     insecure_skip_verify: bool = false,
     /// Perform the TLS handshake before expecting the server INFO,
@@ -553,6 +563,14 @@ pub const Connection = struct {
         // in runConnection.
         if (self.options.tls != null and !build_options.use_tls) {
             return error.TlsNotConfigured;
+        }
+
+        // A client certificate needs its key and vice versa; catch the
+        // misconfiguration here instead of on every handshake.
+        if (self.options.tls) |tls_opts| {
+            if ((tls_opts.cert_file == null) != (tls_opts.key_file == null)) {
+                return error.MissingTlsKeyPair;
+            }
         }
 
         // Validate credential options up front so a bad seed or an
@@ -1762,11 +1780,21 @@ pub const Connection = struct {
             }
         }
 
+        // Client certificate for mTLS, also re-read on every handshake.
+        // Must outlive hs.run: the handshake options hold a pointer to it.
+        var client_auth: ?tls.config.CertKeyPair = null;
+        defer if (client_auth) |*auth| auth.deinit(self.allocator);
+        if (rt.opts.cert_file) |cert_path| {
+            const key_path = rt.opts.key_file.?; // validated in connect()
+            client_auth = try tls.config.CertKeyPair.fromFilePath(self.allocator, self.io, Io.Dir.cwd(), cert_path, key_path);
+        }
+
         var rng: std.Random.IoSource = .{ .io = self.io };
         var hs = tls.nonblock.Client.init(.{
             .host = rt.host,
             .root_ca = bundle,
             .insecure_skip_verify = rt.opts.insecure_skip_verify,
+            .auth = if (client_auth) |*auth| auth else null,
             .rng = rng.interface(),
             .now = Io.Clock.real.now(self.io),
         });
