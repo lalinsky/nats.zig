@@ -30,8 +30,31 @@ pub const config = struct {
         host: []const u8 = "",
         root_ca: std.crypto.Certificate.Bundle = .empty,
         insecure_skip_verify: bool = false,
+        auth: ?*CertKeyPair = null,
         rng: std.Random = undefined,
         now: std.Io.Timestamp = undefined,
+    };
+
+    pub const CertKeyPair = struct {
+        pub fn fromFilePath(
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            dir: std.Io.Dir,
+            cert_path: []const u8,
+            key_path: []const u8,
+        ) !CertKeyPair {
+            _ = allocator;
+            _ = io;
+            _ = dir;
+            _ = cert_path;
+            _ = key_path;
+            return error.TlsNotConfigured;
+        }
+
+        pub fn deinit(self: *CertKeyPair, allocator: std.mem.Allocator) void {
+            _ = self;
+            _ = allocator;
+        }
     };
 };
 

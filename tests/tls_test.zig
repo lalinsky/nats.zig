@@ -108,6 +108,69 @@ test "tls e2e: handshake-first server" {
     try expectRoundTrip(nc, "test.tls.first");
 }
 
+test "tls e2e: mtls with verify_and_map is the authentication" {
+    const io = std.testing.io;
+
+    var url_buf: [64]u8 = undefined;
+    const url = try tlsUrl(&url_buf, .tls_mtls);
+
+    // No user, password, or token: the certificate's email SAN
+    // (client@nats.zig.test) is mapped to the authorized user.
+    const nc = try utils.createConnectionWithUrl(io, url, .{
+        .tls = .{
+            .ca_file = ca_file,
+            .cert_file = "tests/configs/certs/client-cert.pem",
+            .key_file = "tests/configs/certs/client-key.pem",
+        },
+    });
+    defer utils.closeConnection(nc);
+
+    try expectRoundTrip(nc, "test.tls.mtls");
+}
+
+test "tls e2e: mtls server rejects a client without a certificate" {
+    const io = std.testing.io;
+
+    var url_buf: [64]u8 = undefined;
+    const url = try tlsUrl(&url_buf, .tls_mtls);
+
+    const result = utils.createConnectionWithUrl(io, url, .{
+        .tls = .{ .ca_file = ca_file },
+    });
+    try testing.expect(result != error.Timeout);
+    if (result) |nc| {
+        utils.closeConnection(nc);
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try testing.expectEqual(error.TlsAlertCertificateRequired, err);
+    }
+}
+
+test "tls e2e: mtls with an unmapped certificate is rejected as authorization" {
+    const io = std.testing.io;
+
+    var url_buf: [64]u8 = undefined;
+    const url = try tlsUrl(&url_buf, .tls_mtls);
+
+    // client2's certificate is valid (signed by the test CA), but its
+    // identity (other@nats.zig.test) is not in the authorization users:
+    // the TLS handshake succeeds and the failure is an authorization
+    // violation, proving verify_and_map went through the whole chain.
+    const result = utils.createConnectionWithUrl(io, url, .{
+        .tls = .{
+            .ca_file = ca_file,
+            .cert_file = "tests/configs/certs/client2-cert.pem",
+            .key_file = "tests/configs/certs/client2-key.pem",
+        },
+    });
+    if (result) |nc| {
+        utils.closeConnection(nc);
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try testing.expectEqual(error.AuthorizationViolation, err);
+    }
+}
+
 const ReconnectTracker = struct {
     reconnected: xsync.Event = .init,
 

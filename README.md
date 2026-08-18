@@ -317,6 +317,23 @@ credentials never touch the socket unencrypted. A server that requires TLS
 is rejected with `error.SecureConnectionRequired` when the client has no
 TLS configured.
 
+For mutual TLS, provide a client certificate and key (re-read on every
+(re)connect, like `ca_file`):
+
+```zig
+var nc4 = nats.Connection.init(init.gpa, init.io, .{
+    .tls = .{
+        .ca_file = "/path/to/ca.pem",
+        .cert_file = "/path/to/client-cert.pem",
+        .key_file = "/path/to/client-key.pem",
+    },
+});
+```
+
+With the server's `verify_and_map` mode, the certificate is also the
+authentication: the server maps the certificate's email SAN, DNS SAN, or
+subject DN to a configured user, and no other credentials are needed.
+
 TLS support can be compiled out with `-Duse_tls=false`, in which case TLS
 connections fail with `error.TlsNotConfigured` and the tls.zig dependency
 is not fetched.
