@@ -37,6 +37,7 @@ const validation = @import("validation.zig");
 const nkeys = @import("nkeys.zig");
 const creds_mod = @import("creds.zig");
 const xsync = @import("xsync");
+const tls = @import("tls");
 const Io = std.Io;
 const io_util = @import("io_util.zig");
 const net_util = @import("net_util.zig");
@@ -251,6 +252,100 @@ const ExitSignal = struct {
     }
 };
 
+/// TLS state for a single `runConnection` iteration.
+///
+/// The reader task performs the handshake, then splits the resulting cipher
+/// into two independent `tls.nonblock.Connection` copies: `dec` is used only
+/// by the reader (decrypt), `enc` only by the flusher (encrypt). The
+/// encrypt and decrypt halves of a cipher are disjoint state, so the two
+/// tasks run the crypto in parallel with no locking; the unused half of
+/// each copy is simply inert (pinned by a round-trip test across a
+/// KeyUpdate in tls_test.zig). The only cross-task signal is the peer's
+/// key-update request, forwarded through the already-atomic
+/// `key_update_requested` flags.
+const TlsRuntime = struct {
+    opts: TlsOptions,
+    /// Host name for SNI and certificate verification. Points into the
+    /// current server's parsed URL, which outlives the iteration.
+    host: []const u8,
+
+    /// Owned by the flusher after `transport_ready` is set.
+    enc: tls.nonblock.Connection = undefined,
+    /// Owned by the reader after the handshake completes.
+    dec: tls.nonblock.Connection = undefined,
+
+    /// Ciphertext buffer for the socket reader. Must hold a complete TLS
+    /// record for steady-state reads, and a complete handshake flight
+    /// (certificate chains included) during the handshake.
+    read_buffer: []u8,
+    /// Cleartext output for decrypt. Also reused as the send scratch for
+    /// handshake flights, which finish before the first decrypt.
+    cleartext_buffer: []u8,
+    /// Cleartext staging for the flusher: gathered frames are copied here
+    /// so one encrypt call produces one TLS record per 16K, instead of a
+    /// record per gathered slice.
+    staging_buffer: []u8,
+    /// Ciphertext output for encrypt, sized for one maximum record plus a
+    /// possible KeyUpdate record.
+    out_buffer: []u8,
+
+    const read_buffer_size = 64 * 1024;
+    const cleartext_buffer_size = 32 * 1024;
+    const staging_buffer_size = 16 * 1024;
+    const out_buffer_size = tls.output_buffer_len + 1024;
+
+    fn create(allocator: Allocator, opts: TlsOptions, host: []const u8) !*TlsRuntime {
+        const self = try allocator.create(TlsRuntime);
+        errdefer allocator.destroy(self);
+        self.* = .{
+            .opts = opts,
+            .host = host,
+            .read_buffer = &.{},
+            .cleartext_buffer = &.{},
+            .staging_buffer = &.{},
+            .out_buffer = &.{},
+        };
+        errdefer self.destroy(allocator);
+        self.read_buffer = try allocator.alloc(u8, read_buffer_size);
+        self.cleartext_buffer = try allocator.alloc(u8, cleartext_buffer_size);
+        self.staging_buffer = try allocator.alloc(u8, staging_buffer_size);
+        self.out_buffer = try allocator.alloc(u8, out_buffer_size);
+        return self;
+    }
+
+    fn destroy(self: *TlsRuntime, allocator: Allocator) void {
+        allocator.free(self.read_buffer);
+        allocator.free(self.cleartext_buffer);
+        allocator.free(self.staging_buffer);
+        allocator.free(self.out_buffer);
+        allocator.destroy(self);
+    }
+
+    /// Forward the peer's key-update request from the decrypt copy to the
+    /// encrypt copy, which sends the required KeyUpdate response before its
+    /// next application-data record. Both flags are atomic in tls.zig.
+    fn forwardKeyUpdateRequest(self: *TlsRuntime) void {
+        if (@atomicLoad(bool, &self.dec.inner.key_update_requested, .monotonic)) {
+            @atomicStore(bool, &self.dec.inner.key_update_requested, false, .monotonic);
+            @atomicStore(bool, &self.enc.inner.key_update_requested, true, .monotonic);
+        }
+    }
+};
+
+pub const TlsOptions = struct {
+    /// Path to a PEM CA bundle used to verify the server certificate,
+    /// resolved against the current working directory. When null, the
+    /// system trust store is used. Re-read on every (re)connect, so
+    /// rotated certificates are picked up automatically.
+    ca_file: ?[]const u8 = null,
+    /// Skip server certificate verification. Testing only.
+    insecure_skip_verify: bool = false,
+    /// Perform the TLS handshake before expecting the server INFO,
+    /// for servers running in handshake-first mode or behind
+    /// TLS-terminating proxies.
+    handshake_first: bool = false,
+};
+
 pub const ConnectionOptions = struct {
     name: ?[]const u8 = null,
     timeout: Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(5000), .clock = .awake } },
@@ -295,6 +390,14 @@ pub const ConnectionOptions = struct {
     /// signature. Used with `nkey` (or `user_jwt`) instead of `nkey_seed`;
     /// a configured seed takes precedence.
     nkey_sign_cb: ?*const fn (nonce: []const u8) anyerror![64]u8 = null,
+
+    /// TLS configuration. When set, every connection is upgraded to TLS
+    /// after the plaintext INFO (or before it, with `handshake_first`).
+    /// A `tls://` server URL enables TLS with default options even when
+    /// this is null. Requires the `use_tls` build option (enabled by
+    /// default); with TLS compiled out, connecting fails with
+    /// error.TlsNotConfigured.
+    tls: ?TlsOptions = null,
 };
 
 /// Maximum accepted size of a credentials file.
@@ -317,6 +420,10 @@ pub const Connection = struct {
 
     // Exit signal of the current runConnection iteration (protected by mutex)
     exit_signal: ?*ExitSignal = null,
+
+    // TLS state of the current runConnection iteration, null when the
+    // current connection is plaintext (protected by mutex, like exit_signal)
+    tls_rt: ?*TlsRuntime = null,
 
     // Server management
     server_pool: ServerPool,
@@ -440,6 +547,13 @@ pub const Connection = struct {
         errdefer if (manager_started) self.manager_task.cancel(self.io);
 
         try io_util.ensureAwakeClock(self.io);
+
+        // Fail fast at the API boundary when TLS is requested but was
+        // compiled out; tls:// URLs are additionally checked per attempt
+        // in runConnection.
+        if (self.options.tls != null and !build_options.use_tls) {
+            return error.TlsNotConfigured;
+        }
 
         // Validate credential options up front so a bad seed or an
         // unreadable credentials file fails immediately instead of
@@ -1328,10 +1442,29 @@ pub const Connection = struct {
     fn runConnection(self: *Self, attempts: *u32) !void {
         const server = try self.selectNextServer();
 
+        // TLS for this attempt: explicit options, or a tls:// URL scheme
+        // with default options.
+        const tls_opts: ?TlsOptions = self.options.tls orelse
+            (if (server.wantsTls()) TlsOptions{} else null);
+
+        var tls_rt: ?*TlsRuntime = null;
+        if (tls_opts) |opts| {
+            if (!build_options.use_tls) return error.TlsNotConfigured;
+            tls_rt = try TlsRuntime.create(self.allocator, opts, server.parsed_url.host);
+        }
+        defer if (tls_rt) |rt| rt.destroy(self.allocator);
+
         var stream = try self.establishConnection(server);
         defer stream.close(self.io);
 
         var exit_signal: ExitSignal = .{};
+
+        // The flusher parks on this until the transport can carry protocol
+        // bytes: immediately for plaintext, after the TLS handshake (run by
+        // the reader task) otherwise. This is what keeps the CONNECT queued
+        // by processInfo from ever being written to an unencrypted socket.
+        var transport_ready: xsync.Event = .init;
+        if (tls_rt == null) transport_ready.set(self.io);
 
         {
             try self.mutex.lock(self.io);
@@ -1340,6 +1473,7 @@ pub const Connection = struct {
                 return error.ConnectionClosed;
             }
             self.exit_signal = &exit_signal;
+            self.tls_rt = tls_rt;
         }
         defer {
             // Runs after both tasks below are joined, so nothing can signal
@@ -1347,12 +1481,13 @@ pub const Connection = struct {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             self.exit_signal = null;
+            self.tls_rt = null;
         }
 
-        var reader_task = try self.io.concurrent(readerLoop, .{ self, &stream, &exit_signal });
+        var reader_task = try self.io.concurrent(readerLoop, .{ self, &stream, tls_rt, &transport_ready, &exit_signal });
         defer reader_task.cancel(self.io);
 
-        var flusher_task = try self.io.concurrent(flusherLoop, .{ self, &stream, &exit_signal });
+        var flusher_task = try self.io.concurrent(flusherLoop, .{ self, &stream, tls_rt, &transport_ready, &exit_signal });
         defer flusher_task.cancel(self.io);
 
         var was_reconnect = false;
@@ -1458,22 +1593,95 @@ pub const Connection = struct {
         }
     }
 
-    fn readerLoop(self: *Self, stream: *net.Stream, exit: *ExitSignal) void {
-        if (self.runReader(stream)) |_| {
+    fn readerLoop(self: *Self, stream: *net.Stream, tls_rt: ?*TlsRuntime, ready: *xsync.Event, exit: *ExitSignal) void {
+        if (self.runReader(stream, tls_rt, ready)) |_| {
+            self.failHandshakeIfWaiting(null);
             exit.signal(self.io, .reader_done, null);
         } else |err| {
+            // A cancellation is the teardown itself: the handshake waiter is
+            // woken through the status change, not through a fake failure.
+            if (err != error.Canceled) self.failHandshakeIfWaiting(err);
             exit.signal(self.io, .reader_done, err);
         }
     }
 
-    fn runReader(self: *Self, stream: *net.Stream) !void {
+    /// Wake a connect/reconnect attempt blocked in
+    /// waitForHandshakeCompletion when the reader exits before the NATS
+    /// handshake finished. Without this the waiter sits out the full
+    /// handshake timeout and reports Timeout instead of the real cause
+    /// (an EOF from the server, a TLS certificate error, ...).
+    fn failHandshakeIfWaiting(self: *Self, err: ?anyerror) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (!self.handshake_state.isWaiting()) return;
+        self.handshake_error = err;
+        self.handshake_state = .failed;
+        self.handshake_cond.broadcast(self.io);
+    }
+
+    fn runReader(self: *Self, stream: *net.Stream, tls_rt: ?*TlsRuntime, ready: *xsync.Event) !void {
         log.debug("Reader loop started", .{});
         defer {
             log.debug("Reader loop exited", .{});
         }
 
-        var buffer: [4096]u8 = undefined;
-        var stream_reader = stream.reader(self.io, &buffer);
+        var stack_buffer: [4096]u8 = undefined;
+        const buffer: []u8 = if (tls_rt) |rt| rt.read_buffer else &stack_buffer;
+        var stream_reader = stream.reader(self.io, buffer);
+
+        if (tls_rt) |rt| {
+            if (!rt.opts.handshake_first) {
+                // The NATS TLS upgrade happens after the plaintext INFO:
+                // parse until the INFO is handled. That queues CONNECT+PING
+                // into the write buffer, where it stays until the flusher is
+                // released below - so credentials never touch the socket
+                // unencrypted.
+                try self.readUntilInfo(&stream_reader);
+            }
+            try self.performTlsHandshake(stream, &stream_reader, rt);
+            ready.set(self.io);
+            try self.runReaderTls(&stream_reader, rt);
+        } else {
+            try self.runReaderPlain(&stream_reader);
+        }
+    }
+
+    /// Pre-TLS phase: read and parse plaintext until the server INFO has
+    /// been processed, the handshake failed (a server -ERR), or the
+    /// connection is torn down.
+    fn readUntilInfo(self: *Self, stream_reader: *net.Stream.Reader) !void {
+        const reader = &stream_reader.interface;
+        while (true) {
+            {
+                try self.mutex.lock(self.io);
+                defer self.mutex.unlock(self.io);
+                switch (self.handshake_state) {
+                    .waiting_for_info => {},
+                    .failed => return self.handshake_error orelse ConnectionError.ConnectionFailed,
+                    else => return,
+                }
+            }
+
+            reader.fillMore() catch |err| switch (err) {
+                error.EndOfStream => {
+                    log.debug("Connection closed by server before INFO (EOF)", .{});
+                    return ConnectionError.ConnectionFailed;
+                },
+                // The `Io.Reader` interface erases the real error; it is
+                // stashed on the stream reader (including cancellation).
+                error.ReadFailed => return stream_reader.err.?,
+            };
+
+            const data = reader.buffered();
+            if (data.len == 0) continue;
+
+            log.debug("Read {} bytes: {s}", .{ data.len, data });
+            try self.parser.parse(self, data);
+            reader.toss(data.len);
+        }
+    }
+
+    fn runReaderPlain(self: *Self, stream_reader: *net.Stream.Reader) !void {
         const reader = &stream_reader.interface;
 
         while (true) {
@@ -1496,25 +1704,133 @@ pub const Connection = struct {
         }
     }
 
-    fn flusherLoop(self: *Self, stream: *net.Stream, exit: *ExitSignal) void {
-        if (self.runFlusher(stream)) |_| {
+    fn runReaderTls(self: *Self, stream_reader: *net.Stream.Reader, rt: *TlsRuntime) !void {
+        const reader = &stream_reader.interface;
+
+        while (true) {
+            // Decrypt is pure computation: TLS protocol errors surface
+            // here as themselves, while transport errors - including
+            // cancellation - only ever come out of fillMore below, where
+            // the real error is taken from the stream reader.
+            const res = try rt.dec.decrypt(reader.buffered(), rt.cleartext_buffer);
+            reader.toss(res.ciphertext_pos);
+            rt.forwardKeyUpdateRequest();
+
+            if (res.cleartext.len > 0) {
+                log.debug("Read {} decrypted bytes: {s}", .{ res.cleartext.len, res.cleartext });
+                try self.parser.parse(self, res.cleartext);
+            }
+            if (res.closed) {
+                log.debug("Connection closed by server (TLS close_notify)", .{});
+                break;
+            }
+            // Complete records may still be buffered; only hit the socket
+            // once decrypt stops making progress.
+            if (res.ciphertext_pos > 0) continue;
+
+            reader.fillMore() catch |err| switch (err) {
+                error.EndOfStream => {
+                    // TCP EOF without close_notify. Rude, but routine; the
+                    // NATS protocol is self-framing, so a truncation cannot
+                    // silently drop protocol data - the parser state simply
+                    // ends mid-command, same as a plaintext EOF.
+                    log.debug("Connection closed by server (EOF)", .{});
+                    break;
+                },
+                error.ReadFailed => return stream_reader.err.?,
+            };
+        }
+    }
+
+    /// Performs the TLS handshake on the reader task, before the flusher is
+    /// released. The resulting cipher is split into two independent
+    /// nonblock connections: dec for this reader, enc for the flusher.
+    fn performTlsHandshake(self: *Self, stream: *net.Stream, stream_reader: *net.Stream.Reader, rt: *TlsRuntime) !void {
+        log.debug("Starting TLS handshake with {s}", .{rt.host});
+
+        // The CA bundle is loaded fresh for every handshake, like
+        // credential files, so rotated certificates are picked up across
+        // reconnects.
+        var bundle: std.crypto.Certificate.Bundle = .empty;
+        defer bundle.deinit(self.allocator);
+        if (!rt.opts.insecure_skip_verify) {
+            const now = Io.Clock.real.now(self.io);
+            if (rt.opts.ca_file) |path| {
+                try bundle.addCertsFromFilePath(self.allocator, self.io, now, Io.Dir.cwd(), path);
+            } else {
+                try bundle.rescan(self.allocator, self.io, now);
+            }
+        }
+
+        var rng: std.Random.IoSource = .{ .io = self.io };
+        var hs = tls.nonblock.Client.init(.{
+            .host = rt.host,
+            .root_ca = bundle,
+            .insecure_skip_verify = rt.opts.insecure_skip_verify,
+            .rng = rng.interface(),
+            .now = Io.Clock.real.now(self.io),
+        });
+
+        // Ciphertext writer for the handshake flights; used only here. The
+        // flusher creates its own writer once the transport is ready.
+        var stream_writer = stream.writer(self.io, &.{});
+        const reader = &stream_reader.interface;
+
+        while (true) {
+            // hs.run is pure computation: TLS protocol and certificate
+            // errors come out of it directly, cancellation never does. The
+            // socket is only touched below, where the real error -
+            // including cancellation - is taken from the stream
+            // reader/writer.
+            const res = try hs.run(reader.buffered(), rt.cleartext_buffer);
+            reader.toss(res.recv_pos);
+            if (res.send.len > 0) {
+                stream_writer.interface.writeAll(res.send) catch {
+                    return stream_writer.err.?;
+                };
+            }
+            if (hs.done()) break;
+
+            reader.fillMore() catch |err| switch (err) {
+                error.EndOfStream => {
+                    log.debug("Connection closed by server during TLS handshake (EOF)", .{});
+                    return ConnectionError.ConnectionFailed;
+                },
+                error.ReadFailed => return stream_reader.err.?,
+            };
+        }
+
+        const hs_cipher = hs.cipher() orelse return ConnectionError.ConnectionFailed;
+        rt.enc = .init(hs_cipher);
+        rt.dec = .init(hs_cipher);
+
+        log.debug("TLS handshake with {s} completed", .{rt.host});
+    }
+
+    fn flusherLoop(self: *Self, stream: *net.Stream, tls_rt: ?*TlsRuntime, ready: *xsync.Event, exit: *ExitSignal) void {
+        if (self.runFlusher(stream, tls_rt, ready)) |_| {
             exit.signal(self.io, .flusher_done, null);
         } else |err| {
             exit.signal(self.io, .flusher_done, err);
         }
     }
 
-    fn runFlusher(self: *Self, stream: *net.Stream) !void {
+    fn runFlusher(self: *Self, stream: *net.Stream, tls_rt: ?*TlsRuntime, ready: *xsync.Event) !void {
         log.debug("Flusher loop started", .{});
         defer {
             log.debug("Flusher loop stopped", .{});
         }
 
-        // Unbuffered: every writeVec goes straight to the socket.
+        // Wait until the transport can carry protocol bytes: set upfront
+        // for plaintext, set by the reader task after the TLS handshake.
+        // Cancellation propagates from the wait on teardown.
+        try ready.wait(self.io);
+
+        // Unbuffered: every write goes straight to the socket.
         var stream_writer = stream.writer(self.io, &.{});
 
         while (true) {
-            try self.flusherIteration(&stream_writer);
+            try self.flusherIteration(&stream_writer, tls_rt);
 
             if (self.drain_state.load(.acquire) == .draining_pubs) {
                 try self.sendDrainPing();
@@ -1522,7 +1838,7 @@ pub const Connection = struct {
         }
     }
 
-    fn flusherIteration(self: *Self, stream_writer: *net.Stream.Writer) !void {
+    fn flusherIteration(self: *Self, stream_writer: *net.Stream.Writer, tls_rt: ?*TlsRuntime) !void {
         // Park until there is data to write. No periodic ticking is needed:
         // pushes signal the queue, close/reset broadcast it, and the flusher
         // task is canceled on connection teardown. The drain ping is sent
@@ -1539,6 +1855,10 @@ pub const Connection = struct {
             return;
         }
 
+        if (tls_rt) |rt| {
+            return self.flushTls(stream_writer, rt, gather);
+        }
+
         // The `Io.Writer` interface erases the real error; it is stashed on
         // the stream writer (including cancellation). Partial writes are
         // fine, whatever was written is consumed from the buffer.
@@ -1546,6 +1866,39 @@ pub const Connection = struct {
             return stream_writer.err.?;
         };
         try gather.consume(bytes_written);
+    }
+
+    fn flushTls(self: *Self, stream_writer: *net.Stream.Writer, rt: *TlsRuntime, gather: anytype) !void {
+        _ = self;
+
+        // Stage the gathered frames into one contiguous cleartext buffer,
+        // so a full staging buffer becomes one TLS record instead of a
+        // record per gathered slice.
+        var staged: usize = 0;
+        for (gather.slices) |slice| {
+            const n = @min(slice.len, rt.staging_buffer.len - staged);
+            @memcpy(rt.staging_buffer[staged..][0..n], slice[0..n]);
+            staged += n;
+            if (n < slice.len) break;
+        }
+
+        // Encrypt is pure computation (only TLS errors, never
+        // cancellation). Once bytes are encrypted the cipher sequence has
+        // advanced, so the ciphertext must be fully written or the
+        // connection torn down; there is no partial-consume like the
+        // plaintext path. A write failure tears the connection down, and
+        // dropping bytes that never reached the socket matches the
+        // at-most-once semantics of the plaintext path.
+        var consumed: usize = 0;
+        while (consumed < staged) {
+            const res = try rt.enc.encrypt(rt.staging_buffer[consumed..staged], rt.out_buffer);
+            std.debug.assert(res.cleartext_pos > 0); // out_buffer always fits one record
+            stream_writer.interface.writeAll(res.ciphertext) catch {
+                return stream_writer.err.?;
+            };
+            consumed += res.cleartext_pos;
+        }
+        try gather.consume(consumed);
     }
 
     /// Count a dropped message and report the start of a slow-consumer
@@ -1792,6 +2145,17 @@ pub const Connection = struct {
         self.server_info.parsed_version = ServerVersion.parse(self.server_info.version);
 
         log.debug("Parsed server info: id={?s}, version={?s} ({}.{}.{}), max_payload={}, headers={}", .{ self.server_info.server_id, self.server_info.version, self.server_info.parsed_version.major, self.server_info.parsed_version.minor, self.server_info.parsed_version.update, self.server_info.max_payload, self.server_info.headers });
+
+        // A server that requires TLS is unusable without client TLS
+        // configuration: fail the handshake with the real cause instead of
+        // letting the server reject the plaintext CONNECT.
+        if (self.server_info.tls_required and self.tls_rt == null and self.handshake_state == .waiting_for_info) {
+            log.err("Server requires TLS but no TLS is configured", .{});
+            self.handshake_error = ProtocolError.SecureConnectionRequired;
+            self.handshake_state = .failed;
+            self.handshake_cond.broadcast(self.io);
+            return;
+        }
 
         // Handle handshake if we're waiting for INFO
         if (self.handshake_state == .waiting_for_info) {
@@ -2571,4 +2935,16 @@ test "close interrupts reconnect delay" {
     try connection.manager_task.await(io);
 
     try std.testing.expectEqual(Result.interrupted, result.load(.acquire));
+}
+
+test "connect with TLS options fails when TLS is compiled out" {
+    if (build_options.use_tls) return error.SkipZigTest;
+
+    const io = std.testing.io;
+    var connection = Connection.init(std.testing.allocator, io, .{
+        .tls = .{},
+    });
+    defer connection.deinit();
+
+    try std.testing.expectError(error.TlsNotConfigured, connection.connect("nats://127.0.0.1:4222"));
 }
