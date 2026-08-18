@@ -30,7 +30,9 @@ const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
 const build_options = @import("build_options");
 const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
-const ResponseManager = @import("response_manager.zig").ResponseManager;
+const response_manager_mod = @import("response_manager.zig");
+const ResponseManager = response_manager_mod.ResponseManager;
+const RequestHandle = response_manager_mod.RequestHandle;
 const MAX_CONTROL_LINE_SIZE = @import("parser.zig").MAX_CONTROL_LINE_SIZE;
 const validation = @import("validation.zig");
 const nkeys = @import("nkeys.zig");
@@ -151,6 +153,8 @@ pub const ProtocolError = error{
 };
 
 pub const ConnectionStatus = enum {
+    /// Allocated and ready for its one allowed call to connect().
+    initialized,
     closed,
     connecting,
     connected,
@@ -304,8 +308,12 @@ pub const Connection = struct {
 
     options: ConnectionOptions,
 
-    status: ConnectionStatus = .closed,
+    status: ConnectionStatus = .initialized,
     status_cond: xsync.Condition = .init,
+    /// Latched when the first NATS handshake and restoration complete, so
+    /// connect() cannot miss a short-lived `.connected` state if the socket
+    /// drops again before its waiter reacquires the mutex.
+    connected_once: bool = false,
 
     // Exit signal of the current runConnection iteration (protected by mutex)
     exit_signal: ?*ExitSignal = null,
@@ -451,9 +459,13 @@ pub const Connection = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (self.status != .closed) {
-            log.err("Already connected", .{});
-            return error.AlreadyConnected;
+        switch (self.status) {
+            .initialized => {},
+            .closed, .connection_failed => return error.ConnectionClosed,
+            .connecting, .connected, .reconnecting => {
+                log.err("Already connected", .{});
+                return error.AlreadyConnected;
+            },
         }
 
         self.status = .connecting;
@@ -475,6 +487,12 @@ pub const Connection = struct {
         errdefer self.manager_task.cancel(self.io);
 
         while (true) {
+            if (self.status == .closed) return error.ConnectionClosed;
+            if (self.connected_once) {
+                log.info("Connected successfully", .{});
+                return;
+            }
+
             switch (self.status) {
                 .closed => return error.ConnectionClosed,
                 .connection_failed => {
@@ -485,10 +503,7 @@ pub const Connection = struct {
                     }
                     return error.ConnectionFailed;
                 },
-                .connected => {
-                    log.info("Connected successfully", .{});
-                    return;
-                },
+                .connected => return,
                 else => {
                     try self.status_cond.wait(self.io, &self.mutex);
                 },
@@ -500,47 +515,52 @@ pub const Connection = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
+        if (self.status == .closed or self.status == .connection_failed) {
+            return error.ConnectionClosed;
+        }
+
         _ = try self.server_pool.addServer(url, false);
     }
 
     /// Close the connection
     pub fn close(self: *Self) void {
-        // Call the callback outside of mutex, if provided
         var callback: @TypeOf(self.options.callbacks.closed_cb) = null;
-        defer if (callback) |cb| cb(self);
 
         log.info("Closing connection", .{});
 
-        self.manager_task.cancel(self.io);
-
         self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
         if (self.status == .closed) {
+            self.mutex.unlock(self.io);
             return;
         }
 
-        // A terminal reconnect failure already reported closure through
-        // failTerminally; don't fire the closed callback a second time.
-        const already_reported = self.status == .connection_failed;
+        const previous_status = self.status;
 
-        // Mark the connection as permanently closed
+        // Claim the terminal transition before canceling the manager. This
+        // prevents the manager's cancelation path from racing close() and
+        // reporting a connection failure instead of an explicit close.
         self.status = .closed;
         self.status_cond.broadcast(self.io);
-
-        // Close write buffers to wake up any waiting fibers
-        self.pending_buffer.close();
-        self.write_buffer.close();
-
-        // Wake up any waiting flush() calls
+        self.handshake_cond.broadcast(self.io);
         self.pong_condition.broadcast(self.io);
+        self.mutex.unlock(self.io);
 
-        // Make sure we invoke the closed callback
-        if (!already_reported) {
+        self.closeWaiters();
+
+        // The state change and waiter wakeups happen first so manager and
+        // operation tasks can observe closure while they are being joined.
+        self.manager_task.cancel(self.io);
+
+        // A failed connection already emitted closed_cb from failTerminally,
+        // while a never-started/never-established connection has never been
+        // open and therefore has no close event to report.
+        if (previous_status == .connected or previous_status == .reconnecting) {
             if (self.options.callbacks.closed_cb) |cb| {
                 callback = cb;
             }
         }
+
+        if (callback) |cb| cb(self);
     }
 
     pub fn getStatus(self: *Self) ConnectionStatus {
@@ -580,7 +600,7 @@ pub const Connection = struct {
                 log.info("Already reconnecting, ignoring manual reconnect request", .{});
                 return ConnectionError.AlreadyReconnecting;
             },
-            .closed => {
+            .initialized, .closed => {
                 log.warn("Cannot reconnect: connection is closed", .{});
                 return ConnectionError.ConnectionClosed;
             },
@@ -911,7 +931,7 @@ pub const Connection = struct {
         defer self.mutex.unlock(self.io);
 
         while (self.status != .connected) {
-            if (self.status == .closed or self.status == .connection_failed) {
+            if (self.status == .initialized or self.status == .closed or self.status == .connection_failed) {
                 log.debug("Flush skipped, no longer connected", .{});
                 return error.ConnectionClosed;
             }
@@ -1032,22 +1052,16 @@ pub const Connection = struct {
         self.managerLoop() catch |err| {
             if (err == error.Canceled) return error.Canceled;
             log.err("Manager loop failed: {}", .{err});
+            // All ordinary give-up paths transition explicitly in
+            // managerLoop. This catches unexpected manager failures so they
+            // receive the same wakeup and callback semantics.
+            self.failTerminally(true);
         };
     }
 
     fn managerLoop(self: *Self) anyerror!void {
         log.debug("Manager loop started", .{});
         defer log.debug("Manager loop exited", .{});
-
-        defer {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-
-            if (self.status != .closed) {
-                self.status = .connection_failed;
-                self.status_cond.broadcast(self.io);
-            }
-        }
 
         var attempts: u32 = 0;
 
@@ -1079,6 +1093,7 @@ pub const Connection = struct {
             const pool_exhausted = if (conn_err) |err| err == error.NoServerAvailable else false;
 
             var callback: @TypeOf(self.options.callbacks.disconnected_cb) = null;
+            var initial_connect_failed = false;
 
             {
                 try self.mutex.lock(self.io);
@@ -1090,6 +1105,13 @@ pub const Connection = struct {
                     log.info("Disconnected", .{});
                 }
 
+                // close() claims the terminal state before canceling the
+                // manager. Never let a concurrently finishing connection
+                // attempt resurrect it as reconnecting.
+                if (self.status == .closed or self.status == .connection_failed) {
+                    return;
+                }
+
                 if (self.status == .connecting) {
                     // Initial connection: try each configured server once
                     // (selectNextServer rotates through the pool), then
@@ -1097,12 +1119,11 @@ pub const Connection = struct {
                     // fire here; the connection was never established.
                     attempts += 1;
                     if (pool_exhausted or attempts >= initial_pool_size) {
-                        return;
+                        initial_connect_failed = true;
+                    } else {
+                        continue;
                     }
-                    continue;
-                }
-
-                if (pool_exhausted or !self.options.reconnect.allow_reconnect) {
+                } else if (pool_exhausted or !self.options.reconnect.allow_reconnect) {
                     // Terminal; handled outside the mutex below.
                 } else {
                     // The disconnected callback fires only when an
@@ -1128,12 +1149,19 @@ pub const Connection = struct {
                 }
             }
 
+            if (initial_connect_failed) {
+                self.failTerminally(false);
+                return;
+            }
+
             if (pool_exhausted) {
                 // Every server exceeded max_reconnect and was removed from
-                // the pool. The disconnected callback fired when
-                // reconnection started.
+                // the pool. If exhaustion happened immediately after an
+                // established connection was lost, this is also the first
+                // opportunity to report the disconnect; failTerminally
+                // suppresses it when reconnecting already reported it.
                 log.warn("No servers left to reconnect to, giving up", .{});
-                self.failTerminally(false);
+                self.failTerminally(true);
                 return;
             }
             if (!self.options.reconnect.allow_reconnect) {
@@ -1170,28 +1198,54 @@ pub const Connection = struct {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
 
-            if (self.status == .closed) return;
+            if (self.status == .closed or self.status == .connection_failed) return;
+
+            const was_connected = self.status == .connected;
+            const had_established_connection = was_connected or self.status == .reconnecting;
 
             self.status = .connection_failed;
             self.status_cond.broadcast(self.io);
+            self.handshake_cond.broadcast(self.io);
+            self.pong_condition.broadcast(self.io);
 
-            if (fire_disconnected) {
+            if (fire_disconnected and was_connected) {
                 disconnected_cb = self.options.callbacks.disconnected_cb;
             }
-            closed_cb = self.options.callbacks.closed_cb;
+            if (had_established_connection) {
+                closed_cb = self.options.callbacks.closed_cb;
+            }
         }
 
-        // Wake anything blocked on the buffers (publishers, flush waiters).
-        self.pending_buffer.close();
-        self.write_buffer.close();
+        self.closeWaiters();
 
         if (disconnected_cb) |cb| cb(self);
         if (closed_cb) |cb| cb(self);
     }
 
+    /// Permanently stop every operation that can outlive the connection.
+    /// Each component's close operation is idempotent, so explicit close and
+    /// terminal manager failure may safely race to call this.
+    fn closeWaiters(self: *Self) void {
+        self.pending_buffer.close();
+        self.write_buffer.close();
+        self.response_manager.close();
+        self.drain_completion.set(self.io);
+
+        self.subs_mutex.lockUncancelable(self.io);
+        defer self.subs_mutex.unlock(self.io);
+        var iter = self.subscriptions.valueIterator();
+        while (iter.next()) |sub_ptr| {
+            sub_ptr.*.closeFromConnection();
+        }
+    }
+
     fn selectNextServer(self: *Self) !*Server {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+
+        if (self.status == .closed or self.status == .connection_failed) {
+            return error.ConnectionClosed;
+        }
 
         const server = try self.server_pool.getNextServer(self.options.reconnect.max_reconnect, self.current_server) orelse return error.NoServerAvailable;
         server.reconnects += 1;
@@ -1213,6 +1267,9 @@ pub const Connection = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
+        if (self.status == .closed or self.status == .connection_failed) {
+            return error.ConnectionClosed;
+        }
         std.debug.assert(self.status == .connecting or self.status == .reconnecting);
 
         // Setup connection state. The reconnect counter is deliberately not
@@ -1258,6 +1315,9 @@ pub const Connection = struct {
         {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
+            if (self.status == .closed or self.status == .connection_failed) {
+                return error.ConnectionClosed;
+            }
             self.exit_signal = &exit_signal;
         }
         defer {
@@ -1312,7 +1372,11 @@ pub const Connection = struct {
         {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
+            if (self.status == .closed or self.status == .connection_failed) {
+                return error.ConnectionClosed;
+            }
             try self.pending_buffer.moveToBuffer(&self.write_buffer);
+            self.connected_once = true;
             self.status = .connected;
             self.status_cond.broadcast(self.io);
         }
@@ -2007,6 +2071,10 @@ pub const Connection = struct {
         const deadline = io_util.deadline(self.io, self.options.timeout);
 
         while (!self.handshake_state.isFinished()) {
+            if (self.status == .closed or self.status == .connection_failed) {
+                return error.ConnectionClosed;
+            }
+
             log.debug("Handshake state: {}", .{self.handshake_state});
 
             if (io_util.expired(self.io, deadline)) {
@@ -2038,6 +2106,11 @@ pub const Connection = struct {
 
     // Connection draining
     pub fn drain(self: *Self) !void {
+        const status = self.getStatus();
+        if (status == .initialized or status == .closed or status == .connection_failed) {
+            return error.ConnectionClosed;
+        }
+
         const prev_state = self.drain_state.cmpxchgStrong(.not_draining, .draining_subs, .acq_rel, .acquire);
         if (prev_state != null) return; // Already draining
 
@@ -2078,7 +2151,13 @@ pub const Connection = struct {
     pub fn waitForDrainCompletion(self: *Self, timeout: Io.Timeout) !void {
         const state = self.drain_state.load(.acquire);
         switch (state) {
-            .not_draining => return error.NotDraining,
+            .not_draining => {
+                const status = self.getStatus();
+                if (status == .initialized or status == .closed or status == .connection_failed) {
+                    return error.ConnectionClosed;
+                }
+                return error.NotDraining;
+            },
             .drain_complete => return,
             else => {},
         }
@@ -2087,6 +2166,10 @@ pub const Connection = struct {
             try self.drain_completion.wait(self.io);
         } else {
             try self.drain_completion.waitTimeout(self.io, timeout);
+        }
+
+        if (self.drain_state.load(.acquire) != .drain_complete) {
+            return error.ConnectionClosed;
         }
     }
 
@@ -2136,3 +2219,138 @@ pub const Connection = struct {
         };
     }
 };
+
+test "connection can only be connected from its initialized state" {
+    const CallbackCounter = struct {
+        var closed: std.atomic.Value(u32) = .init(0);
+
+        fn onClosed(_: *Connection) void {
+            _ = closed.fetchAdd(1, .monotonic);
+        }
+    };
+
+    const io = std.testing.io;
+    CallbackCounter.closed.store(0, .monotonic);
+
+    var connection = Connection.init(std.testing.allocator, io, .{
+        .callbacks = .{ .closed_cb = CallbackCounter.onClosed },
+    });
+    defer connection.deinit();
+
+    try std.testing.expectEqual(ConnectionStatus.initialized, connection.getStatus());
+
+    connection.close();
+    try std.testing.expectEqual(ConnectionStatus.closed, connection.getStatus());
+    try std.testing.expectError(error.ConnectionClosed, connection.connect("nats://127.0.0.1:4222"));
+
+    // Closing a never-connected object is silent and idempotent.
+    connection.close();
+    try std.testing.expectEqual(@as(u32, 0), CallbackCounter.closed.load(.monotonic));
+}
+
+test "terminal connection failure wakes all operation waiters exactly once" {
+    const Result = enum(u8) {
+        pending,
+        connection_closed,
+        unexpected,
+    };
+    const Waiters = struct {
+        fn saveError(result: *std.atomic.Value(Result), err: anyerror) void {
+            result.store(if (err == error.ConnectionClosed) .connection_closed else .unexpected, .release);
+        }
+
+        fn flush(connection: *Connection, result: *std.atomic.Value(Result)) void {
+            connection.flush() catch |err| return saveError(result, err);
+            result.store(.unexpected, .release);
+        }
+
+        fn response(manager: *ResponseManager, handle: RequestHandle, result: *std.atomic.Value(Result)) void {
+            const msg = manager.waitForResponse(handle, .none) catch |err| return saveError(result, err);
+            msg.deinit();
+            result.store(.unexpected, .release);
+        }
+
+        fn message(subscription: *Subscription, result: *std.atomic.Value(Result)) void {
+            const msg = subscription.nextMsg() catch |err| return saveError(result, err);
+            msg.deinit();
+            result.store(.unexpected, .release);
+        }
+
+        fn drain(connection: *Connection, result: *std.atomic.Value(Result)) void {
+            connection.waitForDrainCompletion(.none) catch |err| return saveError(result, err);
+            result.store(.unexpected, .release);
+        }
+
+        fn subscriptionDrain(subscription: *Subscription, result: *std.atomic.Value(Result)) void {
+            subscription.waitForDrainCompletion(.none) catch |err| return saveError(result, err);
+            result.store(.unexpected, .release);
+        }
+    };
+    const CallbackCounter = struct {
+        var disconnected: std.atomic.Value(u32) = .init(0);
+        var closed: std.atomic.Value(u32) = .init(0);
+
+        fn onDisconnected(_: *Connection) void {
+            _ = disconnected.fetchAdd(1, .monotonic);
+        }
+
+        fn onClosed(_: *Connection) void {
+            _ = closed.fetchAdd(1, .monotonic);
+        }
+    };
+
+    const io = std.testing.io;
+    CallbackCounter.disconnected.store(0, .monotonic);
+    CallbackCounter.closed.store(0, .monotonic);
+
+    var connection = Connection.init(std.testing.allocator, io, .{
+        .timeout = .none,
+        .callbacks = .{
+            .disconnected_cb = CallbackCounter.onDisconnected,
+            .closed_cb = CallbackCounter.onClosed,
+        },
+    });
+    defer connection.deinit();
+    connection.status = .connected;
+
+    const subscription = try connection.subscribeSync("lifetime.waiter");
+    defer subscription.deinit();
+    // Keep one synthetic pending delivery so drain() remains in progress.
+    subscription_mod.incrementPending(subscription, 0);
+    subscription.drain();
+    const request_handle = try connection.response_manager.createRequest();
+    connection.drain_state.store(.draining_pubs, .release);
+
+    var flush_result: std.atomic.Value(Result) = .init(.pending);
+    var response_result: std.atomic.Value(Result) = .init(.pending);
+    var message_result: std.atomic.Value(Result) = .init(.pending);
+    var drain_result: std.atomic.Value(Result) = .init(.pending);
+    var subscription_drain_result: std.atomic.Value(Result) = .init(.pending);
+
+    var waiters: Io.Group = .init;
+    defer waiters.cancel(io);
+    try waiters.concurrent(io, Waiters.flush, .{ &connection, &flush_result });
+    try waiters.concurrent(io, Waiters.response, .{ &connection.response_manager, request_handle, &response_result });
+    try waiters.concurrent(io, Waiters.message, .{ subscription, &message_result });
+    try waiters.concurrent(io, Waiters.drain, .{ &connection, &drain_result });
+    try waiters.concurrent(io, Waiters.subscriptionDrain, .{ subscription, &subscription_drain_result });
+
+    // failTerminally must make progress even when flush has no timeout and
+    // the server never supplies a PONG.
+    connection.failTerminally(true);
+    try waiters.await(io);
+
+    try std.testing.expectEqual(Result.connection_closed, flush_result.load(.acquire));
+    try std.testing.expectEqual(Result.connection_closed, response_result.load(.acquire));
+    try std.testing.expectEqual(Result.connection_closed, message_result.load(.acquire));
+    try std.testing.expectEqual(Result.connection_closed, drain_result.load(.acquire));
+    try std.testing.expectEqual(Result.connection_closed, subscription_drain_result.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), CallbackCounter.disconnected.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), CallbackCounter.closed.load(.monotonic));
+
+    // Repeated terminal paths must not repeat callbacks.
+    connection.failTerminally(true);
+    connection.close();
+    try std.testing.expectEqual(@as(u32, 1), CallbackCounter.disconnected.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), CallbackCounter.closed.load(.monotonic));
+}

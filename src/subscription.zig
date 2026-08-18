@@ -79,6 +79,8 @@ pub const Subscription = struct {
     // Drain state
     draining: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     drain_complete: xsync.Event = .init,
+    drain_succeeded: std.atomic.Value(bool) = .init(false),
+    connection_closed: std.atomic.Value(bool) = .init(false),
 
     pub const MessageQueue = ConcurrentQueue(*Message, 1024); // 1K chunk size
 
@@ -216,6 +218,15 @@ pub const Subscription = struct {
         self.nc.allocator.destroy(self);
     }
 
+    /// Wake subscription receivers and drain waiters when their owning
+    /// connection becomes terminal. The subscription object remains valid
+    /// until its normal reference-counted destruction.
+    pub fn closeFromConnection(self: *Subscription) void {
+        self.connection_closed.store(true, .release);
+        self.messages.close();
+        self.drain_complete.set(self.nc.io);
+    }
+
     /// Set the pending limits for this subscription (0 = unlimited).
     /// Messages arriving while a limit is exceeded are dropped and counted
     /// in `dropped()`, and the connection's `slow_consumer_cb` is notified
@@ -270,11 +281,13 @@ pub const Subscription = struct {
     }
 
     pub fn isDrainComplete(self: *Subscription) bool {
-        return self.draining.load(.acquire) and self.drain_complete.isSet();
+        return self.draining.load(.acquire) and self.drain_succeeded.load(.acquire);
     }
 
     /// Wait for the subscription drain to finish.
     pub fn waitForDrainCompletion(self: *Subscription, timeout: Io.Timeout) !void {
+        if (self.drain_succeeded.load(.acquire)) return;
+        if (self.connection_closed.load(.acquire)) return error.ConnectionClosed;
         if (!self.draining.load(.acquire)) {
             return error.NotDraining;
         }
@@ -283,6 +296,10 @@ pub const Subscription = struct {
             try self.drain_complete.wait(self.nc.io);
         } else {
             try self.drain_complete.waitTimeout(self.nc.io, timeout);
+        }
+
+        if (!self.drain_succeeded.load(.acquire)) {
+            return error.ConnectionClosed;
         }
     }
 
@@ -481,7 +498,9 @@ pub fn decrementPending(sub: *Subscription, msg_size: usize) void {
 
     // Check if drain is complete (we just decremented from 1 to 0)
     if (sub.draining.load(.acquire) and remaining_msgs == 1) {
+        if (sub.connection_closed.load(.acquire)) return;
         log.debug("Subscription {d} drain completed", .{sub.sid});
+        sub.drain_succeeded.store(true, .release);
         sub.drain_complete.set(sub.nc.io);
         sub.nc.notifySubscriptionDrainComplete();
     }

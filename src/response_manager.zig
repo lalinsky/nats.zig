@@ -123,9 +123,23 @@ pub const ResponseManager = struct {
         self.pending_responses.deinit(self.allocator);
     }
 
+    /// Permanently reject new requests and wake requests already waiting for
+    /// a response. Resource destruction remains in deinit(), since the
+    /// response subscription may still have user-visible references.
+    pub fn close(self: *ResponseManager) void {
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+
+        if (self.is_closed) return;
+        self.is_closed = true;
+        self.pending_condition.broadcast(self.io);
+    }
+
     pub fn ensureInitialized(self: *ResponseManager, connection: *Connection) !void {
         try self.pending_mutex.lock(self.io);
         defer self.pending_mutex.unlock(self.io);
+
+        if (self.is_closed) return error.ConnectionClosed;
 
         // Already initialized by another thread
         if (self.resp_mux != null) return;
@@ -458,7 +472,8 @@ test "request handle timeout functionality" {
 
     // Test timeout behavior
     const start = io_util.now(std.testing.io);
-    const result = manager.waitForResponse(handle, .fromMilliseconds(1)); // 1ms timeout
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } };
+    const result = manager.waitForResponse(handle, timeout);
     const duration = start.durationTo(io_util.now(std.testing.io)).nanoseconds;
 
     try testing.expectError(error.Timeout, result);
@@ -477,6 +492,7 @@ test "multi-response request creation and timeout" {
     defer manager.cleanupRequest(handle);
 
     // Test timeout behavior for multi-response
-    const result = manager.waitForMultiResponse(handle, .fromMilliseconds(1), .{}); // 1ms timeout
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } };
+    const result = manager.waitForMultiResponse(handle, timeout, .{});
     try testing.expectError(error.Timeout, result);
 }
