@@ -1523,13 +1523,13 @@ pub const Connection = struct {
     }
 
     fn flusherIteration(self: *Self, stream_writer: *net.Stream.Writer) !void {
-        // Try to gather data from buffer first
+        // Park until there is data to write. No periodic ticking is needed:
+        // pushes signal the queue, close/reset broadcast it, and the flusher
+        // task is canceled on connection teardown. The drain ping is sent
+        // directly by startPublicationDrain and lands here as data.
         var slices: [16][]const u8 = undefined;
-        const gather = self.write_buffer.gatherReadSlices(&slices, self.options.timeout) catch |err| switch (err) {
-            error.Timeout => {
-                // No data to write
-                return;
-            },
+        const gather = self.write_buffer.gatherReadSlices(&slices, .none) catch |err| switch (err) {
+            error.Timeout => unreachable, // .none never times out
             error.Closed => return error.Closed,
             error.Canceled => return error.Canceled,
         };
