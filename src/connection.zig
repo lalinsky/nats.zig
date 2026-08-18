@@ -212,6 +212,11 @@ pub const ConnectionCallbacks = struct {
     reconnected_cb: ?*const fn (*Connection) void = null,
     closed_cb: ?*const fn (*Connection) void = null,
     error_cb: ?*const fn (*Connection, []const u8) void = null,
+    /// Called once per slow-consumer episode with the subscription that
+    /// dropped a message and its cumulative dropped count. Invoked outside
+    /// connection and queue locks; the subscription is retained for the
+    /// duration of the call.
+    slow_consumer_cb: ?*const fn (*Connection, *Subscription, u64) void = null,
 };
 
 const ExitReason = enum(u8) {
@@ -255,9 +260,12 @@ pub const ConnectionOptions = struct {
     ping_interval: Io.Duration = .fromSeconds(120), // .zero = disabled
     max_pings_out: u32 = 2, // max unanswered keep-alive PINGs
 
-    /// Maximum bytes buffered for writing on a live connection
-    /// (0 = unlimited). When full, publishers block (cancelable) until the
-    /// flusher catches up, like the buffered writers in nats.go and nats.c.
+    /// High-water mark for bytes buffered on a live connection
+    /// (0 = unlimited). When exceeded, publishers wait (cancelably,
+    /// without holding connection locks) for the flusher to catch up,
+    /// like the buffered writers in nats.go and nats.c. A single message
+    /// larger than the limit is still accepted into an empty buffer, and
+    /// small control frames (PING, SUB, ...) always go through.
     write_buffer_limit: usize = 8 * 1024 * 1024,
 
     // Authentication
@@ -365,7 +373,7 @@ pub const Connection = struct {
             .server_pool = ServerPool.init(allocator),
             .server_info_arena = std.heap.ArenaAllocator.init(allocator),
             .pending_buffer = WriteBuffer.init(allocator, io, .{ .max_size = options.reconnect.reconnect_buf_size }),
-            .write_buffer = WriteBuffer.init(allocator, io, .{ .max_size = options.write_buffer_limit, .block_when_full = true }),
+            .write_buffer = WriteBuffer.init(allocator, io, .{ .max_size = options.write_buffer_limit, .soft_limit = true }),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .response_manager = ResponseManager.init(allocator, io),
             .parser = Parser.init(allocator, io),
@@ -620,6 +628,27 @@ pub const Connection = struct {
     }
 
     fn publishMsgInternal(self: *Self, msg: *Message, reply_override: ?[]const u8) !void {
+        while (true) {
+            return self.publishMsgAttempt(msg, reply_override) catch |err| switch (err) {
+                error.NoSpace => {
+                    // The live write buffer is over its high-water mark.
+                    // Wait for the flusher outside of Connection.mutex, so
+                    // reconnect and close can always proceed (both wake the
+                    // waiters), then retry with the connection state
+                    // re-checked (it may route to the pending buffer now).
+                    const estimated_size = msg.data.len + 512;
+                    self.write_buffer.queue.waitForSpace(estimated_size) catch |wait_err| switch (wait_err) {
+                        error.Closed => return ConnectionError.ConnectionClosed,
+                        error.Canceled => |e| return e,
+                    };
+                    continue;
+                },
+                else => |other| return other,
+            };
+        }
+    }
+
+    fn publishMsgAttempt(self: *Self, msg: *Message, reply_override: ?[]const u8) !void {
         if (self.drain_state.load(.acquire) == .draining_pubs) {
             return error.DrainInProgress;
         }
@@ -1323,13 +1352,14 @@ pub const Connection = struct {
     }
 
     /// Count a dropped message and report the start of a slow-consumer
-    /// episode through the error callback (once per episode, like nats.go).
+    /// episode (once per episode, like nats.go). Called from processMsg
+    /// with no locks held and the subscription retained.
     fn handleSlowConsumer(self: *Self, sub: *Subscription) void {
-        _ = sub.dropped_msgs.fetchAdd(1, .monotonic);
+        const total_dropped = sub.dropped_msgs.fetchAdd(1, .monotonic) + 1;
         if (sub.slow_consumer.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
             log.warn("Slow consumer, messages dropped for subscription {d} ({s})", .{ sub.sid, sub.subject });
-            if (self.options.callbacks.error_cb) |cb| {
-                cb(self, "Slow Consumer, messages dropped");
+            if (self.options.callbacks.slow_consumer_cb) |cb| {
+                cb(self, sub, total_dropped);
             }
         }
     }
@@ -1387,13 +1417,11 @@ pub const Connection = struct {
                     },
                     error.Canceled => return error.Canceled,
                     else => {
-                        // Allocation failure: drop this one message instead
-                        // of tearing down the connection for all
-                        // subscriptions.
+                        // Real allocation failure: this remains a connection
+                        // error (unlike a configured pending-limit drop).
                         log.err("Failed to enqueue message for sid {d}: {}", .{ message.sid, err });
                         subscription_mod.decrementPending(s, message.data.len);
-                        self.handleSlowConsumer(s);
-                        return;
+                        return err;
                     },
                 }
             };

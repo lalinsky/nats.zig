@@ -26,6 +26,9 @@ pub const PushError = error{
     Closed,
     ChunkLimitExceeded,
     OutOfMemory,
+    /// A soft-limited queue is over its high-water mark; the caller can
+    /// wait for space (see `waitForSpace`) and retry.
+    NoSpace,
 };
 
 /// A single chunk in the linked list with inline data
@@ -173,7 +176,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         mutex: xsync.Mutex,
         /// Condition variable for waiting readers
         data_cond: xsync.Condition,
-        /// Condition variable for writers waiting for space (block_when_full)
+        /// Condition variable for writers waiting for space (soft_limit mode)
         space_cond: xsync.Condition,
 
         /// Head of the linked list (oldest chunk, protected by mutex)
@@ -189,9 +192,11 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
         max_chunks: usize,
         /// Maximum total bytes allowed (0 = unlimited)
         max_size: usize,
-        /// Whether writers block waiting for space instead of erroring
-        /// when max_size is reached
-        block_when_full: bool,
+        /// Whether max_size is a high-water mark (soft limit) rather than a
+        /// hard cap: an append into an empty queue may overshoot the limit,
+        /// and an over-limit append fails with NoSpace so the caller can
+        /// wait for space and retry
+        soft_limit: bool,
 
         /// Pool of reusable chunks (protected by mutex)
         chunk_pool: Pool,
@@ -213,9 +218,9 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             max_chunks: usize = 0,
             /// Maximum total bytes allowed (0 = unlimited)
             max_size: usize = 0,
-            /// When max_size is reached, block writers (cancelable) until
-            /// readers consume data, instead of failing the push
-            block_when_full: bool = false,
+            /// Treat max_size as a high-water mark instead of a hard cap
+            /// (see the field documentation)
+            soft_limit: bool = false,
         };
 
         pub fn init(allocator: Allocator, io: Io, config: Config) Self {
@@ -231,7 +236,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 .total_chunks = 0,
                 .max_chunks = config.max_chunks,
                 .max_size = config.max_size,
-                .block_when_full = config.block_when_full,
+                .soft_limit = config.soft_limit,
                 .chunk_pool = Pool.init(allocator, config.max_pool_size),
                 .is_closed = false,
                 .reset_id = 0,
@@ -251,34 +256,51 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
             self.chunk_pool.deinit(self.allocator);
         }
 
-        /// Push a single item (fiber-safe, cancelable)
-        /// Enforce the size limit for `needed` additional items; blocks
-        /// waiting for readers when configured to do so. Assumes the mutex
-        /// is held; may release it while waiting.
-        fn reserveSpaceLocked(self: *Self, needed: usize) (Io.Cancelable || PushError)!void {
+        /// Enforce the size limit for `needed` additional items. Never
+        /// blocks; assumes the mutex is held.
+        fn reserveSpaceLocked(self: *Self, needed: usize) PushError!void {
             if (self.max_size == 0) return;
 
             const max_items = self.max_size / @sizeOf(T);
-            if (needed > max_items) {
-                // Can never fit, waiting would deadlock
-                return PushError.OutOfMemory;
-            }
 
-            if (!self.block_when_full) {
+            if (self.soft_limit) {
+                // High-water mark: an append into an empty queue may
+                // overshoot (e.g. a single frame larger than the limit).
+                if (self.items_available == 0) return;
                 if (self.items_available + needed > max_items) {
-                    return PushError.OutOfMemory;
+                    return PushError.NoSpace;
                 }
                 return;
             }
 
-            while (!self.is_closed and self.items_available + needed > max_items) {
-                try self.space_cond.wait(self.io, &self.mutex);
-            }
-            if (self.is_closed) {
-                return PushError.Closed;
+            if (needed > max_items or self.items_available + needed > max_items) {
+                return PushError.OutOfMemory;
             }
         }
 
+        /// Wait until `needed` more items fit under the soft limit, until
+        /// the queue is empty (a lone oversized append is always allowed),
+        /// or until the queue is closed. No space is reserved: the caller
+        /// must retry its append and may need to wait again.
+        pub fn waitForSpace(self: *Self, needed: usize) (Io.Cancelable || error{Closed})!void {
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
+
+            if (self.max_size == 0) return;
+            const max_items = self.max_size / @sizeOf(T);
+
+            while (!self.is_closed and
+                self.items_available != 0 and
+                self.items_available + needed > max_items)
+            {
+                try self.space_cond.wait(self.io, &self.mutex);
+            }
+            if (self.is_closed) {
+                return error.Closed;
+            }
+        }
+
+        /// Push a single item (fiber-safe, cancelable)
         pub fn push(self: *Self, item: T) (Io.Cancelable || PushError)!void {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
@@ -287,7 +309,11 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 return PushError.Closed;
             }
 
-            try self.reserveSpaceLocked(1);
+            // Soft-limited queues only meter bulk appends (appendMany);
+            // single items and slices are small control data.
+            if (!self.soft_limit) {
+                try self.reserveSpaceLocked(1);
+            }
 
             const chunk = try self.ensureWritableChunk();
             const success = chunk.pushItem(item);
@@ -310,7 +336,10 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
                 return PushError.Closed;
             }
 
-            try self.reserveSpaceLocked(items.len);
+            // See push: control-sized appends bypass a soft limit.
+            if (!self.soft_limit) {
+                try self.reserveSpaceLocked(items.len);
+            }
 
             var remaining = items;
             var total_written: usize = 0;
@@ -386,7 +415,7 @@ pub fn ConcurrentQueue(comptime T: type, comptime chunk_size: usize) type {
 
         /// Wake writers waiting for space. Assumes the mutex is held.
         fn notifySpaceLocked(self: *Self) void {
-            if (self.block_when_full and self.max_size > 0) {
+            if (self.soft_limit and self.max_size > 0) {
                 self.space_cond.broadcast(self.io);
             }
         }
@@ -841,15 +870,10 @@ pub fn ConcurrentWriteBuffer(comptime chunk_size: usize) type {
                     return PushError.ChunkLimitExceeded;
                 }
             }
-            if (dest.queue.max_size > 0) {
-                const max_items = dest.queue.max_size / @sizeOf(u8);
-                if (dest.queue.items_available >= max_items) {
-                    return PushError.OutOfMemory;
-                }
-                if (self.queue.items_available > max_items - dest.queue.items_available) {
-                    return PushError.OutOfMemory;
-                }
-            }
+            // Note: dest.max_size is deliberately not enforced here. The
+            // chunks are already allocated; splicing them frees the source
+            // without allocating on the destination, and rejecting the
+            // reconnect-buffer transfer would strand buffered publishes.
 
             // Splice self's list onto dest's list. The destination tail must
             // be sealed: an unsealed chunk with a successor can neither be
@@ -1474,52 +1498,65 @@ test "VectorGather detects concurrent consumer advancing buffer" {
     try std.testing.expectError(error.ConcurrentConsumer, gather.consume(3));
 }
 
-test "blocking append waits for space" {
+test "soft limit meters bulk appends with NoSpace" {
     const allocator = std.testing.allocator;
 
     const Buffer = ConcurrentWriteBuffer(16);
-    var buffer = Buffer.init(allocator, std.testing.io, .{ .max_size = 8, .block_when_full = true });
+    var buffer = Buffer.init(allocator, std.testing.io, .{ .max_size = 8, .soft_limit = true });
     defer buffer.deinit();
 
-    try buffer.append("12345678"); // exactly full
+    try buffer.appendMany(&.{"1234"});
+    try buffer.appendMany(&.{"5678"}); // exactly at the limit
+
+    // Over the high-water mark: bulk appends are rejected with NoSpace...
+    try std.testing.expectError(PushError.NoSpace, buffer.appendMany(&.{"x"}));
+
+    // ...but control-sized appends always go through (overshoot allowed).
+    try buffer.append("PING");
+    try std.testing.expectEqual(@as(usize, 12), buffer.queue.getItemsAvailable());
+
+    // Drain completely; a lone bulk append larger than the whole limit is
+    // then accepted (high-water mark, not a hard cap).
+    var view = try buffer.getSlice(.{ .duration = .{ .raw = .zero, .clock = .awake } });
+    view.consume(12);
+    try buffer.appendMany(&.{"0123456789abcde"});
+    try std.testing.expectEqual(@as(usize, 15), buffer.queue.getItemsAvailable());
+}
+
+test "waitForSpace returns when space is freed" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(16);
+    var buffer = Buffer.init(allocator, std.testing.io, .{ .max_size = 8, .soft_limit = true });
+    defer buffer.deinit();
+
+    try buffer.appendMany(&.{"12345678"}); // full
 
     const Helper = struct {
         fn consumer(io: std.Io, buf: *Buffer) void {
-            // Give the appender time to block, then free space.
             io.sleep(.fromMilliseconds(20), .awake) catch return;
             var view = buf.getSlice(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } }) catch return;
-            view.consume(4);
+            view.consume(8);
         }
     };
 
     var consumer_task = try std.testing.io.concurrent(Helper.consumer, .{ std.testing.io, &buffer });
     defer consumer_task.cancel(std.testing.io);
 
-    // Blocks until the consumer frees 4 bytes.
-    try buffer.append("abcd");
-
-    try std.testing.expectEqual(@as(usize, 8), buffer.queue.getItemsAvailable());
+    // Blocks until the consumer frees space, then the retry fits.
+    try buffer.queue.waitForSpace(4);
+    try buffer.appendMany(&.{"abcd"});
+    try std.testing.expectEqual(@as(usize, 4), buffer.queue.getItemsAvailable());
 }
 
-test "blocking append larger than capacity fails" {
+test "close wakes waitForSpace" {
     const allocator = std.testing.allocator;
 
     const Buffer = ConcurrentWriteBuffer(16);
-    var buffer = Buffer.init(allocator, std.testing.io, .{ .max_size = 8, .block_when_full = true });
+    var buffer = Buffer.init(allocator, std.testing.io, .{ .max_size = 8, .soft_limit = true });
     defer buffer.deinit();
 
-    // Could never fit, must fail instead of blocking forever.
-    try std.testing.expectError(PushError.OutOfMemory, buffer.append("123456789"));
-}
-
-test "close wakes a blocked appender" {
-    const allocator = std.testing.allocator;
-
-    const Buffer = ConcurrentWriteBuffer(16);
-    var buffer = Buffer.init(allocator, std.testing.io, .{ .max_size = 8, .block_when_full = true });
-    defer buffer.deinit();
-
-    try buffer.append("12345678"); // full
+    try buffer.appendMany(&.{"12345678"}); // full
 
     const Helper = struct {
         fn closer(io: std.Io, buf: *Buffer) void {
@@ -1531,7 +1568,7 @@ test "close wakes a blocked appender" {
     var closer_task = try std.testing.io.concurrent(Helper.closer, .{ std.testing.io, &buffer });
     defer closer_task.cancel(std.testing.io);
 
-    try std.testing.expectError(PushError.Closed, buffer.append("more"));
+    try std.testing.expectError(error.Closed, buffer.queue.waitForSpace(4));
 }
 
 test "non-blocking append still fails when full" {
@@ -1543,4 +1580,22 @@ test "non-blocking append still fails when full" {
 
     try buffer.append("12345678");
     try std.testing.expectError(PushError.OutOfMemory, buffer.append("x"));
+}
+
+test "moveToBuffer ignores the destination size limit" {
+    const allocator = std.testing.allocator;
+
+    const Buffer = ConcurrentWriteBuffer(16);
+    var src = Buffer.init(allocator, std.testing.io, .{});
+    defer src.deinit();
+    var dest = Buffer.init(allocator, std.testing.io, .{ .max_size = 8, .soft_limit = true });
+    defer dest.deinit();
+
+    // More data than the destination limit: the transfer must still
+    // succeed, the chunks are already allocated.
+    try src.append("0123456789abcdefghijklmnopqrstuv"); // 32 bytes
+    try src.moveToBuffer(&dest);
+
+    try std.testing.expectEqual(@as(usize, 0), src.queue.getItemsAvailable());
+    try std.testing.expectEqual(@as(usize, 32), dest.queue.getItemsAvailable());
 }
