@@ -228,6 +228,7 @@ const ExitReason = enum(u8) {
     reader_done,
     flusher_done,
     reconnect_requested,
+    close_requested,
 };
 
 /// One-shot exit signal owned by a single `runConnection` iteration. The
@@ -390,8 +391,15 @@ pub const Connection = struct {
         };
     }
 
+    /// Destroy the connection after joining all of its tasks.
+    ///
+    /// Do not call deinit() from a connection callback: callbacks may run on
+    /// a connection-owned task, and an object cannot destroy the task that is
+    /// currently executing it. Calling close() from callbacks is supported;
+    /// call deinit() later from the connection's owner.
     pub fn deinit(self: *Self) void {
         self.close();
+        self.manager_task.cancel(self.io);
 
         // Clean up response manager
         self.response_manager.deinit();
@@ -522,7 +530,13 @@ pub const Connection = struct {
         _ = try self.server_pool.addServer(url, false);
     }
 
-    /// Close the connection
+    /// Close the connection.
+    ///
+    /// This is safe to call from any connection callback. It performs the
+    /// terminal state transition and wakes all operations, but deliberately
+    /// does not join manager_task: a callback may itself be running in that
+    /// task (or in a reader task the manager is joining). deinit() is the
+    /// synchronous join-and-destroy boundary.
     pub fn close(self: *Self) void {
         var callback: @TypeOf(self.options.callbacks.closed_cb) = null;
 
@@ -543,13 +557,12 @@ pub const Connection = struct {
         self.status_cond.broadcast(self.io);
         self.handshake_cond.broadcast(self.io);
         self.pong_condition.broadcast(self.io);
+        if (self.exit_signal) |signal| {
+            signal.signal(self.io, .close_requested, null);
+        }
         self.mutex.unlock(self.io);
 
         self.closeWaiters();
-
-        // The state change and waiter wakeups happen first so manager and
-        // operation tasks can observe closure while they are being joined.
-        self.manager_task.cancel(self.io);
 
         // A failed connection already emitted closed_cb from failTerminally,
         // while a never-started/never-established connection has never been
@@ -1174,13 +1187,18 @@ pub const Connection = struct {
 
             if (callback) |cb| cb(self);
 
+            // A callback may close the connection. Do not enter a reconnect
+            // delay (or make another attempt) after it returns.
+            const status = self.getStatus();
+            if (status == .closed or status == .connection_failed) return;
+
             // Wait before the next attempt; the first retry after losing an
             // established connection is immediate.
             attempts += 1;
             if (attempts > 1) {
                 const delay = self.calculateReconnectDelay(attempts - 1);
                 log.debug("Waiting {f} before reconnection attempt {}", .{ delay, attempts });
-                try self.io.sleep(delay, .awake);
+                if (!try self.waitForReconnectDelay(delay)) return;
             }
         }
     }
@@ -1433,6 +1451,7 @@ pub const Connection = struct {
             .reconnect_requested => {
                 log.info("Reconnect requested", .{});
             },
+            .close_requested => {},
         }
     }
 
@@ -1997,6 +2016,24 @@ pub const Connection = struct {
         return delay;
     }
 
+    /// Wait for a reconnect delay while remaining immediately interruptible
+    /// by close(). Returns false when the connection became terminal.
+    fn waitForReconnectDelay(self: *Self, delay: Io.Duration) !bool {
+        const deadline = io_util.deadline(self.io, .{ .duration = .{ .raw = delay, .clock = .awake } });
+
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        while (self.status == .reconnecting and !io_util.expired(self.io, deadline)) {
+            self.status_cond.waitTimeout(self.io, &self.mutex, deadline) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Timeout => {},
+            };
+        }
+
+        return self.status != .closed and self.status != .connection_failed;
+    }
+
     fn resendSubscriptions(self: *Self) !void {
         log.debug("Re-establishing subscriptions", .{});
 
@@ -2353,4 +2390,154 @@ test "terminal connection failure wakes all operation waiters exactly once" {
     connection.close();
     try std.testing.expectEqual(@as(u32, 1), CallbackCounter.disconnected.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 1), CallbackCounter.closed.load(.monotonic));
+}
+
+test "close is reentrant from manager callbacks" {
+    const CallbackCounter = struct {
+        var disconnected: std.atomic.Value(u32) = .init(0);
+        var reconnected: std.atomic.Value(u32) = .init(0);
+        var closed: std.atomic.Value(u32) = .init(0);
+
+        fn onDisconnected(connection: *Connection) void {
+            _ = disconnected.fetchAdd(1, .monotonic);
+            connection.close();
+        }
+
+        fn onReconnected(connection: *Connection) void {
+            _ = reconnected.fetchAdd(1, .monotonic);
+            connection.close();
+        }
+
+        fn onClosed(connection: *Connection) void {
+            _ = closed.fetchAdd(1, .monotonic);
+            connection.close();
+        }
+    };
+    const ManagerCallbacks = struct {
+        fn terminal(connection: *Connection) Io.Cancelable!void {
+            connection.failTerminally(true);
+        }
+
+        fn reconnected(connection: *Connection) Io.Cancelable!void {
+            connection.options.callbacks.reconnected_cb.?(connection);
+        }
+    };
+
+    const io = std.testing.io;
+    CallbackCounter.disconnected.store(0, .monotonic);
+    CallbackCounter.reconnected.store(0, .monotonic);
+    CallbackCounter.closed.store(0, .monotonic);
+
+    // Terminal callbacks execute in manager_task in production. Both
+    // callbacks close recursively; joining manager_task from close() would
+    // make this task wait for itself forever.
+    {
+        var connection = Connection.init(std.testing.allocator, io, .{
+            .callbacks = .{
+                .disconnected_cb = CallbackCounter.onDisconnected,
+                .closed_cb = CallbackCounter.onClosed,
+            },
+        });
+        defer connection.deinit();
+        connection.status = .connected;
+
+        try connection.manager_task.concurrent(io, ManagerCallbacks.terminal, .{&connection});
+        try connection.manager_task.await(io);
+
+        try std.testing.expectEqual(ConnectionStatus.closed, connection.getStatus());
+        try std.testing.expectEqual(@as(u32, 1), CallbackCounter.disconnected.load(.monotonic));
+        try std.testing.expectEqual(@as(u32, 1), CallbackCounter.closed.load(.monotonic));
+    }
+
+    // reconnected_cb is also invoked directly by manager_task.
+    {
+        var connection = Connection.init(std.testing.allocator, io, .{
+            .callbacks = .{
+                .reconnected_cb = CallbackCounter.onReconnected,
+                .closed_cb = CallbackCounter.onClosed,
+            },
+        });
+        defer connection.deinit();
+        connection.status = .connected;
+
+        try connection.manager_task.concurrent(io, ManagerCallbacks.reconnected, .{&connection});
+        try connection.manager_task.await(io);
+
+        try std.testing.expectEqual(ConnectionStatus.closed, connection.getStatus());
+        try std.testing.expectEqual(@as(u32, 1), CallbackCounter.reconnected.load(.monotonic));
+        try std.testing.expectEqual(@as(u32, 2), CallbackCounter.closed.load(.monotonic));
+    }
+}
+
+test "close is safe from a reader error callback" {
+    const CallbackCounter = struct {
+        var errors: std.atomic.Value(u32) = .init(0);
+        var closed: std.atomic.Value(u32) = .init(0);
+
+        fn onError(connection: *Connection, _: []const u8) void {
+            _ = errors.fetchAdd(1, .monotonic);
+            connection.close();
+        }
+
+        fn onClosed(connection: *Connection) void {
+            _ = closed.fetchAdd(1, .monotonic);
+            connection.close();
+        }
+    };
+    const Tasks = struct {
+        fn reader(connection: *Connection) void {
+            connection.options.callbacks.error_cb.?(connection, "test error");
+        }
+
+        fn manager(connection: *Connection) Io.Cancelable!void {
+            var reader_task = connection.io.concurrent(reader, .{connection}) catch @panic("failed to start test reader");
+            defer reader_task.cancel(connection.io);
+            reader_task.await(connection.io);
+        }
+    };
+
+    const io = std.testing.io;
+    CallbackCounter.errors.store(0, .monotonic);
+    CallbackCounter.closed.store(0, .monotonic);
+
+    var connection = Connection.init(std.testing.allocator, io, .{
+        .callbacks = .{
+            .error_cb = CallbackCounter.onError,
+            .closed_cb = CallbackCounter.onClosed,
+        },
+    });
+    defer connection.deinit();
+    connection.status = .connected;
+
+    // The manager owns and awaits the reader, matching runConnection. A
+    // synchronous manager cancel from the reader callback creates a join
+    // cycle: reader -> manager -> reader.
+    try connection.manager_task.concurrent(io, Tasks.manager, .{&connection});
+    try connection.manager_task.await(io);
+
+    try std.testing.expectEqual(ConnectionStatus.closed, connection.getStatus());
+    try std.testing.expectEqual(@as(u32, 1), CallbackCounter.errors.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), CallbackCounter.closed.load(.monotonic));
+}
+
+test "close interrupts reconnect delay" {
+    const Result = enum(u8) { pending, interrupted, unexpected };
+    const Task = struct {
+        fn run(connection: *Connection, result: *std.atomic.Value(Result)) Io.Cancelable!void {
+            const retry = try connection.waitForReconnectDelay(.fromSeconds(60));
+            result.store(if (retry) .unexpected else .interrupted, .release);
+        }
+    };
+
+    const io = std.testing.io;
+    var connection = Connection.init(std.testing.allocator, io, .{});
+    defer connection.deinit();
+    connection.status = .reconnecting;
+
+    var result: std.atomic.Value(Result) = .init(.pending);
+    try connection.manager_task.concurrent(io, Task.run, .{ &connection, &result });
+    connection.close();
+    try connection.manager_task.await(io);
+
+    try std.testing.expectEqual(Result.interrupted, result.load(.acquire));
 }
