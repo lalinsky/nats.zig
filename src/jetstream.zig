@@ -25,6 +25,7 @@ const Connection = @import("connection.zig").Connection;
 const Subscription = @import("subscription.zig").Subscription;
 const subscription_mod = @import("subscription.zig");
 const jetstream_message = @import("jetstream_message.zig");
+const io_util = @import("io_util.zig");
 const inbox = @import("inbox.zig");
 const parseTimestamp = @import("timestamp.zig").parseTimestamp;
 const Result = @import("result.zig").Result;
@@ -382,6 +383,10 @@ pub const PublishOptions = struct {
     expected_last_msg_id: ?[]const u8 = null,
     /// Message time-to-live in nanoseconds
     msg_ttl: ?Io.Duration = null,
+    /// Wait between retries after a NoResponders response.
+    retry_wait: Io.Duration = .fromMilliseconds(250),
+    /// Number of retries after the initial publish attempt.
+    retry_attempts: u32 = 2,
 };
 
 /// Batch of messages returned from fetch operation
@@ -1594,6 +1599,8 @@ pub const JetStream = struct {
 
     /// Internal function to publish a message with header processing
     fn publishMsgInternal(self: JetStream, msg: *Message, options: PublishOptions) !Result(PubAck) {
+        if (options.retry_wait.nanoseconds <= 0) return error.InvalidRetryWait;
+
         // Set JetStream-specific headers based on options
         if (options.msg_id) |id| {
             try msg.headerSet(MsgIdHdr, id);
@@ -1623,15 +1630,25 @@ pub const JetStream = struct {
             try msg.headerSet(MsgTTLHdr, ttl_str);
         }
 
-        // Send request without retry logic
-        // TODO: Implement retry logic for NoResponders (503) errors in clustered environments
-        // See ADR-22: https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-22.md
-        // Reference implementations:
-        // - nats.go: 250ms backoff, 2 retries by default
-        // - nats.c: Check their implementation
-        // - nats.java: Check their implementation
-        const resp = self.nc.requestMsg(msg, self.opts.request_timeout) catch |request_err| {
-            return if (request_err == error.NoResponders) error.NoStreamResponse else request_err;
+        const deadline = io_util.deadline(self.nc.io, self.opts.request_timeout);
+        var retries_left = options.retry_attempts;
+        const resp = while (true) {
+            break self.nc.requestMsg(msg, deadline) catch |request_err| switch (request_err) {
+                error.NoResponders => {
+                    if (retries_left == 0) return error.NoStreamResponse;
+                    retries_left -= 1;
+
+                    const remaining = io_util.remaining(self.nc.io, deadline) orelse return error.Timeout;
+                    const retry_wait = if (remaining.nanoseconds < options.retry_wait.nanoseconds)
+                        remaining
+                    else
+                        options.retry_wait;
+                    try self.nc.io.sleep(retry_wait, .awake);
+                    if (io_util.expired(self.nc.io, deadline)) return error.Timeout;
+                    continue;
+                },
+                else => return request_err,
+            };
         };
 
         defer resp.deinit();

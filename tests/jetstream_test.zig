@@ -688,10 +688,6 @@ test "JetStream publish basic message" {
     var stream_info = try js.addStream(stream_config);
     defer stream_info.deinit();
 
-    // Wait for stream metadata to propagate across cluster nodes
-    // TODO: Remove this delay once retry logic is implemented (see ADR-22)
-    try io.sleep(.fromMilliseconds(100), .awake);
-
     // Publish a message using JetStream publish
     const test_data = "Hello JetStream!";
     var pub_ack = try js.publish(subject, test_data, .{});
@@ -701,6 +697,87 @@ test "JetStream publish basic message" {
     try testing.expectEqualStrings(stream_name, pub_ack.value.stream);
     try testing.expect(pub_ack.value.seq > 0);
     try testing.expect(!pub_ack.value.duplicate);
+}
+
+test "JetStream publish retries while a stream is becoming available" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const stream_subject = try utils.generateSubjectFromStreamName(testing.allocator, stream_name);
+    defer testing.allocator.free(stream_subject);
+    const publish_subject = try std.fmt.allocPrint(testing.allocator, "{s}.message", .{stream_name});
+    defer testing.allocator.free(publish_subject);
+
+    const DelayedCreate = struct {
+        io: std.Io,
+        js: nats.JetStream,
+        stream_name: []const u8,
+        stream_subject: []const u8,
+        err: ?anyerror = null,
+
+        fn run(ctx: *@This()) void {
+            ctx.io.sleep(.fromMilliseconds(100), .awake) catch |err| {
+                ctx.err = err;
+                return;
+            };
+            var info = ctx.js.addStream(.{
+                .name = ctx.stream_name,
+                .subjects = &.{ctx.stream_subject},
+            }) catch |err| {
+                ctx.err = err;
+                return;
+            };
+            info.deinit();
+        }
+    };
+
+    var creator = DelayedCreate{
+        .io = io,
+        .js = js,
+        .stream_name = stream_name,
+        .stream_subject = stream_subject,
+    };
+    var creator_task = try io.concurrent(DelayedCreate.run, .{&creator});
+    defer creator_task.cancel(io);
+
+    var pub_ack = try js.publish(publish_subject, "retried", .{});
+    defer pub_ack.deinit();
+
+    creator_task.await(io);
+    if (creator.err) |err| return err;
+    try testing.expectEqualStrings(stream_name, pub_ack.value.stream);
+}
+
+test "JetStream publish retries respect the overall request timeout" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{
+        .request_timeout = .{ .duration = .{ .raw = .fromMilliseconds(25), .clock = .awake } },
+    });
+
+    const stream_name = try utils.generateUniqueStreamName(testing.allocator);
+    defer testing.allocator.free(stream_name);
+    const publish_subject = try std.fmt.allocPrint(testing.allocator, "{s}.missing", .{stream_name});
+    defer testing.allocator.free(publish_subject);
+
+    const start = std.Io.Timestamp.now(io, .awake);
+    try testing.expectError(error.Timeout, js.publish(publish_subject, "timeout", .{
+        .retry_wait = .fromSeconds(2),
+        .retry_attempts = 1,
+    }));
+    const elapsed = start.untilNow(io, .awake);
+
+    // The retry wait is clipped to the overall deadline, not added to it.
+    try testing.expect(elapsed.nanoseconds < std.time.ns_per_s);
 }
 
 test "JetStream publish with message deduplication" {
