@@ -30,9 +30,8 @@ const JetStream = jetstream_mod.JetStream;
 const JetStreamOptions = jetstream_mod.JetStreamOptions;
 const build_options = @import("build_options");
 const ConcurrentWriteBuffer = @import("queue.zig").ConcurrentWriteBuffer;
-const response_manager_mod = @import("response_manager.zig");
-const ResponseManager = response_manager_mod.ResponseManager;
-const RequestHandle = response_manager_mod.RequestHandle;
+const ResponseManager = @import("response_manager.zig").ResponseManager;
+const RequestHandle = @import("response_manager.zig").RequestHandle;
 const MAX_CONTROL_LINE_SIZE = @import("parser.zig").MAX_CONTROL_LINE_SIZE;
 const validation = @import("validation.zig");
 const nkeys = @import("nkeys.zig");
@@ -539,6 +538,7 @@ pub const Connection = struct {
     /// synchronous join-and-destroy boundary.
     pub fn close(self: *Self) void {
         var callback: @TypeOf(self.options.callbacks.closed_cb) = null;
+        defer if (callback) |cb| cb(self);
 
         log.info("Closing connection", .{});
 
@@ -573,7 +573,6 @@ pub const Connection = struct {
             }
         }
 
-        if (callback) |cb| cb(self);
     }
 
     pub fn getStatus(self: *Self) ConnectionStatus {
