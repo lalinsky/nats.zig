@@ -293,3 +293,74 @@ test "reconnect() errors when connection closed" {
 
     try testing.expectError(error.ConnectionClosed, nc.reconnect());
 }
+
+test "no automatic reconnection when disabled" {
+    const io = std.testing.io;
+
+    tracker.reset();
+
+    const nc = try utils.createConnection(io, .node1, .{
+        .reconnect = .{
+            .allow_reconnect = false,
+        },
+        .callbacks = .{
+            .disconnected_cb = CallbackTracker.disconnectedCallback,
+            .reconnected_cb = CallbackTracker.reconnectedCallback,
+            .closed_cb = CallbackTracker.closedCallback,
+        },
+    });
+    defer utils.closeConnection(nc);
+
+    try nc.publish("test.noreconnect", "before restart");
+    try nc.flush();
+
+    log.debug("Restarting nats-1", .{});
+    try utils.runDockerCompose(std.testing.allocator, &.{ "restart", "nats-1" });
+
+    // The connection must go terminal instead of reconnecting.
+    const start = std.Io.Timestamp.now(io, .awake);
+    while (nc.status != .connection_failed) {
+        if (start.untilNow(io, .awake).nanoseconds >= 10 * std.time.ns_per_s) {
+            return error.TerminalStateTimeout;
+        }
+        try io.sleep(.fromMilliseconds(50), .awake);
+    }
+
+    {
+        tracker.mutex.lockUncancelable(std.testing.io);
+        defer tracker.mutex.unlock(std.testing.io);
+        try testing.expectEqual(@as(u32, 1), tracker.disconnected_called);
+        try testing.expectEqual(@as(u32, 1), tracker.closed_called);
+        try testing.expectEqual(@as(u32, 0), tracker.reconnected_called);
+    }
+
+    // Publishing on a failed connection is rejected, and flush must not
+    // hang waiting for a reconnection that will never happen.
+    try testing.expectError(error.ConnectionClosed, nc.publish("test.noreconnect", "after"));
+    try testing.expectError(error.ConnectionClosed, nc.flush());
+
+    // Closing after a terminal failure must not fire closed_cb again.
+    nc.close();
+    {
+        tracker.mutex.lockUncancelable(std.testing.io);
+        defer tracker.mutex.unlock(std.testing.io);
+        try testing.expectEqual(@as(u32, 1), tracker.closed_called);
+    }
+}
+
+test "initial connect iterates the server pool" {
+    const io = std.testing.io;
+
+    // The first two addresses refuse connections (unused ports); the
+    // initial connection must try every configured server, even with
+    // max_reconnect low enough to shrink the pool while iterating.
+    const nc = try utils.createConnectionWithUrl(
+        io,
+        "nats://127.0.0.1:14226, nats://127.0.0.1:14237, nats://127.0.0.1:14222",
+        .{ .reconnect = .{ .max_reconnect = 0 } },
+    );
+    defer utils.closeConnection(nc);
+
+    try nc.publish("test.pool.failover", "made it");
+    try nc.flush();
+}
