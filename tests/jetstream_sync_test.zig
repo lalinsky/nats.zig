@@ -160,3 +160,56 @@ test "JetStream synchronous queue subscription basic functionality" {
     // Verify message content
     try testing.expectEqualStrings(test_message, js_msg.msg.data);
 }
+
+test "JetStream subscriptions are exempt from slow-consumer drops" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    const stream_name = try utils.generateUniqueStreamName(std.testing.allocator);
+    defer std.testing.allocator.free(stream_name);
+    const subject_filter = try utils.generateSubjectFromStreamName(std.testing.allocator, stream_name);
+    defer std.testing.allocator.free(subject_filter);
+
+    var stream_info = try js.addStream(.{
+        .name = stream_name,
+        .subjects = &.{subject_filter},
+    });
+    defer stream_info.deinit();
+
+    // A consumer without acks has no server-side in-flight bound and no
+    // redelivery: its delivery subscription must have unlimited pending.
+    var no_ack_sub = try js.subscribeSync(subject_filter, .{
+        .stream = stream_name,
+        .config = .{ .ack_policy = .none, .max_ack_pending = 0 },
+    });
+    defer no_ack_sub.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), no_ack_sub.subscription.pending_msgs_limit.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), no_ack_sub.subscription.pending_bytes_limit.load(.acquire));
+
+    // With acks, the pending limits must cover the server's full
+    // in-flight window (max_ack_pending), so a drop cannot happen.
+    var big_window_sub = try js.subscribeSync(subject_filter, .{
+        .stream = stream_name,
+        .durable = "big_window",
+        .config = .{ .ack_policy = .explicit, .max_ack_pending = 600_000 },
+    });
+    defer big_window_sub.deinit();
+
+    try std.testing.expectEqual(@as(u32, 600_000), big_window_sub.subscription.pending_msgs_limit.load(.acquire));
+    try std.testing.expect(big_window_sub.subscription.pending_bytes_limit.load(.acquire) >= 600_000 * 1024 * 1024);
+
+    // A default-sized ack window keeps the default limits.
+    var default_sub = try js.subscribeSync(subject_filter, .{
+        .stream = stream_name,
+        .durable = "default_window",
+        .config = .{ .ack_policy = .explicit },
+    });
+    defer default_sub.deinit();
+
+    try std.testing.expectEqual(nats.Subscription.default_pending_msgs_limit, default_sub.subscription.pending_msgs_limit.load(.acquire));
+}

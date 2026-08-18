@@ -1278,6 +1278,27 @@ pub const JetStream = struct {
     }
 
     /// Subscribe to a JetStream push consumer with callback handler
+    /// Size a JetStream delivery subscription's pending limits so that
+    /// slow-consumer protection can never drop a JetStream message
+    /// (nats.go behavior): with acks, the server sends at most
+    /// max_ack_pending unacked messages, so the queue is guaranteed to
+    /// hold the full in-flight window. Consumers without acks (or with an
+    /// unlimited ack window) have no server-side in-flight bound and no
+    /// redelivery to recover a drop, so their limits are lifted entirely.
+    fn applyPendingLimits(subscription: *Subscription, consumer_config: *const ConsumerConfig) void {
+        if (consumer_config.ack_policy == .none or consumer_config.max_ack_pending <= 0) {
+            subscription.setPendingLimits(0, 0);
+            return;
+        }
+
+        const max_ack_pending: u64 = @intCast(consumer_config.max_ack_pending);
+        if (max_ack_pending > Subscription.default_pending_msgs_limit) {
+            const msgs_limit: u32 = std.math.cast(u32, max_ack_pending) orelse std.math.maxInt(u32);
+            const bytes_limit = @max(max_ack_pending * 1024 * 1024, Subscription.default_pending_bytes_limit);
+            subscription.setPendingLimits(msgs_limit, bytes_limit);
+        }
+    }
+
     pub fn subscribe(self: JetStream, subject: ?[]const u8, comptime handlerFn: anytype, handler_args: anytype, options: SubscribeOptions) !*JetStreamSubscription {
         // Resolve stream name
         const stream_name = if (options.stream) |s|
@@ -1318,6 +1339,8 @@ pub const JetStream = struct {
         // Subscribe to the delivery subject
         const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
         errdefer self.nc.unsubscribe(subscription);
+
+        applyPendingLimits(subscription, &consumer_info.value.config);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
@@ -1371,6 +1394,8 @@ pub const JetStream = struct {
         // Create synchronous subscription (no callback handler)
         const subscription = try self.nc.subscribeSync(deliver_subject);
         errdefer self.nc.unsubscribe(subscription);
+
+        applyPendingLimits(subscription, &consumer_info.value.config);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
@@ -1427,6 +1452,8 @@ pub const JetStream = struct {
         const subscription = try self.nc.queueSubscribe(deliver_subject, queue, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
         errdefer self.nc.unsubscribe(subscription);
 
+        applyPendingLimits(subscription, &consumer_info.value.config);
+
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
@@ -1480,6 +1507,8 @@ pub const JetStream = struct {
         const subscription = try self.nc.queueSubscribeSync(deliver_subject, queue);
         errdefer self.nc.unsubscribe(subscription);
 
+        applyPendingLimits(subscription, &consumer_info.value.config);
+
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
@@ -1527,6 +1556,8 @@ pub const JetStream = struct {
         // Create the persistent wildcard inbox subscription
         const inbox_subscription = try self.nc.subscribeSync(wildcard_subject);
         errdefer self.nc.unsubscribe(inbox_subscription);
+
+        applyPendingLimits(inbox_subscription, &consumer_info.value.config);
 
         // Allocate PullSubscription
         const pull_subscription = try self.nc.allocator.create(PullSubscription);
