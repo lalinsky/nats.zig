@@ -293,48 +293,40 @@ also reported through the `error_cb` callback.
 ### TLS
 
 TLS is enabled with the `tls://` URL scheme, or explicitly through the
-connection options (via [tls.zig](https://github.com/ianic/tls.zig)):
+connection options:
 
 ```zig
 // tls:// scheme, server certificate verified against the system trust store
 try nc.connect("tls://demo.nats.io:4443");
 
-// Custom CA bundle; the file is re-read on every (re)connect,
-// so rotated certificates are picked up automatically
+// Custom CA bundle
 var nc2 = nats.Connection.init(init.gpa, init.io, .{
     .tls = .{ .ca_file = "/path/to/ca.pem" },
 });
 
-// For servers running in handshake-first mode (TLS before the server INFO)
+// For servers that expect the TLS handshake before the initial INFO
+// (handshake-first mode, TLS-terminating proxies)
 var nc3 = nats.Connection.init(init.gpa, init.io, .{
     .tls = .{ .ca_file = "/path/to/ca.pem", .handshake_first = true },
 });
 ```
 
-By default, the upgrade follows the NATS protocol: the server INFO arrives
-in plaintext, the TLS handshake runs, and only then is CONNECT sent - so
-credentials never touch the socket unencrypted. A server that requires TLS
-is rejected with `error.SecureConnectionRequired` when the client has no
-TLS configured.
-
-TLS is sticky across the whole server pool: once enabled - through the
-options or a single `tls://` URL - every connection uses it, including
-cluster members discovered at runtime, which are announced as bare
-host:port. Since discovered servers are usually dialed by IP address,
-`server_name` sets the name used for SNI and certificate verification
-instead of the host from the URL:
+Once enabled, TLS applies to every connection, including cluster members
+discovered at runtime. Certificate files are re-read on every (re)connect,
+so rotated certificates are picked up automatically. Use `server_name` to
+verify the certificate against a specific name when servers are dialed by
+IP address:
 
 ```zig
-var nc5 = nats.Connection.init(init.gpa, init.io, .{
+var nc4 = nats.Connection.init(init.gpa, init.io, .{
     .tls = .{ .ca_file = "/path/to/ca.pem", .server_name = "nats.example.com" },
 });
 ```
 
-For mutual TLS, provide a client certificate and key (re-read on every
-(re)connect, like `ca_file`):
+For mutual TLS, provide a client certificate and key:
 
 ```zig
-var nc4 = nats.Connection.init(init.gpa, init.io, .{
+var nc5 = nats.Connection.init(init.gpa, init.io, .{
     .tls = .{
         .ca_file = "/path/to/ca.pem",
         .cert_file = "/path/to/client-cert.pem",
@@ -343,13 +335,13 @@ var nc4 = nats.Connection.init(init.gpa, init.io, .{
 });
 ```
 
-With the server's `verify_and_map` mode, the certificate is also the
-authentication: the server maps the certificate's email SAN, DNS SAN, or
-subject DN to a configured user, and no other credentials are needed.
+With the server's `verify_and_map` mode, the client certificate is also
+the authentication: its identity is mapped to a configured user and no
+other credentials are needed.
 
-TLS support can be compiled out with `-Duse_tls=false`, in which case TLS
-connections fail with `error.TlsNotConfigured` and the tls.zig dependency
-is not fetched.
+TLS support is provided by [tls.zig](https://github.com/ianic/tls.zig) and
+can be compiled out with `-Duse_tls=false`, in which case TLS connections
+fail with `error.TlsNotConfigured`.
 
 ## Selecting the I/O Backend
 
