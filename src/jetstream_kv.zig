@@ -547,7 +547,7 @@ pub const KV = struct {
             for (subjects.items) |subject| {
                 self.js.nc.allocator.free(subject);
             }
-            subjects.deinit();
+            subjects.deinit(self.js.nc.allocator);
         }
 
         for (key_patterns) |key| {

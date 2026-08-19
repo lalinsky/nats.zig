@@ -172,7 +172,7 @@ pub const ServerPool = struct {
     }
 
     // Shuffle servers in pool (like C library's _shufflePool)
-    pub fn shuffle(self: *ServerPool, io: std.Io, offset: usize) void {
+    pub fn shuffle(self: *ServerPool, io: std.Io, offset: usize) std.mem.Allocator.Error!void {
         if (self.servers.count() <= offset + 1) return;
 
         var seed: u64 = undefined;
@@ -184,11 +184,14 @@ pub const ServerPool = struct {
         var i = offset;
         while (i < self.servers.entries.len) : (i += 1) {
             const j = offset + random.uintLessThan(usize, i + 1 - offset);
-            self.servers.entries.swap(i, j);
+            const entry_i = self.servers.entries.get(i);
+            self.servers.entries.set(i, self.servers.entries.get(j));
+            self.servers.entries.set(j, entry_i);
         }
 
-        // Rebuild the hash index
-        self.servers.reIndex(self.allocator);
+        // Rebuild the hash index. A failure here leaves the entries shuffled
+        // but the index stale, so it has to propagate rather than be ignored.
+        try self.servers.reIndex(self.allocator);
     }
 };
 

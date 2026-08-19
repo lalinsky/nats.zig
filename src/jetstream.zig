@@ -1671,7 +1671,7 @@ pub const JetStream = struct {
     }
 
     /// Open an existing KV bucket
-    pub fn kvBucket(self: JetStream, bucket_name: []const u8) !*@import("jetstream_kv.zig").KV {
+    pub fn kvBucket(self: JetStream, bucket_name: []const u8) !@import("jetstream_kv.zig").KV {
         var manager = self.kvManager();
         return try manager.openBucket(bucket_name);
     }
