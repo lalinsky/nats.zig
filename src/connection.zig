@@ -291,23 +291,21 @@ const TlsRuntime = struct {
     /// Cleartext output for decrypt. Also reused as the send scratch for
     /// handshake flights, which finish before the first decrypt.
     cleartext_buffer: []u8,
-    /// Cleartext staging for the flusher: gathered frames are copied here
-    /// so one encrypt call produces one TLS record per 16K, instead of a
-    /// record per gathered slice.
-    staging_buffer: []u8,
     /// Ciphertext output for encrypt, sized for one maximum record plus a
-    /// possible KeyUpdate record.
+    /// possible KeyUpdate record. The flusher encrypts straight out of
+    /// the write queue's gathered slices: the queue stores bytes in
+    /// large contiguous chunks, so the slices are already big enough to
+    /// fill records without a staging copy.
     out_buffer: []u8,
 
     const read_buffer_size = 64 * 1024;
     const cleartext_buffer_size = 32 * 1024;
-    const staging_buffer_size = 16 * 1024;
     const out_buffer_size = tls.output_buffer_len + 1024;
 
-    /// Total size of the single backing allocation for all four buffers
+    /// Total size of the single backing allocation for the buffers
     /// (Connection.tls_buffers, allocated on the first TLS attempt and
     /// kept for the connection's lifetime).
-    const buffers_size = read_buffer_size + cleartext_buffer_size + staging_buffer_size + out_buffer_size;
+    const buffers_size = read_buffer_size + cleartext_buffer_size + out_buffer_size;
 
     fn init(opts: TlsOptions, host: []const u8, buffers: []u8) TlsRuntime {
         std.debug.assert(buffers.len == buffers_size);
@@ -316,8 +314,7 @@ const TlsRuntime = struct {
             .host = host,
             .read_buffer = buffers[0..read_buffer_size],
             .cleartext_buffer = buffers[read_buffer_size..][0..cleartext_buffer_size],
-            .staging_buffer = buffers[read_buffer_size + cleartext_buffer_size ..][0..staging_buffer_size],
-            .out_buffer = buffers[read_buffer_size + cleartext_buffer_size + staging_buffer_size ..][0..out_buffer_size],
+            .out_buffer = buffers[read_buffer_size + cleartext_buffer_size ..][0..out_buffer_size],
         };
     }
 
@@ -1946,7 +1943,7 @@ pub const Connection = struct {
         }
 
         if (tls_rt) |rt| {
-            return self.flushTls(stream_writer, rt, gather);
+            return flushTls(stream_writer, rt, gather);
         }
 
         // The `Io.Writer` interface erases the real error; it is stashed on
@@ -1958,20 +1955,12 @@ pub const Connection = struct {
         try gather.consume(bytes_written);
     }
 
-    fn flushTls(self: *Self, stream_writer: *net.Stream.Writer, rt: *TlsRuntime, gather: anytype) !void {
-        _ = self;
-
-        // Stage the gathered frames into one contiguous cleartext buffer,
-        // so a full staging buffer becomes one TLS record instead of a
-        // record per gathered slice.
-        var staged: usize = 0;
-        for (gather.slices) |slice| {
-            const n = @min(slice.len, rt.staging_buffer.len - staged);
-            @memcpy(rt.staging_buffer[staged..][0..n], slice[0..n]);
-            staged += n;
-            if (n < slice.len) break;
-        }
-
+    fn flushTls(stream_writer: *net.Stream.Writer, rt: *TlsRuntime, gather: anytype) !void {
+        // Encrypt straight out of the gathered queue slices; the queue
+        // stores bytes in large contiguous chunks, so records fill up
+        // without a staging copy (a short record can only occur at a
+        // chunk boundary).
+        //
         // Encrypt is pure computation (only TLS errors, never
         // cancellation). Once bytes are encrypted the cipher sequence has
         // advanced, so the ciphertext must be fully written or the
@@ -1980,13 +1969,17 @@ pub const Connection = struct {
         // dropping bytes that never reached the socket matches the
         // at-most-once semantics of the plaintext path.
         var consumed: usize = 0;
-        while (consumed < staged) {
-            const res = try rt.enc.encrypt(rt.staging_buffer[consumed..staged], rt.out_buffer);
-            std.debug.assert(res.cleartext_pos > 0); // out_buffer always fits one record
-            stream_writer.interface.writeAll(res.ciphertext) catch {
-                return stream_writer.err.?;
-            };
-            consumed += res.cleartext_pos;
+        for (gather.slices) |slice| {
+            var pos: usize = 0;
+            while (pos < slice.len) {
+                const res = try rt.enc.encrypt(slice[pos..], rt.out_buffer);
+                std.debug.assert(res.cleartext_pos > 0); // out_buffer always fits one record
+                stream_writer.interface.writeAll(res.ciphertext) catch {
+                    return stream_writer.err.?;
+                };
+                pos += res.cleartext_pos;
+            }
+            consumed += slice.len;
         }
         try gather.consume(consumed);
     }
