@@ -304,32 +304,21 @@ const TlsRuntime = struct {
     const staging_buffer_size = 16 * 1024;
     const out_buffer_size = tls.output_buffer_len + 1024;
 
-    fn create(allocator: Allocator, opts: TlsOptions, host: []const u8) !*TlsRuntime {
-        const self = try allocator.create(TlsRuntime);
-        self.* = .{
+    /// Total size of the single backing allocation for all four buffers
+    /// (Connection.tls_buffers, allocated on the first TLS attempt and
+    /// kept for the connection's lifetime).
+    const buffers_size = read_buffer_size + cleartext_buffer_size + staging_buffer_size + out_buffer_size;
+
+    fn init(opts: TlsOptions, host: []const u8, buffers: []u8) TlsRuntime {
+        std.debug.assert(buffers.len == buffers_size);
+        return .{
             .opts = opts,
             .host = host,
-            .read_buffer = &.{},
-            .cleartext_buffer = &.{},
-            .staging_buffer = &.{},
-            .out_buffer = &.{},
+            .read_buffer = buffers[0..read_buffer_size],
+            .cleartext_buffer = buffers[read_buffer_size..][0..cleartext_buffer_size],
+            .staging_buffer = buffers[read_buffer_size + cleartext_buffer_size ..][0..staging_buffer_size],
+            .out_buffer = buffers[read_buffer_size + cleartext_buffer_size + staging_buffer_size ..][0..out_buffer_size],
         };
-        // Covers the struct and every buffer; freeing the still-empty
-        // slices is a no-op, so one cleanup path serves all failures.
-        errdefer self.destroy(allocator);
-        self.read_buffer = try allocator.alloc(u8, read_buffer_size);
-        self.cleartext_buffer = try allocator.alloc(u8, cleartext_buffer_size);
-        self.staging_buffer = try allocator.alloc(u8, staging_buffer_size);
-        self.out_buffer = try allocator.alloc(u8, out_buffer_size);
-        return self;
-    }
-
-    fn destroy(self: *TlsRuntime, allocator: Allocator) void {
-        allocator.free(self.read_buffer);
-        allocator.free(self.cleartext_buffer);
-        allocator.free(self.staging_buffer);
-        allocator.free(self.out_buffer);
-        allocator.destroy(self);
     }
 
     /// Forward the peer's key-update request from the decrypt copy to the
@@ -458,6 +447,11 @@ pub const Connection = struct {
     // bare host:port and would otherwise silently fall back to plaintext.
     resolved_tls: ?TlsOptions = null,
 
+    // Single backing allocation for the TLS buffers, made by the manager
+    // task on the first TLS connection attempt and reused across
+    // reconnects (TLS is never downgraded); freed in deinit.
+    tls_buffers: []u8 = &.{},
+
     // Server management
     server_pool: ServerPool,
     current_server: ?*Server = null, // Track current server like C library
@@ -562,6 +556,8 @@ pub const Connection = struct {
 
         self.parser.deinit();
         self.scratch.deinit();
+
+        self.allocator.free(self.tls_buffers);
     }
 
     fn resetScratch(self: *Self) void {
@@ -1515,13 +1511,19 @@ pub const Connection = struct {
             break :blk self.resolved_tls;
         };
 
+        // Outlives the reader and flusher tasks: the defers below join
+        // them before this frame ends, like exit_signal.
+        var tls_rt_storage: TlsRuntime = undefined;
         var tls_rt: ?*TlsRuntime = null;
         if (tls_opts) |opts| {
             if (!build_options.use_tls) return error.TlsNotConfigured;
+            if (self.tls_buffers.len == 0) {
+                self.tls_buffers = try self.allocator.alloc(u8, TlsRuntime.buffers_size);
+            }
             const host = opts.server_name orelse server.parsed_url.host;
-            tls_rt = try TlsRuntime.create(self.allocator, opts, host);
+            tls_rt_storage = TlsRuntime.init(opts, host, self.tls_buffers);
+            tls_rt = &tls_rt_storage;
         }
-        defer if (tls_rt) |rt| rt.destroy(self.allocator);
 
         var stream = try self.establishConnection(server);
         defer stream.close(self.io);
