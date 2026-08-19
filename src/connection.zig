@@ -286,6 +286,11 @@ const TlsRuntime = struct {
     /// Owned by the reader after the handshake completes.
     dec: tls.nonblock.Connection = undefined,
 
+    /// Entropy source for the handshake and for TLS 1.2 record IVs. The
+    /// 1.2 cipher state keeps a pointer to this beyond the handshake, so
+    /// it must live exactly as long as enc and dec do.
+    rng: std.Random.IoSource,
+
     /// Ciphertext buffer for the socket reader. Must hold a complete TLS
     /// record for steady-state reads, and a complete handshake flight
     /// (certificate chains included) during the handshake.
@@ -309,11 +314,12 @@ const TlsRuntime = struct {
     /// kept for the connection's lifetime).
     const buffers_size = read_buffer_size + cleartext_buffer_size + out_buffer_size;
 
-    fn init(opts: TlsOptions, host: []const u8, buffers: []u8) TlsRuntime {
+    fn init(io: Io, opts: TlsOptions, host: []const u8, buffers: []u8) TlsRuntime {
         std.debug.assert(buffers.len == buffers_size);
         return .{
             .opts = opts,
             .host = host,
+            .rng = .{ .io = io },
             .read_buffer = buffers[0..read_buffer_size],
             .cleartext_buffer = buffers[read_buffer_size..][0..cleartext_buffer_size],
             .out_buffer = buffers[read_buffer_size + cleartext_buffer_size ..][0..out_buffer_size],
@@ -633,12 +639,17 @@ pub const Connection = struct {
         self.status_cond.broadcast(self.io);
 
         // The URL may be a comma-separated list of servers; the initial
-        // connection tries them in order until one succeeds.
+        // connection tries them in order until one succeeds. The tls://
+        // scheme is detected on the URLs themselves, not the pool: the
+        // pool deduplicates by host:port, so a tls:// duplicate of a
+        // plaintext URL never shows up in it.
         var added: usize = 0;
+        var url_wants_tls = false;
         var url_it = std.mem.splitScalar(u8, url, ',');
         while (url_it.next()) |part| {
             const trimmed = std.mem.trim(u8, part, " \t");
             if (trimmed.len == 0) continue;
+            if (std.mem.startsWith(u8, trimmed, "tls://")) url_wants_tls = true;
             _ = try self.server_pool.addServer(trimmed, false);
             added += 1;
         }
@@ -647,6 +658,9 @@ pub const Connection = struct {
         // Only ever upgrade: addServer may have enabled TLS before connect.
         if (self.resolved_tls == null) {
             self.resolved_tls = resolveTlsOptions(self.options.tls, &self.server_pool);
+            if (self.resolved_tls == null and url_wants_tls) {
+                self.resolved_tls = TlsOptions{};
+            }
         }
         if (self.resolved_tls != null) {
             if (!build_options.use_tls) return error.TlsNotConfigured;
@@ -1526,7 +1540,7 @@ pub const Connection = struct {
                 self.tls_buffers = try self.allocator.alloc(u8, TlsRuntime.buffers_size);
             }
             const host = opts.server_name orelse server.parsed_url.host;
-            tls_rt_storage = TlsRuntime.init(opts, host, self.tls_buffers);
+            tls_rt_storage = TlsRuntime.init(self.io, opts, host, self.tls_buffers);
             tls_rt = &tls_rt_storage;
         }
 
@@ -1849,13 +1863,15 @@ pub const Connection = struct {
             client_auth = try tls.config.CertKeyPair.fromFilePath(self.allocator, self.io, Io.Dir.cwd(), cert_path, key_path);
         }
 
-        var rng: std.Random.IoSource = .{ .io = self.io };
+        // The RNG lives on rt, not this frame: with TLS 1.2 the cipher
+        // keeps the Random - and its pointer to the IoSource - for record
+        // IV generation long after this function returns.
         var hs = tls.nonblock.Client.init(.{
             .host = rt.host,
             .root_ca = bundle,
             .insecure_skip_verify = rt.opts.insecure_skip_verify,
             .auth = if (client_auth) |*auth| auth else null,
-            .rng = rng.interface(),
+            .rng = rt.rng.interface(),
             .now = Io.Clock.real.now(self.io),
         });
 
@@ -3040,6 +3056,31 @@ test "resolveTlsOptions: tls is sticky across the whole pool" {
     // Explicit options always win.
     const custom: TlsOptions = .{ .insecure_skip_verify = true };
     try std.testing.expect(resolveTlsOptions(custom, &pool).?.insecure_skip_verify);
+}
+
+test "connect resolves tls from a duplicate tls:// URL in the list" {
+    if (!build_options.use_tls) return error.SkipZigTest;
+
+    const io = std.testing.io;
+
+    // Grab an ephemeral port and close the listener so the connection
+    // attempt fails; what is under test is the TLS resolution, which
+    // happens before any connecting.
+    const listen_address: net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try listen_address.listen(io, .{});
+    const port = server.socket.address.getPort();
+    server.deinit(io);
+
+    var connection = Connection.init(std.testing.allocator, io, .{});
+    defer connection.deinit();
+
+    var url_buf: [128]u8 = undefined;
+    // The tls:// URL is a host:port duplicate of the plaintext one, so
+    // the pool drops it; the scheme must still enable TLS.
+    const url = try std.fmt.bufPrint(&url_buf, "nats://127.0.0.1:{d},tls://127.0.0.1:{d}", .{ port, port });
+
+    _ = connection.connect(url) catch {};
+    try std.testing.expect(connection.resolved_tls != null);
 }
 
 test "addServer with a tls:// duplicate of a pooled server upgrades the pool" {
