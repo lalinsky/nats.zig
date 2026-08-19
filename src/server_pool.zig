@@ -66,7 +66,6 @@ pub const Server = struct {
 // Server pool matching C library's natsSrvPool
 pub const ServerPool = struct {
     servers: StringArrayHashMapUnmanaged(*Server), // Combined hash map with insertion order (host:port -> *Server)
-    randomize: bool = false, // Whether to randomize order
     default_user: ?[]const u8 = null, // Default username from first explicit URL
     default_pwd: ?[]const u8 = null, // Default password from first explicit URL
     allocator: Allocator,
@@ -169,29 +168,6 @@ pub const ServerPool = struct {
     pub fn getFirstServer(self: *ServerPool) ?*Server {
         const values = self.servers.values();
         return if (values.len > 0) values[0] else null;
-    }
-
-    // Shuffle servers in pool (like C library's _shufflePool)
-    pub fn shuffle(self: *ServerPool, io: std.Io, offset: usize) std.mem.Allocator.Error!void {
-        if (self.servers.count() <= offset + 1) return;
-
-        var seed: u64 = undefined;
-        io.random(std.mem.asBytes(&seed));
-        var prng = std.Random.DefaultPrng.init(seed);
-        const random = prng.random();
-
-        // Shuffle the underlying entries directly
-        var i = offset;
-        while (i < self.servers.entries.len) : (i += 1) {
-            const j = offset + random.uintLessThan(usize, i + 1 - offset);
-            const entry_i = self.servers.entries.get(i);
-            self.servers.entries.set(i, self.servers.entries.get(j));
-            self.servers.entries.set(j, entry_i);
-        }
-
-        // Rebuild the hash index. A failure here leaves the entries shuffled
-        // but the index stale, so it has to propagate rather than be ignored.
-        try self.servers.reIndex(self.allocator);
     }
 };
 
