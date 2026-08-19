@@ -17,8 +17,28 @@ const Message = @import("message.zig").Message;
 const MessagePool = @import("message.zig").MessagePool;
 const log = @import("log.zig").log;
 
-/// Maximum size for control line operations (MSG arguments, INFO, ERR, etc.)
+/// Size of the outbound control line buffer (MSG arguments, INFO, ERR, etc.).
+/// This is a sizing hint for the fast path, not a limit on what the server may
+/// send us - see `default_max_control_line`.
 pub const MAX_CONTROL_LINE_SIZE = 4096;
+
+/// Ceiling on an inbound control line that arrives split across reads.
+///
+/// This is a memory guard, not a protocol conformance check. The server's own
+/// limit is operator-configurable (`max_control_line`), and a cluster INFO with
+/// many `connect_urls` is the realistic case for a large one, so the default is
+/// deliberately far above anything a conformant server sends rather than equal
+/// to the server's default. Neither nats.go nor nats.c bounds this at all; the
+/// point here is only that a server which never terminates a line cannot grow
+/// the buffer until the process dies.
+pub const default_max_control_line = 64 * 1024;
+
+/// Ceiling on the total size (headers plus payload) of an inbound MSG/HMSG.
+///
+/// The server applies the same total-size semantics to inbound PUB/HPUB against
+/// its own max_payload. Sized well above a typical negotiated max_payload so
+/// that raising the server limit does not require touching this.
+pub const default_max_message_size = 64 * 1024 * 1024;
 
 pub const ParserState = enum {
     OP_START,
@@ -73,6 +93,8 @@ pub const Parser = struct {
     arg_buf_rec: std.ArrayList(u8), // The actual arg buffer storage
     arg_buf: ?*std.ArrayList(u8) = null, // Nullable pointer, null = fast path
     msg_pool: MessagePool,
+    max_control_line: usize = default_max_control_line,
+    max_message_size: usize = default_max_message_size,
 
     const Self = @This();
 
@@ -102,7 +124,19 @@ pub const Parser = struct {
         }
         self.ma = .{};
         self.arg_buf = null; // Reset to fast path
-        self.arg_buf_rec.clearRetainingCapacity();
+        // Hand back a buffer that a large control line grew: retaining it
+        // would pin that memory for the life of the connection.
+        if (self.arg_buf_rec.capacity > MAX_CONTROL_LINE_SIZE) {
+            self.arg_buf_rec.clearAndFree(self.allocator);
+        } else {
+            self.arg_buf_rec.clearRetainingCapacity();
+        }
+    }
+
+    /// Append one byte of a split control line, refusing to grow past the limit.
+    fn appendArgByte(self: *Self, arg_buf: *std.ArrayList(u8), b: u8) !void {
+        if (arg_buf.items.len >= self.max_control_line) return error.ControlLineTooLarge;
+        try arg_buf.append(self.allocator, b);
     }
 
     pub fn parse(self: *Self, conn: anytype, buf: []const u8) !void {
@@ -196,7 +230,7 @@ pub const Parser = struct {
                         else => {
                             // Only accumulate if we're in split buffer mode
                             if (self.arg_buf) |arg_buf| {
-                                try arg_buf.append(self.allocator, b);
+                                try self.appendArgByte(arg_buf, b);
                             }
                         },
                     }
@@ -393,7 +427,7 @@ pub const Parser = struct {
                         else => {
                             // Only accumulate if we're in split buffer mode
                             if (self.arg_buf) |arg_buf| {
-                                try arg_buf.append(self.allocator, b);
+                                try self.appendArgByte(arg_buf, b);
                             }
                         },
                     }
@@ -466,7 +500,7 @@ pub const Parser = struct {
                         else => {
                             // Only accumulate if we're in split buffer mode
                             if (self.arg_buf) |arg_buf| {
-                                try arg_buf.append(self.allocator, b);
+                                try self.appendArgByte(arg_buf, b);
                             }
                         },
                     }
@@ -486,6 +520,7 @@ pub const Parser = struct {
             // Set up arg_buf for next parse() call
             try self.setupArgBuf();
             const remaining_args = buf[self.after_space .. i - self.drop];
+            if (remaining_args.len > self.max_control_line) return error.ControlLineTooLarge;
             try self.arg_buf.?.appendSlice(self.allocator, remaining_args);
         }
     }
@@ -540,6 +575,11 @@ pub const Parser = struct {
         const sid = try std.fmt.parseInt(u64, sid_str, 10);
 
         const total_len = try std.fmt.parseInt(usize, total_len_str, 10);
+
+        // Refuse to size an allocation from an unbounded number off the wire.
+        // Mirrors the server, which bounds the same total - headers included -
+        // against its max_payload on the way in.
+        if (total_len > self.max_message_size) return error.MessageTooLarge;
 
         var hdr_len: usize = 0;
         if (hdr_len_str) |str| {
@@ -850,4 +890,75 @@ test "parser multiple lines" {
             try std.testing.expect(false);
         }
     }
+}
+
+test "unterminated control line is bounded" {
+    const testing = std.testing;
+
+    var parser = Parser.init(testing.allocator, std.testing.io);
+    defer parser.deinit();
+    parser.max_control_line = 512; // keep the test cheap
+
+    var mock_conn = MockConnection{};
+    defer mock_conn.deinit();
+
+    // A server that opens an INFO and never terminates it. Feed it in chunks,
+    // as a real socket would, so the split-buffer path does the accumulating.
+    const chunk = "x" ** 64;
+    try parser.parse(&mock_conn, "INFO {");
+
+    var err: ?anyerror = null;
+    var sent: usize = 0;
+    while (sent < 4096) : (sent += chunk.len) {
+        parser.parse(&mock_conn, chunk) catch |e| {
+            err = e;
+            break;
+        };
+    }
+
+    try testing.expectEqual(@as(?anyerror, error.ControlLineTooLarge), err);
+    // The buffer stopped growing at the limit rather than tracking the input.
+    try testing.expect(parser.arg_buf_rec.items.len <= parser.max_control_line);
+}
+
+test "reset gives back an oversized control line buffer" {
+    const testing = std.testing;
+
+    var parser = Parser.init(testing.allocator, std.testing.io);
+    defer parser.deinit();
+
+    var mock_conn = MockConnection{};
+    defer mock_conn.deinit();
+
+    try parser.parse(&mock_conn, "INFO {");
+    const big = "y" ** (MAX_CONTROL_LINE_SIZE * 2);
+    try parser.parse(&mock_conn, big);
+    try testing.expect(parser.arg_buf_rec.capacity > MAX_CONTROL_LINE_SIZE);
+
+    parser.reset();
+    try testing.expectEqual(@as(usize, 0), parser.arg_buf_rec.capacity);
+}
+
+test "oversized MSG length is refused before allocating" {
+    const testing = std.testing;
+
+    var parser = Parser.init(testing.allocator, std.testing.io);
+    defer parser.deinit();
+    parser.max_message_size = 1024;
+
+    var mock_conn = MockConnection{};
+    defer mock_conn.deinit();
+
+    // Announce far more than the parser will allocate. Without the bound this
+    // sizes the payload buffer straight from the wire.
+    try testing.expectError(
+        error.MessageTooLarge,
+        parser.parse(&mock_conn, "MSG foo 1 4294967296\r\n"),
+    );
+    try testing.expectEqual(@as(u32, 0), mock_conn.msg_count);
+
+    // A message inside the limit still parses.
+    parser.reset();
+    try parser.parse(&mock_conn, "MSG foo 1 5\r\nhello\r\n");
+    try testing.expectEqual(@as(u32, 1), mock_conn.msg_count);
 }

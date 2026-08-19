@@ -15,7 +15,8 @@ const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
-const Parser = @import("parser.zig").Parser;
+const parser_mod = @import("parser.zig");
+const Parser = parser_mod.Parser;
 const inbox = @import("inbox.zig");
 const Message = @import("message.zig").Message;
 const MessageList = @import("message.zig").MessageList;
@@ -376,6 +377,16 @@ pub const ConnectionOptions = struct {
     trace: bool = false,
     no_responders: bool = true,
     max_scratch_size: usize = 1024 * 1024 * 10,
+
+    /// Ceiling on an inbound protocol control line that arrives split across
+    /// reads, and on the total size (headers plus payload) of an inbound
+    /// message. Both are memory guards against a server that never terminates
+    /// a line or announces a length it does not send - not conformance checks,
+    /// so both defaults sit well above anything a conformant server produces.
+    /// Raise `max_control_line` to match a server configured with a larger
+    /// `max_control_line` than the default.
+    max_control_line: usize = parser_mod.default_max_control_line,
+    max_message_size: usize = parser_mod.default_max_message_size,
     ping_interval: Io.Duration = .fromSeconds(120), // .zero = disabled
     max_pings_out: u32 = 2, // max unanswered keep-alive PINGs
 
@@ -536,7 +547,12 @@ pub const Connection = struct {
             .write_buffer = WriteBuffer.init(allocator, io, .{ .max_size = options.write_buffer_limit, .soft_limit = true }),
             .subscriptions = std.AutoHashMap(u64, *Subscription).init(allocator),
             .response_manager = ResponseManager.init(allocator, io),
-            .parser = Parser.init(allocator, io),
+            .parser = blk: {
+                var parser = Parser.init(allocator, io);
+                parser.max_control_line = options.max_control_line;
+                parser.max_message_size = options.max_message_size;
+                break :blk parser;
+            },
             .scratch = std.heap.ArenaAllocator.init(allocator),
             .ping_time = io_util.now(io),
         };
