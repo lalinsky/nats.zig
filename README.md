@@ -313,9 +313,10 @@ var nc3 = nats.Connection.init(init.gpa, init.io, .{
 
 Once enabled, TLS applies to every connection, including cluster members
 discovered at runtime. Certificate files are re-read on every (re)connect,
-so rotated certificates are picked up automatically. Use `server_name` to
-verify the certificate against a specific name when servers are dialed by
-IP address:
+so rotated certificates are picked up automatically. Setting
+`insecure_skip_verify` disables server certificate verification entirely;
+it is meant for testing only. Use `server_name` to set the name used for
+SNI and certificate verification when servers are dialed by IP address:
 
 ```zig
 var nc4 = nats.Connection.init(init.gpa, init.io, .{
