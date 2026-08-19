@@ -58,9 +58,8 @@ test "connection drain concurrent with subscribe does not deadlock" {
         var group: std.Io.Group = .init;
         try group.concurrent(io, Subscriber.run, .{&subscriber});
         // Stop the subscriber by flag and join it, rather than cancelling:
-        // cancelling mid-subscribe makes subscribeInternal fail, and the
-        // subscribe entry points currently leak the subscription on that
-        // path (they release only one of its two references).
+        // cancelling mid-subscribe makes registerSubscription fail, and this
+        // test is about the lock order, not about the unwind.
         defer {
             subscriber.stop.store(true, .release);
             group.await(io) catch {};
@@ -70,6 +69,10 @@ test "connection drain concurrent with subscribe does not deadlock" {
         try io.sleep(.fromMilliseconds(2), .awake);
 
         try conn.drain();
-        conn.waitForDrainCompletion(.{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } }) catch {};
+        // Assert completion rather than swallowing it: the drain has to finish,
+        // not merely avoid deadlocking. A subscription drain that never reports
+        // completion leaves drain_subscription_count above zero and parks this
+        // call until it times out, which a discarded result would hide.
+        try conn.waitForDrainCompletion(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
     }
 }
