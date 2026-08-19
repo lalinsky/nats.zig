@@ -52,6 +52,9 @@ const ServerBehavior = enum {
     /// handshake, then close - so the client reconnects to the gossiped
     /// server.
     serve_gossip_then_close,
+    /// A PING instead of the INFO; the pre-TLS phase must reject any
+    /// first line that is not an INFO.
+    ping_instead_of_info,
     /// Plaintext INFO, then read the ClientHello and never respond.
     stall_in_tls_handshake,
     /// Plaintext INFO, then respond to the ClientHello with garbage.
@@ -108,6 +111,14 @@ const FakeServer = struct {
         var write_buf: [tls.output_buffer_len]u8 = undefined;
         var tcp_reader = stream.reader(io, &read_buf);
         var tcp_writer = stream.writer(io, &write_buf);
+
+        if (self.behavior == .ping_instead_of_info) {
+            try tcp_writer.interface.writeAll("PING\r\n");
+            try tcp_writer.interface.flush();
+            // Hold the connection open; the client must fail on its own.
+            _ = tcp_reader.interface.fillMore() catch {};
+            return;
+        }
 
         if (self.behavior != .serve_handshake_first) {
             var info_buf: [256]u8 = undefined;
@@ -471,6 +482,28 @@ const ReconnectTracker = struct {
 };
 
 var reconnect_tracker: ReconnectTracker = .{};
+
+test "tls: a first line that is not an INFO is rejected before the upgrade" {
+    const io = testing.io;
+    const allocator = testing.allocator;
+
+    var server = try FakeServer.init(io, allocator, .ping_instead_of_info);
+    defer server.deinit();
+
+    var server_err: ?anyerror = null;
+    var server_task = try io.concurrent(serverTask, .{ &server, &server_err });
+    defer server_task.cancel(io) catch {};
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "tls://127.0.0.1:{d}", .{server.port()});
+
+    var nc = Connection.init(allocator, io, .{
+        .tls = .{ .insecure_skip_verify = true },
+    });
+    defer nc.deinit();
+
+    try testing.expectError(error.NoInfoReceived, nc.connect(url));
+}
 
 test "tls: an oversized handshake flight fails cleanly" {
     const io = testing.io;

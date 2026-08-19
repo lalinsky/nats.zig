@@ -114,6 +114,8 @@ pub const ConnectionError = error{
     InvalidUrl,
     AuthFailed,
     InvalidProtocol,
+    /// The server's first protocol line was not an INFO.
+    NoInfoReceived,
     OutOfMemory,
     NoResponders,
     ReconnectDisabled,
@@ -1699,12 +1701,11 @@ pub const Connection = struct {
 
         if (tls_rt) |rt| {
             if (!rt.opts.handshake_first) {
-                // The NATS TLS upgrade happens after the plaintext INFO:
-                // parse until the INFO is handled. That queues CONNECT+PING
-                // into the write buffer, where it stays until the flusher is
-                // released below - so credentials never touch the socket
-                // unencrypted.
-                try self.readUntilInfo(&stream_reader);
+                // The NATS TLS upgrade happens after the plaintext INFO.
+                // Processing it queues CONNECT+PING into the write buffer,
+                // where it stays until the flusher is released below - so
+                // credentials never touch the socket unencrypted.
+                try self.readExpectedInfo(&stream_reader);
             }
             try self.performTlsHandshake(stream, &stream_reader, rt);
             ready.set(self.io);
@@ -1714,38 +1715,41 @@ pub const Connection = struct {
         }
     }
 
-    /// Pre-TLS phase: read and parse plaintext until the server INFO has
-    /// been processed, the handshake failed (a server -ERR), or the
-    /// connection is torn down.
-    fn readUntilInfo(self: *Self, stream_reader: *net.Stream.Reader) !void {
+    /// Pre-TLS phase: read exactly one protocol line and require it to be
+    /// the server INFO (or an -ERR carrying the failure cause). Like the
+    /// official clients, nothing else is interpreted before the TLS
+    /// upgrade: the protocol allows nothing else here, and running the
+    /// full parser would process commands - a MSG could even be delivered
+    /// to a subscription restored across a reconnect - on the unencrypted
+    /// socket. Bytes past the line stay buffered for the TLS handshake,
+    /// where anything illegitimate fails loudly.
+    fn readExpectedInfo(self: *Self, stream_reader: *net.Stream.Reader) !void {
         const reader = &stream_reader.interface;
-        while (true) {
-            {
-                try self.mutex.lock(self.io);
-                defer self.mutex.unlock(self.io);
-                switch (self.handshake_state) {
-                    .waiting_for_info => {},
-                    .failed => return self.handshake_error orelse ConnectionError.ConnectionFailed,
-                    else => return,
-                }
-            }
 
-            reader.fillMore() catch |err| switch (err) {
-                error.EndOfStream => {
-                    log.debug("Connection closed by server before INFO (EOF)", .{});
-                    return ConnectionError.ConnectionFailed;
-                },
-                // The `Io.Reader` interface erases the real error; it is
-                // stashed on the stream reader (including cancellation).
-                error.ReadFailed => return stream_reader.err.?,
-            };
+        const line = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => {
+                log.debug("Connection closed by server before INFO (EOF)", .{});
+                return ConnectionError.ConnectionFailed;
+            },
+            error.StreamTooLong => {
+                log.err("Server INFO line does not fit the read buffer", .{});
+                return ConnectionError.NoInfoReceived;
+            },
+            // The `Io.Reader` interface erases the real error; it is
+            // stashed on the stream reader (including cancellation).
+            error.ReadFailed => return stream_reader.err.?,
+        };
 
-            const data = reader.buffered();
-            if (data.len == 0) continue;
+        log.debug("Read {} bytes: {s}", .{ line.len, line });
+        try self.parser.parse(self, line);
 
-            log.debug("Read {} bytes: {s}", .{ data.len, data });
-            try self.parser.parse(self, data);
-            reader.toss(data.len);
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        switch (self.handshake_state) {
+            // A complete line that was not an INFO.
+            .waiting_for_info => return ConnectionError.NoInfoReceived,
+            .failed => return self.handshake_error orelse ConnectionError.ConnectionFailed,
+            else => return,
         }
     }
 
