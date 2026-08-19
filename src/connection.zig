@@ -1866,6 +1866,15 @@ pub const Connection = struct {
             }
             if (hs.done()) break;
 
+            // A handshake flight is only parsed once it is complete, so
+            // nothing is consumed until the whole flight fits in the
+            // buffer. With the buffer full and nothing consumed, reading
+            // more cannot make progress; report the oversized flight
+            // instead of letting fillMore die on the full buffer.
+            if (res.recv_pos == 0 and reader.buffered().len == rt.read_buffer.len) {
+                return error.TlsHandshakeFlightTooLarge;
+            }
+
             reader.fillMore() catch |err| switch (err) {
                 error.EndOfStream => {
                     log.debug("Connection closed by server during TLS handshake (EOF)", .{});
