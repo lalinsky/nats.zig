@@ -9,7 +9,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     # Without this the job inherits the 6 hour default, so anything that
-    # blocks burns a runner for the rest of the day instead of failing.
+    # blocks holds a runner for the rest of the day instead of failing.
     timeout-minutes: 20
 
     steps:
@@ -19,27 +19,6 @@ jobs:
       uses: mlugg/setup-zig@v2
       with:
         version: 0.16.0
-
-    # The azure.archive.ubuntu.com mirror the runner images default to is
-    # intermittently unreachable, and apt retries it for minutes before
-    # falling back - which is what stalled this job for over an hour. Point
-    # at the canonical archive, bound apt's own retries, and give it a lock
-    # timeout so a background unattended-upgrades run cannot block it
-    # forever either. -y and the noninteractive frontend keep it from
-    # stopping on a confirmation prompt it can never receive.
-    - name: Install libnats
-      timeout-minutes: 8
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
-          /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-        for attempt in 1 2 3; do
-          sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 update && break
-          echo "apt-get update failed (attempt $attempt of 3), retrying"
-          sleep 5
-        done
-        sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y libnats-dev
 
     - name: Check code formatting
       run: zig fmt --check .
@@ -57,6 +36,10 @@ jobs:
     - name: Build examples
       run: zig build examples
 
+    # The C benchmarks link against the system libnats. Installing it made
+    # this job depend on an apt mirror that repeatedly stalled for the full
+    # job timeout, and building them proves nothing about this library, so
+    # only the Zig benchmarks are built here.
     - name: Build benchmarks
-      run: zig build
+      run: zig build -Dc_benchmarks=false
       working-directory: benchmarks

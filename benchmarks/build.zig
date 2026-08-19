@@ -35,7 +35,16 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(exe);
     }
 
-    // C equivalents built on the official client (require system libnats)
+    // C equivalents built on the official client. These need system libnats,
+    // which is not present everywhere - CI in particular does not install it,
+    // since pulling it in made the job depend on an apt mirror that stalls.
+    const c_benchmarks = b.option(
+        bool,
+        "c_benchmarks",
+        "Build the C benchmarks against the system libnats (default: true)",
+    ) orelse true;
+    if (!c_benchmarks) return;
+
     for (benchmarks) |name| {
         const exe = b.addExecutable(.{
             .name = b.fmt("{s}_c", .{name}),
