@@ -653,8 +653,12 @@ pub const Connection = struct {
         if (self.resolved_tls == null) {
             self.resolved_tls = resolveTlsOptions(self.options.tls, &self.server_pool);
         }
-        if (self.resolved_tls != null and !build_options.use_tls) {
-            return error.TlsNotConfigured;
+        if (self.resolved_tls != null) {
+            if (!build_options.use_tls) return error.TlsNotConfigured;
+            // Certificate validation needs the wall clock; catch an I/O
+            // backend without one here instead of deep inside the first
+            // handshake.
+            try io_util.ensureRealClock(self.io);
         }
 
         try self.manager_task.concurrent(self.io, managerTask, .{self});

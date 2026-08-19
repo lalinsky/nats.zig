@@ -20,6 +20,13 @@ pub fn ensureAwakeClock(io: Io) Io.Clock.ResolutionError!void {
     if (resolution.nanoseconds == 0) return error.ClockUnavailable;
 }
 
+/// Verify that the I/O backend provides the real (wall) clock, used for
+/// TLS certificate validation.
+pub fn ensureRealClock(io: Io) Io.Clock.ResolutionError!void {
+    const resolution = try Io.Clock.real.resolution(io);
+    if (resolution.nanoseconds == 0) return error.ClockUnavailable;
+}
+
 /// Convert a timeout to an absolute deadline.
 pub fn deadline(io: Io, timeout: Io.Timeout) Io.Timeout {
     return timeout.toDeadline(io);
