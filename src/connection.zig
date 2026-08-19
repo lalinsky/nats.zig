@@ -582,11 +582,19 @@ pub const Connection = struct {
             }
             self.subscriptions.clearRetainingCapacity();
         }
-        self.subscriptions.deinit();
 
         for (detached.items) |sub| {
             sub.release(); // Release connection's ownership reference
         }
+
+        // Only now free the table's storage. A handler task that was blocked
+        // on subs_mutex during the loop above acquires it as soon as this
+        // function unlocks and calls remove() on the table - harmless while
+        // the table is merely empty, a use-after-free once its memory is
+        // gone. Releasing first is what closes that window: the release that
+        // destroys a subscription joins its handler task, so by this point
+        // those tasks are done with the table.
+        self.subscriptions.deinit();
 
         // Subscriptions are owned by their creator, not by the connection, so
         // anything still alive here is a reference the caller never released.
