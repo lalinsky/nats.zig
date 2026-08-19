@@ -118,7 +118,7 @@ pub const Subscription = struct {
         // registerSubscription has fully succeeded, so every failure between
         // here and there unwinds through the caller's `errdefer sub.release()`
         // and destroys the subscription.
-        _ = nc.live_subscriptions.fetchAdd(1, .monotonic);
+        _ = nc.subscription_refs.fetchAdd(1, .monotonic);
 
         return sub;
     }
@@ -189,22 +189,37 @@ pub const Subscription = struct {
         log.debug("Handler fiber stopped for subscription {}", .{self.sid});
     }
 
+    /// Stop the handler task and wait for it to finish.
+    ///
+    /// Closes the queue before canceling the task group: cancelation is
+    /// delivered only once, and a user callback may swallow it (e.g. an
+    /// `io.sleep(...) catch {}`), in which case the handler loop keeps polling
+    /// the queue and only a `Closed` result makes it exit.
+    fn stopHandler(self: *Subscription) void {
+        self.messages.close();
+        self.handler_group.cancel(self.nc.io);
+    }
+
     /// Unsubscribe from the server and release the user reference.
     /// After calling this, the subscription should not be used.
+    ///
+    /// Do not call from the subscription's own message handler: this joins
+    /// that handler's task, and a task cannot wait for itself.
     pub fn deinit(self: *Subscription) void {
+        // Stop the handler before dropping the caller's reference, so that
+        // reference is still held while the handler winds down. An async
+        // subscription that reaches its autounsubscribe limit drops the
+        // connection's reference from inside its own handler task; were that
+        // the last one, the destroy it triggers would join the very task
+        // making the call, and deadlock there.
+        self.stopHandler();
+
         self.nc.unsubscribe(self);
         self.release(); // Release user reference
     }
 
     fn destroy(self: *Subscription) void {
-        // Close the queue before canceling the handler task group: cancelation
-        // is delivered only once, and a user callback may swallow it (e.g. an
-        // `io.sleep(...) catch {}`), in which case the handler loop keeps
-        // polling the queue and only a `Closed` result makes it exit.
-        self.messages.close();
-
-        // Cancel handler task group and wait for completion
-        self.handler_group.cancel(self.nc.io);
+        self.stopHandler();
 
         self.nc.allocator.free(self.subject);
 
@@ -223,9 +238,7 @@ pub const Subscription = struct {
         }
         self.messages.deinit();
 
-        const nc = self.nc;
-        nc.allocator.destroy(self);
-        _ = nc.live_subscriptions.fetchSub(1, .release);
+        self.nc.allocator.destroy(self);
     }
 
     /// Wake subscription receivers and drain waiters when their owning
@@ -253,13 +266,26 @@ pub const Subscription = struct {
     }
 
     pub fn retain(self: *Subscription) void {
+        _ = self.nc.subscription_refs.fetchAdd(1, .monotonic);
         self.ref_counter.incr();
     }
 
     pub fn release(self: *Subscription) void {
+        // The connection outlives every subscription it created, so it can
+        // still be read after destroy() has freed this subscription.
+        const nc = self.nc;
+
         if (self.ref_counter.decr()) {
             // Last reference - actually free the subscription
             self.destroy();
+        }
+
+        // Counted down only now: destroy() joins the handler task, which runs
+        // inside the connection, so a deinit() waiting on this count must not
+        // be woken while that task is still there.
+        if (nc.subscription_refs.fetchSub(1, .release) == 1) {
+            // Last one gone - wake a deinit() waiting for exactly this.
+            nc.io.futexWake(u32, &nc.subscription_refs.raw, 1);
         }
     }
 
