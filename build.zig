@@ -78,8 +78,10 @@ pub fn build(b: *std.Build) void {
         });
     }
 
-    // Add build options to the module
-    lib_mod.addOptions("build_options", options);
+    // Add build options to the module; the same module instance is shared
+    // with the integration tests below.
+    const options_mod = options.createModule();
+    lib_mod.addImport("build_options", options_mod);
 
     // Now, we will create a static library based on the module we created above.
     // This creates a `std.Build.Step.Compile`, which is the build step responsible
@@ -121,6 +123,7 @@ pub fn build(b: *std.Build) void {
     });
     integration_tests.root_module.addImport("nats", lib_mod);
     integration_tests.root_module.addImport("xsync", xsync.module("xsync"));
+    integration_tests.root_module.addImport("build_options", options_mod);
 
     const run_integration_tests = b.addRunArtifact(integration_tests);
     run_integration_tests.has_side_effects = true; // Allow repeated runs with Docker interactions
