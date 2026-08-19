@@ -214,3 +214,51 @@ test "JetStream pending limits remain bounded and track large ack windows" {
 
     try std.testing.expectEqual(nats.Subscription.default_pending_msgs_limit, default_sub.subscription.pending_msgs_limit.load(.acquire));
 }
+
+test "JetStream subscribe attaches to an existing consumer named in the config" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    var stream_info = try js.addStream(.{
+        .name = "TEST_ATTACH_STREAM",
+        .subjects = &.{"test.attach.*"},
+        .max_msgs = 100,
+    });
+    defer stream_info.deinit();
+
+    // A consumer already delivering to a subject of its own choosing.
+    var existing = try js.addConsumer("TEST_ATTACH_STREAM", .{
+        .name = "attach_consumer",
+        .durable_name = "attach_consumer",
+        .deliver_subject = "test.attach.deliver.existing",
+        .filter_subject = "test.attach.*",
+        .ack_policy = .explicit,
+    });
+    defer existing.deinit();
+
+    // Subscribing by that name must attach to it and receive on its deliver
+    // subject, not create a second consumer or wait on the requested one.
+    var sub = try js.subscribeSync(null, .{
+        .stream = "TEST_ATTACH_STREAM",
+        .config = .{
+            .name = "attach_consumer",
+            .deliver_subject = "test.attach.deliver.requested",
+        },
+    });
+    defer sub.deinit();
+
+    try testing.expectEqualStrings("attach_consumer", sub.consumer_info.value.name);
+    try testing.expectEqualStrings("test.attach.deliver.existing", sub.consumer_info.value.config.deliver_subject.?);
+
+    try conn.publish("test.attach.message", "attached");
+
+    const js_msg = try sub.nextMsg();
+    defer js_msg.deinit();
+
+    try testing.expectEqualStrings("attached", js_msg.msg.data);
+    try js_msg.ack();
+}
