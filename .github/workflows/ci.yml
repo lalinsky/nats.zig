@@ -8,6 +8,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Without this the job inherits the 6 hour default, so anything that
+    # blocks holds a runner for the rest of the day instead of failing.
+    timeout-minutes: 20
 
     steps:
     - uses: actions/checkout@v4
@@ -17,21 +20,26 @@ jobs:
       with:
         version: 0.16.0
 
-    - name: Install libnats
-      run: sudo apt-get update && sudo apt-get install libnats-dev
-
     - name: Check code formatting
       run: zig fmt --check .
 
     - name: Run unit tests
+      timeout-minutes: 5
       run: zig build test-unit
 
+    # A deadlock in the client shows up here as a test that never returns, so
+    # this step needs a bound of its own rather than relying on the job one.
     - name: Run integration tests
+      timeout-minutes: 10
       run: zig build test-e2e
 
     - name: Build examples
       run: zig build examples
 
+    # The C benchmarks link against the system libnats. Installing it made
+    # this job depend on an apt mirror that repeatedly stalled for the full
+    # job timeout, and building them proves nothing about this library, so
+    # only the Zig benchmarks are built here.
     - name: Build benchmarks
-      run: zig build
+      run: zig build -Dc_benchmarks=false
       working-directory: benchmarks
