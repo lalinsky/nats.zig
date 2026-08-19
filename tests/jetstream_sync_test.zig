@@ -262,3 +262,83 @@ test "JetStream subscribe attaches to an existing consumer named in the config" 
     try testing.expectEqualStrings("attached", js_msg.msg.data);
     try js_msg.ack();
 }
+
+test "JetStream subscribe rejects an existing consumer that does not match" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    var stream_info = try js.addStream(.{
+        .name = "TEST_MISMATCH_STREAM",
+        .subjects = &.{"test.mismatch.*"},
+        .max_msgs = 100,
+    });
+    defer stream_info.deinit();
+
+    var push_consumer = try js.addConsumer("TEST_MISMATCH_STREAM", .{
+        .name = "mismatch_push",
+        .durable_name = "mismatch_push",
+        .deliver_subject = "deliver.mismatch",
+        .filter_subject = "test.mismatch.one",
+        .ack_wait = 60 * std.time.ns_per_s,
+    });
+    defer push_consumer.deinit();
+
+    var pull_consumer = try js.addConsumer("TEST_MISMATCH_STREAM", .{
+        .name = "mismatch_pull",
+        .durable_name = "mismatch_pull",
+        .filter_subject = "test.mismatch.one",
+    });
+    defer pull_consumer.deinit();
+
+    // A filter that does not cover the requested subject delivers nothing.
+    try testing.expectError(error.ConsumerConfigMismatch, js.subscribeSync("test.mismatch.two", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_push",
+    }));
+
+    // Requesting an ack window the consumer does not have changes redelivery
+    // behaviour, silently, for every message.
+    try testing.expectError(error.ConsumerConfigMismatch, js.subscribeSync("test.mismatch.one", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_push",
+        .config = .{ .ack_wait = 10 * std.time.ns_per_s },
+    }));
+
+    // A consumer with no deliver group does not serve a queue subscription.
+    try testing.expectError(error.ConsumerConfigMismatch, js.queueSubscribeSync("test.mismatch.one", "workers", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_push",
+    }));
+
+    // Pull and push consumers are not interchangeable.
+    try testing.expectError(error.PushSubscribeToPullConsumer, js.subscribeSync("test.mismatch.one", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_pull",
+    }));
+
+    try testing.expectError(error.PullSubscribeToPushConsumer, js.pullSubscribe("test.mismatch.one", "mismatch_push", .{
+        .stream = "TEST_MISMATCH_STREAM",
+    }));
+
+    // The matching request still attaches.
+    var sub = try js.subscribeSync("test.mismatch.one", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_push",
+        .config = .{ .ack_wait = 60 * std.time.ns_per_s },
+    });
+    defer sub.deinit();
+
+    try testing.expectEqualStrings("deliver.mismatch", sub.consumer_info.value.config.deliver_subject.?);
+
+    // A second plain subscription would split the consumer's delivery with the
+    // first one, at random.
+    try testing.expectError(error.ConsumerAlreadyBound, js.subscribeSync("test.mismatch.one", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_push",
+        .config = .{ .ack_wait = 60 * std.time.ns_per_s },
+    }));
+}

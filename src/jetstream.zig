@@ -250,6 +250,8 @@ pub const ConsumerInfo = struct {
     num_waiting: u64,
     /// The number of pending pull requests
     num_pending: u64,
+    /// Whether a push consumer already has a subscription bound to it
+    push_bound: ?bool = null,
     /// When this consumer was created
     created: []const u8,
 };
@@ -721,6 +723,112 @@ pub const JetStream = struct {
         return config;
     }
 
+    fn optStrEql(a: ?[]const u8, b: ?[]const u8) bool {
+        const lhs = a orelse return b == null;
+        const rhs = b orelse return false;
+        return std.mem.eql(u8, lhs, rhs);
+    }
+
+    fn configMismatch(comptime field: []const u8, requested: anytype, actual: anytype) error{ConsumerConfigMismatch} {
+        log.err("existing consumer has " ++ field ++ " {any}, but {any} was requested", .{ actual, requested });
+        return error.ConsumerConfigMismatch;
+    }
+
+    fn configMismatchStr(comptime field: []const u8, requested: ?[]const u8, actual: ?[]const u8) error{ConsumerConfigMismatch} {
+        log.err("existing consumer has " ++ field ++ " {?s}, but {?s} was requested", .{ actual, requested });
+        return error.ConsumerConfigMismatch;
+    }
+
+    /// Reject an existing consumer that does not deliver what the caller asked
+    /// for, rather than silently attaching to it. Mirrors processConsInfo and
+    /// checkConfig in nats.go, and _processConsInfo in nats.c.
+    ///
+    /// Only fields the caller can be shown to have set are compared. Several
+    /// ConsumerConfig fields are plain values with a default rather than
+    /// optionals, so a value equal to that default cannot be told apart from
+    /// one that was never set, and is treated as unset - the same accommodation
+    /// nats.go makes for its own zero values.
+    fn checkExistingConsumer(existing: *const ConsumerInfo, requested: ConsumerConfig, is_pull: bool, subject: ?[]const u8, queue: ?[]const u8) !void {
+        const config = &existing.config;
+        const defaults = ConsumerConfig{};
+
+        // A consumer whose filter does not cover the requested subject would
+        // deliver nothing, or the wrong thing. Unlike nats.go, subscribing
+        // without a subject is allowed against a filtered consumer: binding to
+        // a durable by name alone is a normal way to use this API.
+        if (subject) |s| {
+            if (config.filter_subject) |filter| {
+                if (!std.mem.eql(u8, s, filter)) return configMismatchStr("filter_subject", s, filter);
+            }
+        }
+
+        // Pull and push consumers are not interchangeable, and the deliver
+        // subject is what tells them apart.
+        if (is_pull) {
+            if (config.deliver_subject != null) return error.PullSubscribeToPushConsumer;
+        } else {
+            if (config.deliver_subject == null) return error.PushSubscribeToPullConsumer;
+
+            if (config.deliver_group) |group| {
+                // A consumer with a deliver group only delivers to members of
+                // that group, so a plain subscription receives nothing.
+                const q = queue orelse return configMismatchStr("deliver_group", null, group);
+                if (!std.mem.eql(u8, q, group)) return configMismatchStr("deliver_group", q, group);
+            } else if (queue) |q| {
+                return configMismatchStr("deliver_group", q, null);
+            } else if (existing.push_bound orelse false) {
+                // Two plain subscriptions to one push consumer split its
+                // delivery between them at random.
+                return error.ConsumerAlreadyBound;
+            }
+        }
+
+        if (requested.description) |v| {
+            if (!optStrEql(v, config.description)) return configMismatchStr("description", v, config.description);
+        }
+        if (requested.deliver_policy != defaults.deliver_policy and requested.deliver_policy != config.deliver_policy) {
+            return configMismatch("deliver_policy", requested.deliver_policy, config.deliver_policy);
+        }
+        if (requested.opt_start_seq) |v| {
+            if (v != config.opt_start_seq) return configMismatch("opt_start_seq", v, config.opt_start_seq);
+        }
+        if (requested.opt_start_time) |v| {
+            if (!optStrEql(v, config.opt_start_time)) return configMismatchStr("opt_start_time", v, config.opt_start_time);
+        }
+        if (requested.ack_policy != defaults.ack_policy and requested.ack_policy != config.ack_policy) {
+            return configMismatch("ack_policy", requested.ack_policy, config.ack_policy);
+        }
+        if (requested.ack_wait != defaults.ack_wait and requested.ack_wait != config.ack_wait) {
+            return configMismatch("ack_wait", requested.ack_wait, config.ack_wait);
+        }
+        if (requested.max_deliver != defaults.max_deliver and requested.max_deliver != config.max_deliver) {
+            return configMismatch("max_deliver", requested.max_deliver, config.max_deliver);
+        }
+        if (requested.replay_policy != defaults.replay_policy and requested.replay_policy != config.replay_policy) {
+            return configMismatch("replay_policy", requested.replay_policy, config.replay_policy);
+        }
+        if (requested.rate_limit_bps) |v| {
+            if (v != config.rate_limit_bps) return configMismatch("rate_limit_bps", v, config.rate_limit_bps);
+        }
+        if (requested.max_ack_pending != defaults.max_ack_pending and requested.max_ack_pending != config.max_ack_pending) {
+            return configMismatch("max_ack_pending", requested.max_ack_pending, config.max_ack_pending);
+        }
+        if (requested.idle_heartbeat) |v| {
+            if (v != config.idle_heartbeat) return configMismatch("idle_heartbeat", v, config.idle_heartbeat);
+        }
+        if (requested.max_waiting) |v| {
+            if (v != config.max_waiting) return configMismatch("max_waiting", v, config.max_waiting);
+        }
+        if (requested.num_replicas) |v| {
+            if (v != config.num_replicas) return configMismatch("num_replicas", v, config.num_replicas);
+        }
+        // Flow control the caller did not ask for is handled by the library
+        // either way, so only an unmet request for it is a mismatch.
+        if (requested.flow_control orelse false) {
+            if (!(config.flow_control orelse false)) return configMismatch("flow_control", true, config.flow_control);
+        }
+    }
+
     /// Look up a named consumer, returning null when it is unnamed or does
     /// not exist yet.
     fn lookupConsumer(self: JetStream, stream_name: []const u8, name: ?[]const u8) !?Result(ConsumerInfo) {
@@ -775,10 +883,10 @@ pub const JetStream = struct {
         // Two passes at most: the second one always has a consumer to attach
         // to, so it returns before reaching addConsumer again.
         while (true) {
-            const deliver_subject = if (existing) |info|
-                info.value.config.deliver_subject.?
-            else
-                config.deliver_subject.?;
+            const deliver_subject = if (existing) |info| blk: {
+                try checkExistingConsumer(&info.value, base_config, false, subject, queue);
+                break :blk info.value.config.deliver_subject.?;
+            } else config.deliver_subject.?;
 
             const subscription = try subscriber.subscribe(deliver_subject);
             errdefer subscription.deinit();
@@ -809,7 +917,11 @@ pub const JetStream = struct {
     fn getOrCreateConsumer(self: JetStream, stream_name: []const u8, subject: ?[]const u8, durable: ?[]const u8, base_config: ?ConsumerConfig, is_pull: bool, queue: ?[]const u8) !Result(ConsumerInfo) {
         const config = buildConsumerConfig(base_config, subject, durable, is_pull, queue);
 
-        if (try self.lookupConsumer(stream_name, durable)) |existing_info| return existing_info;
+        if (try self.lookupConsumer(stream_name, config.name orelse config.durable_name)) |existing_info| {
+            errdefer existing_info.deinit();
+            try checkExistingConsumer(&existing_info.value, base_config orelse .{}, is_pull, subject, queue);
+            return existing_info;
+        }
 
         return try self.addConsumer(stream_name, config);
     }
