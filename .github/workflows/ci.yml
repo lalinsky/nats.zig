@@ -20,17 +20,26 @@ jobs:
       with:
         version: 0.16.0
 
-    # apt is given an explicit lock timeout: the runner images periodically
-    # run unattended-upgrades, and apt waits for /var/lib/dpkg/lock-frontend
-    # forever by default. -y and the noninteractive frontend keep it from
+    # The azure.archive.ubuntu.com mirror the runner images default to is
+    # intermittently unreachable, and apt retries it for minutes before
+    # falling back - which is what stalled this job for over an hour. Point
+    # at the canonical archive, bound apt's own retries, and give it a lock
+    # timeout so a background unattended-upgrades run cannot block it
+    # forever either. -y and the noninteractive frontend keep it from
     # stopping on a confirmation prompt it can never receive.
     - name: Install libnats
-      timeout-minutes: 5
+      timeout-minutes: 8
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo apt-get -o DPkg::Lock::Timeout=120 update
-        sudo apt-get -o DPkg::Lock::Timeout=120 install -y libnats-dev
+        sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
+          /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+        for attempt in 1 2 3; do
+          sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 update && break
+          echo "apt-get update failed (attempt $attempt of 3), retrying"
+          sleep 5
+        done
+        sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y libnats-dev
 
     - name: Check code formatting
       run: zig fmt --check .
