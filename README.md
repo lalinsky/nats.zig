@@ -113,9 +113,10 @@ Subscriptions are owned by whoever created them, not by the connection: every
 subscription must be released with `sub.deinit()` before its connection is
 destroyed. `deinit()` unsubscribes and, for asynchronous subscriptions, waits
 for the handler task to finish, so it is safe to free anything the handler
-captured once it returns. Destroying a connection that still has live
-subscriptions panics with the number outstanding rather than leaving them
-pointing at freed connection state.
+captured once it returns. `Connection.deinit()` blocks until every
+subscription has been released, rather than leaving one pointing at freed
+connection state - so a subscription that is never released blocks it
+forever.
 
 ### Send request and wait for reply
 

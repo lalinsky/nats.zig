@@ -501,11 +501,13 @@ pub const Connection = struct {
     // Guards `subscriptions`. Acquired after `mutex` when both are held; see
     // the lock-order note on `mutex`.
     subs_mutex: xsync.Mutex = .init,
-    // Every constructed Subscription, whether or not it is still registered in
-    // `subscriptions`. Incremented by Subscription.create, decremented by
-    // Subscription.destroy. Only deinit() reads it, to report subscriptions the
-    // caller never released.
-    live_subscriptions: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    // Every outstanding reference to every Subscription this connection has
+    // created, the caller's and the library's alike, mirroring the individual
+    // reference counts. Taken by Subscription.create and Subscription.retain,
+    // dropped by Subscription.release once any destruction it triggers has
+    // finished. Reaching zero is what tells deinit() that no task is still
+    // inside a subscription, or inside the connection through one.
+    subscription_refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     // Response management (shared subscription for request/reply)
     response_manager: ResponseManager,
@@ -540,6 +542,31 @@ pub const Connection = struct {
             .scratch = std.heap.ArenaAllocator.init(allocator),
             .ping_time = io_util.now(io),
         };
+    }
+
+    /// Wait until nothing references any of this connection's subscriptions.
+    ///
+    /// A reference outlives the call that drops it. A message being dispatched
+    /// holds one across the dispatch, on the reader task; a subscription that
+    /// reaches its autounsubscribe limit detaches itself on its handler task,
+    /// with the release that follows still in flight. Neither is something the
+    /// caller can wait for - sub.deinit() has already returned, and the
+    /// subscription is no longer in the table for deinit() to find.
+    ///
+    /// Blocks until the count reaches zero, so a caller who never released a
+    /// subscription blocks here rather than pulling the connection out from
+    /// under one.
+    fn waitForSubscriptionRelease(self: *Self) void {
+        while (true) {
+            const refs = self.subscription_refs.load(.acquire);
+            if (refs == 0) return;
+
+            // Waiting on the count itself: the value is compared as the wait
+            // parks, so a release landing in between returns immediately
+            // rather than being missed. Wakeups can also be spurious, which
+            // re-reading the count handles either way.
+            self.io.futexWaitUncancelable(u32, &self.subscription_refs.raw, refs);
+        }
     }
 
     /// Destroy the connection after joining all of its tasks.
@@ -587,6 +614,12 @@ pub const Connection = struct {
             sub.release(); // Release connection's ownership reference
         }
 
+        // Subscriptions are owned by their creator, not by the connection, so
+        // destroying the connection under one would leave it pointing at freed
+        // state. Wait for every reference to go, the library's own and the
+        // caller's alike.
+        self.waitForSubscriptionRelease();
+
         // Only now free the table's storage. A handler task that was blocked
         // on subs_mutex during the loop above acquires it as soon as this
         // function unlocks and calls remove() on the table - harmless while
@@ -595,18 +628,6 @@ pub const Connection = struct {
         // destroys a subscription joins its handler task, so by this point
         // those tasks are done with the table.
         self.subscriptions.deinit();
-
-        // Subscriptions are owned by their creator, not by the connection, so
-        // anything still alive here is a reference the caller never released.
-        // Destroying the connection under it would leave that subscription
-        // pointing at freed connection state, so report it instead of letting
-        // the use-after-free happen later somewhere unrelated.
-        const live = self.live_subscriptions.load(.acquire);
-        if (live != 0) std.debug.panic(
-            "Connection.deinit() with {d} live subscription(s): call sub.deinit() " ++
-                "on every subscription before destroying its connection",
-            .{live},
-        );
 
         // Clean up the buffers
         self.pending_buffer.deinit();
