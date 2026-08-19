@@ -501,6 +501,11 @@ pub const Connection = struct {
     // Guards `subscriptions`. Acquired after `mutex` when both are held; see
     // the lock-order note on `mutex`.
     subs_mutex: xsync.Mutex = .init,
+    // Every constructed Subscription, whether or not it is still registered in
+    // `subscriptions`. Incremented by Subscription.create, decremented by
+    // Subscription.destroy. Only deinit() reads it, to report subscriptions the
+    // caller never released.
+    live_subscriptions: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     // Response management (shared subscription for request/reply)
     response_manager: ResponseManager,
@@ -550,12 +555,34 @@ pub const Connection = struct {
         // Clean up response manager
         self.response_manager.deinit();
 
-        // Clean up subscriptions - release connection's references first
-        var iter = self.subscriptions.iterator();
-        while (iter.next()) |entry| {
-            entry.value_ptr.*.release(); // Release connection's ownership reference
+        // Drop the connection's reference to every still-registered
+        // subscription. Detach them under subs_mutex before releasing: an
+        // async subscription's handler task can still be running its own
+        // teardown through unregisterSubscription, and iterating the table
+        // unsynchronized races that on the hashmap's internals.
+        {
+            self.subs_mutex.lockUncancelable(self.io);
+            defer self.subs_mutex.unlock(self.io);
+
+            var iter = self.subscriptions.valueIterator();
+            while (iter.next()) |sub_ptr| {
+                sub_ptr.*.release(); // Release connection's ownership reference
+            }
+            self.subscriptions.clearRetainingCapacity();
         }
         self.subscriptions.deinit();
+
+        // Subscriptions are owned by their creator, not by the connection, so
+        // anything still alive here is a reference the caller never released.
+        // Destroying the connection under it would leave that subscription
+        // pointing at freed connection state, so report it instead of letting
+        // the use-after-free happen later somewhere unrelated.
+        const live = self.live_subscriptions.load(.acquire);
+        if (live != 0) std.debug.panic(
+            "Connection.deinit() with {d} live subscription(s): call sub.deinit() " ++
+                "on every subscription before destroying its connection",
+            .{live},
+        );
 
         // Clean up the buffers
         self.pending_buffer.deinit();
@@ -979,7 +1006,14 @@ pub const Connection = struct {
         }
     }
 
-    fn subscribeInternal(self: *Self, sub: *Subscription) !void {
+    /// Register a freshly created subscription with the connection and tell the
+    /// server about it.
+    ///
+    /// The connection's reference is taken last, once every fallible step has
+    /// succeeded. Any failure therefore leaves the subscription at the single
+    /// reference its creator holds, so the caller's `errdefer sub.release()`
+    /// destroys it - no unwind bookkeeping is needed at the call sites.
+    fn registerSubscription(self: *Self, sub: *Subscription) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -1005,19 +1039,39 @@ pub const Connection = struct {
             try buffer.writer.print("SUB {s} {d}\r\n", .{ sub.subject, sub.sid });
         }
         try self.write_buffer.appendUnmetered(buffer.written());
+
+        // Past the last failure point: the table now owns a reference.
+        sub.retain();
+    }
+
+    /// Undo registerSubscription. Safe to call when the subscription was
+    /// already removed - the connection's reference is dropped at most once.
+    fn unregisterSubscription(self: *Self, sub: *Subscription) void {
+        {
+            self.subs_mutex.lockUncancelable(self.io);
+            defer self.subs_mutex.unlock(self.io);
+
+            if (!self.subscriptions.remove(sub.sid)) return;
+        }
+
+        sub.release();
     }
 
     pub fn subscribe(self: *Self, subject: []const u8, comptime handlerFn: anytype, args: anytype) !*Subscription {
         try validation.validateSubject(subject);
 
+        // Subscription.create takes ownership of the handler on every path,
+        // so registering cleanup for it here would free it twice.
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
-        errdefer handler.cleanup(self.allocator);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.create(self, sid, subject, null, handler);
         errdefer sub.release();
 
-        try self.subscribeInternal(sub);
+        try self.registerSubscription(sub);
+        // A registered subscription whose handler never starts would keep
+        // accumulating messages that nobody can consume or unsubscribe.
+        errdefer self.unregisterSubscription(sub);
         try sub.startHandler();
 
         log.debug("Subscribed to {s} with sid {d} (async)", .{ sub.subject, sub.sid });
@@ -1032,7 +1086,7 @@ pub const Connection = struct {
         const sub = try Subscription.create(self, sid, subject, null, null);
         errdefer sub.release();
 
-        try self.subscribeInternal(sub);
+        try self.registerSubscription(sub);
 
         log.debug("Subscribed to {s} with sid {d} (sync)", .{ sub.subject, sub.sid });
         return sub;
@@ -1042,14 +1096,18 @@ pub const Connection = struct {
         try validation.validateSubject(subject);
         try validation.validateQueueName(queue);
 
+        // Subscription.create takes ownership of the handler on every path,
+        // so registering cleanup for it here would free it twice.
         const handler = try subscription_mod.createMsgHandler(self.allocator, handlerFn, args);
-        errdefer handler.cleanup(self.allocator);
 
         const sid = self.next_sid.fetchAdd(1, .monotonic);
         const sub = try Subscription.create(self, sid, subject, queue, handler);
         errdefer sub.release();
 
-        try self.subscribeInternal(sub);
+        try self.registerSubscription(sub);
+        // A registered subscription whose handler never starts would keep
+        // accumulating messages that nobody can consume or unsubscribe.
+        errdefer self.unregisterSubscription(sub);
         try sub.startHandler();
 
         log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (async)", .{ sub.subject, queue, sub.sid });
@@ -1065,7 +1123,7 @@ pub const Connection = struct {
         const sub = try Subscription.create(self, sid, subject, queue, null);
         errdefer sub.release();
 
-        try self.subscribeInternal(sub);
+        try self.registerSubscription(sub);
 
         log.debug("Subscribed to {s} with queue group '{s}' and sid {d} (sync)", .{ sub.subject, queue, sub.sid });
         return sub;
@@ -1096,7 +1154,8 @@ pub const Connection = struct {
     }
 
     pub fn unsubscribe(self: *Self, sub: *Subscription) void {
-        // Remove from subscription table first
+        // Detach from the table first. If it was already detached there is
+        // nothing to send and no reference left to drop.
         {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
@@ -1133,15 +1192,22 @@ pub const Connection = struct {
     /// Remove subscription from connection's subscription table
     /// This does not send UNSUB to server - that should be done separately
     pub fn removeSubscriptionInternal(self: *Self, sid: u64) void {
-        self.subs_mutex.lockUncancelable(self.io);
-        defer self.subs_mutex.unlock(self.io);
+        // Detach under the lock, act outside it - the same shape as
+        // unregisterSubscription. Releasing the last reference destroys the
+        // subscription, which joins its handler task; that task can itself be
+        // waiting on subs_mutex, so the release must not run under it.
+        const sub = blk: {
+            self.subs_mutex.lockUncancelable(self.io);
+            defer self.subs_mutex.unlock(self.io);
 
-        if (self.subscriptions.fetchRemove(sid)) |kv| {
-            log.debug("Removed subscription {d} ({s}) from connection", .{ sid, kv.value.subject });
-            kv.value.closeFromConnection();
-            // Release connection's reference to the subscription
-            kv.value.release();
-        }
+            const entry = self.subscriptions.fetchRemove(sid) orelse return;
+            break :blk entry.value;
+        };
+
+        log.debug("Removed subscription {d} ({s}) from connection", .{ sid, sub.subject });
+        sub.closeFromConnection();
+        // Release connection's reference to the subscription
+        sub.release();
     }
 
     pub fn flush(self: *Self) !void {
@@ -2633,7 +2699,7 @@ pub const Connection = struct {
         // after unlocking. Subscription.drain() sends UNSUB through
         // unsubscribeInternal, which takes the connection mutex, so draining
         // while holding subs_mutex would acquire the two in the opposite
-        // order from subscribeInternal - an AB-BA deadlock against any
+        // order from registerSubscription - an AB-BA deadlock against any
         // concurrent subscribe().
         var draining = ArrayList(*Subscription).empty;
         defer {

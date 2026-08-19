@@ -52,6 +52,7 @@ try nc.publish("hello", "Hello, NATS!");
 // Create synchronous subscription
 var counter: u32 = 0;
 const sub = try nc.subscribeSync("hello");
+defer sub.deinit();
 
 // Wait for message with 5 second timeout
 while (true) {
@@ -105,7 +106,16 @@ fn messageHandler(msg: *nats.Message, counter: *u32) void {
 // Subscribe with callback handler
 var counter: u32 = 0;
 const sub = try nc.subscribe("hello", messageHandler, .{&counter});
+defer sub.deinit();
 ```
+
+Subscriptions are owned by whoever created them, not by the connection: every
+subscription must be released with `sub.deinit()` before its connection is
+destroyed. `deinit()` unsubscribes and, for asynchronous subscriptions, waits
+for the handler task to finish, so it is safe to free anything the handler
+captured once it returns. Destroying a connection that still has live
+subscriptions panics with the number outstanding rather than leaving them
+pointing at freed connection state.
 
 ### Send request and wait for reply
 
@@ -146,6 +156,7 @@ fn echoHandler(msg: *nats.Message, context: *MyContext) !void {
 // Subscribe to handle requests
 var context = MyContext{};
 const sub = try nc.subscribe("echo", echoHandler, .{&context});
+defer sub.deinit();
 ```
 
 ### JetStream Stream Management
