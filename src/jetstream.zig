@@ -1339,7 +1339,9 @@ pub const JetStream = struct {
 
         // Subscribe to the delivery subject
         const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
-        errdefer self.nc.unsubscribe(subscription);
+        // deinit, not unsubscribe: unsubscribe drops only the connection's
+        // reference, leaving ours held by nobody.
+        errdefer subscription.deinit();
 
         applyPendingLimits(subscription, &consumer_info.value.config);
 
@@ -1394,7 +1396,9 @@ pub const JetStream = struct {
 
         // Create synchronous subscription (no callback handler)
         const subscription = try self.nc.subscribeSync(deliver_subject);
-        errdefer self.nc.unsubscribe(subscription);
+        // deinit, not unsubscribe: unsubscribe drops only the connection's
+        // reference, leaving ours held by nobody.
+        errdefer subscription.deinit();
 
         applyPendingLimits(subscription, &consumer_info.value.config);
 
@@ -1451,7 +1455,9 @@ pub const JetStream = struct {
 
         // Subscribe to the delivery subject with queue group
         const subscription = try self.nc.queueSubscribe(deliver_subject, queue, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
-        errdefer self.nc.unsubscribe(subscription);
+        // deinit, not unsubscribe: unsubscribe drops only the connection's
+        // reference, leaving ours held by nobody.
+        errdefer subscription.deinit();
 
         applyPendingLimits(subscription, &consumer_info.value.config);
 
@@ -1506,7 +1512,9 @@ pub const JetStream = struct {
 
         // Create synchronous subscription with queue group
         const subscription = try self.nc.queueSubscribeSync(deliver_subject, queue);
-        errdefer self.nc.unsubscribe(subscription);
+        // deinit, not unsubscribe: unsubscribe drops only the connection's
+        // reference, leaving ours held by nobody.
+        errdefer subscription.deinit();
 
         applyPendingLimits(subscription, &consumer_info.value.config);
 
@@ -1556,7 +1564,8 @@ pub const JetStream = struct {
 
         // Create the persistent wildcard inbox subscription
         const inbox_subscription = try self.nc.subscribeSync(wildcard_subject);
-        errdefer self.nc.unsubscribe(inbox_subscription);
+        // deinit, not unsubscribe: see the push subscribe paths above.
+        errdefer inbox_subscription.deinit();
 
         applyPendingLimits(inbox_subscription, &consumer_info.value.config);
 
