@@ -306,7 +306,6 @@ const TlsRuntime = struct {
 
     fn create(allocator: Allocator, opts: TlsOptions, host: []const u8) !*TlsRuntime {
         const self = try allocator.create(TlsRuntime);
-        errdefer allocator.destroy(self);
         self.* = .{
             .opts = opts,
             .host = host,
@@ -315,6 +314,8 @@ const TlsRuntime = struct {
             .staging_buffer = &.{},
             .out_buffer = &.{},
         };
+        // Covers the struct and every buffer; freeing the still-empty
+        // slices is a no-op, so one cleanup path serves all failures.
         errdefer self.destroy(allocator);
         self.read_buffer = try allocator.alloc(u8, read_buffer_size);
         self.cleartext_buffer = try allocator.alloc(u8, cleartext_buffer_size);
