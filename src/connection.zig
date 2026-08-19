@@ -1853,23 +1853,18 @@ pub const Connection = struct {
             .now = Io.Clock.real.now(self.io),
         });
 
-        // Ciphertext writer for the handshake flights; used only here. The
-        // flusher creates its own writer once the transport is ready.
-        var stream_writer = stream.writer(self.io, &.{});
         const reader = &stream_reader.interface;
 
         while (true) {
             // hs.run is pure computation: TLS protocol and certificate
             // errors come out of it directly, cancellation never does. The
-            // socket is only touched below, where the real error -
-            // including cancellation - is taken from the stream
-            // reader/writer.
+            // socket writes go through the Io vtable and reads through the
+            // stream reader, both reporting their real errors - including
+            // cancellation.
             const res = try hs.run(reader.buffered(), rt.cleartext_buffer);
             reader.toss(res.recv_pos);
             if (res.send.len > 0) {
-                stream_writer.interface.writeAll(res.send) catch {
-                    return stream_writer.err.?;
-                };
+                try net_util.writeAll(self.io, stream.*, res.send);
             }
             if (hs.done()) break;
 
@@ -1917,11 +1912,8 @@ pub const Connection = struct {
         // Cancellation propagates from the wait on teardown.
         try ready.wait(self.io);
 
-        // Unbuffered: every write goes straight to the socket.
-        var stream_writer = stream.writer(self.io, &.{});
-
         while (true) {
-            try self.flusherIteration(&stream_writer, tls_rt);
+            try self.flusherIteration(stream, tls_rt);
 
             if (self.drain_state.load(.acquire) == .draining_pubs) {
                 try self.sendDrainPing();
@@ -1929,7 +1921,7 @@ pub const Connection = struct {
         }
     }
 
-    fn flusherIteration(self: *Self, stream_writer: *net.Stream.Writer, tls_rt: ?*TlsRuntime) !void {
+    fn flusherIteration(self: *Self, stream: *net.Stream, tls_rt: ?*TlsRuntime) !void {
         // Park until there is data to write. No periodic ticking is needed:
         // pushes signal the queue, close/reset broadcast it, and the flusher
         // task is canceled on connection teardown. The drain ping is sent
@@ -1947,19 +1939,17 @@ pub const Connection = struct {
         }
 
         if (tls_rt) |rt| {
-            return flushTls(stream_writer, rt, gather);
+            return flushTls(self.io, stream.*, rt, gather);
         }
 
-        // The `Io.Writer` interface erases the real error; it is stashed on
-        // the stream writer (including cancellation). Partial writes are
-        // fine, whatever was written is consumed from the buffer.
-        const bytes_written = stream_writer.interface.writeVec(gather.slices) catch {
-            return stream_writer.err.?;
-        };
+        // Writes go through the Io vtable, which reports the real error
+        // directly (including cancellation). Partial writes are fine,
+        // whatever was written is consumed from the buffer.
+        const bytes_written = try net_util.writeVec(self.io, stream.*, gather.slices);
         try gather.consume(bytes_written);
     }
 
-    fn flushTls(stream_writer: *net.Stream.Writer, rt: *TlsRuntime, gather: anytype) !void {
+    fn flushTls(io: Io, stream: net.Stream, rt: *TlsRuntime, gather: anytype) !void {
         // Encrypt straight out of the gathered queue slices; the queue
         // stores bytes in large contiguous chunks, so records fill up
         // without a staging copy (a short record can only occur at a
@@ -1978,9 +1968,7 @@ pub const Connection = struct {
             while (pos < slice.len) {
                 const res = try rt.enc.encrypt(slice[pos..], rt.out_buffer);
                 std.debug.assert(res.cleartext_pos > 0); // out_buffer always fits one record
-                stream_writer.interface.writeAll(res.ciphertext) catch {
-                    return stream_writer.err.?;
-                };
+                try net_util.writeAll(io, stream, res.ciphertext);
                 pos += res.cleartext_pos;
             }
             consumed += slice.len;
