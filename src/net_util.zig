@@ -71,6 +71,23 @@ pub fn tcpConnectToHost(io: Io, host: []const u8, port: u16) ConnectError!net.St
     return connect_err orelse error.UnknownHostName;
 }
 
+/// Vectored write straight through the `Io` vtable. `net.Stream` only
+/// writes through the `Io.Writer` interface, which erases the real error
+/// behind `error.WriteFailed` and stashes it on the writer; the vtable
+/// call keeps the typed error set - including cancellation - intact.
+/// Returns the number of bytes written; short writes are possible.
+pub fn writeVec(io: Io, stream: net.Stream, data: []const []const u8) net.Stream.Writer.Error!usize {
+    return io.vtable.netWrite(io.userdata, stream.socket.handle, &.{}, data, 1);
+}
+
+/// Write all of `bytes` to the stream, looping over short writes.
+pub fn writeAll(io: Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer.Error!void {
+    var pos: usize = 0;
+    while (pos < bytes.len) {
+        pos += try writeVec(io, stream, &.{bytes[pos..]});
+    }
+}
+
 /// Enable or disable SO_KEEPALIVE. There is no socket-options API in std.Io,
 /// so this goes through the raw socket handle.
 pub fn setKeepAlive(socket: net.Socket, enabled: bool) SetKeepAliveError!void {
