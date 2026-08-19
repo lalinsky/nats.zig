@@ -181,30 +181,41 @@ pub const ConsumerConfig = struct {
     durable_name: ?[]const u8 = null,
     /// A short description of the purpose of this consumer
     description: ?[]const u8 = null,
-    /// The point in the stream to receive messages from, either 'all', 'last', 'new', 'by_start_sequence', 'by_start_time', 'last_per_subject'
-    deliver_policy: enum { all, last, new, by_start_sequence, by_start_time, last_per_subject } = .all,
+    /// The point in the stream to receive messages from, either 'all', 'last', 'new', 'by_start_sequence', 'by_start_time', 'last_per_subject'.
+    /// Not sent when null, which the server reads as 'all'.
+    deliver_policy: ?enum { all, last, new, by_start_sequence, by_start_time, last_per_subject } = null,
     /// Used with deliver_policy 'by_start_sequence' to define the sequence to start at
     opt_start_seq: ?u64 = null,
     /// Used with deliver_policy 'by_start_time' to define the time to start at
     opt_start_time: ?[]const u8 = null,
     /// The subject to deliver messages to, omit for pull consumers
     deliver_subject: ?[]const u8 = null,
-    /// How messages are acknowledged, either 'none', 'all', or 'explicit'
-    ack_policy: enum { none, all, explicit } = .explicit,
-    /// How long (in nanoseconds) to allow messages to remain un-acknowledged before attempting redelivery
-    ack_wait: u64 = 30_000_000_000, // 30 seconds
-    /// The number of times a message will be redelivered to consumers if not acknowledged in time
-    max_deliver: i64 = -1,
+    /// How messages are acknowledged, either 'none', 'all', or 'explicit'.
+    /// Not sent when null, which the server reads as 'none' - but the subscribe
+    /// entry points ask for 'explicit' when the caller did not choose, since a
+    /// subscription that silently never acknowledges is not a useful default.
+    ack_policy: ?enum { none, all, explicit } = null,
+    /// How long (in nanoseconds) to allow messages to remain un-acknowledged before attempting redelivery.
+    /// Not sent when null; the server uses 30 seconds for the 'explicit' and
+    /// 'all' ack policies.
+    ack_wait: ?u64 = null,
+    /// The number of times a message will be redelivered to consumers if not acknowledged in time.
+    /// Not sent when null; the server uses -1, no limit.
+    max_deliver: ?i64 = null,
     /// Filter the stream by a single subject
     filter_subject: ?[]const u8 = null,
     /// Filter the stream by multiple subjects
     filter_subjects: ?[]const []const u8 = null,
-    /// How messages are sent, either 'instant' or 'original'
-    replay_policy: enum { instant, original } = .instant,
+    /// How messages are sent, either 'instant' or 'original'.
+    /// Not sent when null, which the server reads as 'instant'.
+    replay_policy: ?enum { instant, original } = null,
     /// The rate at which messages will be delivered to clients, expressed in bit per second
     rate_limit_bps: ?u64 = null,
-    /// The maximum number of messages without acknowledgement that can be outstanding
-    max_ack_pending: i64 = 1000,
+    /// The maximum number of messages without acknowledgement that can be outstanding.
+    /// Not sent when null, which lets the stream's consumer limits apply, and
+    /// where they set nothing the server uses 1000 for consumers that
+    /// acknowledge and no limit for ack policy 'none'.
+    max_ack_pending: ?i64 = null,
     /// If the Consumer is idle for more than this many nano seconds a empty message with Status header 100 will be sent
     idle_heartbeat: ?u64 = null,
     /// For push consumers this will regularly send an empty mess with Status header 100 and a reply subject
@@ -709,6 +720,12 @@ pub const JetStream = struct {
             config.deliver_group = q;
         }
 
+        // A consumer created through subscribe acknowledges explicitly unless
+        // asked otherwise: the server's own default for an omitted ack policy
+        // is 'none', which silently gives up redelivery. nats.go applies the
+        // same default in the same place (js.go:1877).
+        if (config.ack_policy == null) config.ack_policy = .explicit;
+
         // Configure for pull vs push consumer
         if (is_pull) {
             config.deliver_subject = null;
@@ -743,14 +760,11 @@ pub const JetStream = struct {
     /// for, rather than silently attaching to it. Mirrors processConsInfo and
     /// checkConfig in nats.go, and _processConsInfo in nats.c.
     ///
-    /// Only fields the caller can be shown to have set are compared. Several
-    /// ConsumerConfig fields are plain values with a default rather than
-    /// optionals, so a value equal to that default cannot be told apart from
-    /// one that was never set, and is treated as unset - the same accommodation
-    /// nats.go makes for its own zero values.
+    /// Every ConsumerConfig field the caller left null is left alone: null
+    /// means "whatever this consumer already is", so only fields that were
+    /// actually asked for can produce a mismatch.
     fn checkExistingConsumer(existing: *const ConsumerInfo, requested: ConsumerConfig, is_pull: bool, subject: ?[]const u8, queue: ?[]const u8) !void {
         const config = &existing.config;
-        const defaults = ConsumerConfig{};
 
         // A consumer whose filter does not cover the requested subject would
         // deliver nothing, or the wrong thing. Unlike nats.go, subscribing
@@ -786,8 +800,8 @@ pub const JetStream = struct {
         if (requested.description) |v| {
             if (!optStrEql(v, config.description)) return configMismatchStr("description", v, config.description);
         }
-        if (requested.deliver_policy != defaults.deliver_policy and requested.deliver_policy != config.deliver_policy) {
-            return configMismatch("deliver_policy", requested.deliver_policy, config.deliver_policy);
+        if (requested.deliver_policy) |v| {
+            if (v != config.deliver_policy) return configMismatch("deliver_policy", v, config.deliver_policy);
         }
         if (requested.opt_start_seq) |v| {
             if (v != config.opt_start_seq) return configMismatch("opt_start_seq", v, config.opt_start_seq);
@@ -795,23 +809,23 @@ pub const JetStream = struct {
         if (requested.opt_start_time) |v| {
             if (!optStrEql(v, config.opt_start_time)) return configMismatchStr("opt_start_time", v, config.opt_start_time);
         }
-        if (requested.ack_policy != defaults.ack_policy and requested.ack_policy != config.ack_policy) {
-            return configMismatch("ack_policy", requested.ack_policy, config.ack_policy);
+        if (requested.ack_policy) |v| {
+            if (v != config.ack_policy) return configMismatch("ack_policy", v, config.ack_policy);
         }
-        if (requested.ack_wait != defaults.ack_wait and requested.ack_wait != config.ack_wait) {
-            return configMismatch("ack_wait", requested.ack_wait, config.ack_wait);
+        if (requested.ack_wait) |v| {
+            if (v != config.ack_wait) return configMismatch("ack_wait", v, config.ack_wait);
         }
-        if (requested.max_deliver != defaults.max_deliver and requested.max_deliver != config.max_deliver) {
-            return configMismatch("max_deliver", requested.max_deliver, config.max_deliver);
+        if (requested.max_deliver) |v| {
+            if (v != config.max_deliver) return configMismatch("max_deliver", v, config.max_deliver);
         }
-        if (requested.replay_policy != defaults.replay_policy and requested.replay_policy != config.replay_policy) {
-            return configMismatch("replay_policy", requested.replay_policy, config.replay_policy);
+        if (requested.replay_policy) |v| {
+            if (v != config.replay_policy) return configMismatch("replay_policy", v, config.replay_policy);
         }
         if (requested.rate_limit_bps) |v| {
             if (v != config.rate_limit_bps) return configMismatch("rate_limit_bps", v, config.rate_limit_bps);
         }
-        if (requested.max_ack_pending != defaults.max_ack_pending and requested.max_ack_pending != config.max_ack_pending) {
-            return configMismatch("max_ack_pending", requested.max_ack_pending, config.max_ack_pending);
+        if (requested.max_ack_pending) |v| {
+            if (v != config.max_ack_pending) return configMismatch("max_ack_pending", v, config.max_ack_pending);
         }
         if (requested.idle_heartbeat) |v| {
             if (v != config.idle_heartbeat) return configMismatch("idle_heartbeat", v, config.idle_heartbeat);
@@ -1481,9 +1495,10 @@ pub const JetStream = struct {
     /// byte limits, redeliveries, and control messages are independent of the
     /// number of unique unacknowledged messages.
     fn applyPendingLimits(subscription: *Subscription, consumer_config: *const ConsumerConfig) void {
-        if (consumer_config.max_ack_pending <= Subscription.default_pending_msgs_limit) return;
+        const configured = consumer_config.max_ack_pending orelse return;
+        if (configured <= Subscription.default_pending_msgs_limit) return;
 
-        const max_ack_pending: u64 = @intCast(consumer_config.max_ack_pending);
+        const max_ack_pending: u64 = @intCast(configured);
         const msgs_limit: u32 = std.math.cast(u32, max_ack_pending) orelse std.math.maxInt(u32);
         const bytes_limit = @max(max_ack_pending *| @as(u64, 1024 * 1024), Subscription.default_pending_bytes_limit);
         subscription.setPendingLimits(msgs_limit, bytes_limit);
