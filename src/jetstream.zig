@@ -721,9 +721,10 @@ pub const JetStream = struct {
         return config;
     }
 
-    /// Look up a named consumer, returning null when it does not exist yet.
-    fn lookupConsumer(self: JetStream, stream_name: []const u8, durable: ?[]const u8) !?Result(ConsumerInfo) {
-        const consumer_name = durable orelse return null;
+    /// Look up a named consumer, returning null when it is unnamed or does
+    /// not exist yet.
+    fn lookupConsumer(self: JetStream, stream_name: []const u8, name: ?[]const u8) !?Result(ConsumerInfo) {
+        const consumer_name = name orelse return null;
 
         if (self.getConsumerInfo(stream_name, consumer_name)) |existing_info| {
             log.debug("Found existing consumer: {s}", .{consumer_name});
@@ -744,31 +745,64 @@ pub const JetStream = struct {
         return info.*;
     }
 
-    /// Everything a push subscribe needs to know before it can subscribe: the
-    /// consumer to use if it already exists, the config to create it with if it
-    /// does not, and the subject the server will deliver to either way.
-    const PushConsumerSetup = struct {
-        existing: ?Result(ConsumerInfo),
-        config: ConsumerConfig,
-        deliver_subject: []const u8,
+    /// A delivery subscription together with the consumer it delivers from.
+    const PushConsumerSubscription = struct {
+        subscription: *Subscription,
+        consumer_info: Result(ConsumerInfo),
     };
 
-    /// Look up an existing consumer before subscribing: when one is already
-    /// there, the server pushes to its deliver subject, not to ours.
-    fn preparePushConsumer(self: JetStream, stream_name: []const u8, subject: ?[]const u8, durable: ?[]const u8, base_config: ConsumerConfig, queue: ?[]const u8) !PushConsumerSetup {
-        const existing = try self.lookupConsumer(stream_name, durable);
-        errdefer if (existing) |info| info.deinit();
-
+    /// Subscribe to a push consumer's deliver subject and then make sure the
+    /// consumer exists, in that order: the SUB frame is queued ahead of the
+    /// create request, so the server has interest in the deliver subject
+    /// before it can push anything to it.
+    ///
+    /// `subscriber` performs the subscribe itself, which differs per entry
+    /// point (callback or sync, with or without a queue group). It may be
+    /// called twice, so it must not consume anything it is given.
+    fn subscribeToPushConsumer(self: JetStream, stream_name: []const u8, subject: ?[]const u8, durable: ?[]const u8, base_config: ConsumerConfig, queue: ?[]const u8, subscriber: anytype) !PushConsumerSubscription {
         const config = buildConsumerConfig(base_config, subject, durable, false, queue);
 
-        return .{
-            .existing = existing,
-            .config = config,
-            .deliver_subject = if (existing) |info|
+        // The name addConsumer would target, which the caller can also have
+        // supplied through the config rather than through `durable`. Both
+        // official clients look the consumer up under either name.
+        const consumer_name = config.name orelse config.durable_name;
+
+        // When the consumer is already there, the server delivers to its
+        // deliver subject rather than to the one we would have asked for.
+        var existing = try self.lookupConsumer(stream_name, consumer_name);
+        errdefer if (existing) |info| info.deinit();
+
+        // Two passes at most: the second one always has a consumer to attach
+        // to, so it returns before reaching addConsumer again.
+        while (true) {
+            const deliver_subject = if (existing) |info|
                 info.value.config.deliver_subject.?
             else
-                config.deliver_subject.?,
-        };
+                config.deliver_subject.?;
+
+            const subscription = try subscriber.subscribe(deliver_subject);
+            errdefer subscription.deinit();
+
+            if (takeConsumerInfo(&existing)) |info| {
+                return .{ .subscription = subscription, .consumer_info = info };
+            }
+
+            if (self.addConsumer(stream_name, config)) |info| {
+                return .{ .subscription = subscription, .consumer_info = info };
+            } else |err| switch (err) {
+                // Another client created the consumer between our lookup and
+                // this create, so it owns the deliver subject now. Attach to
+                // the consumer that won and subscribe where it actually
+                // delivers. Look it up before dropping the subscription, so a
+                // failing lookup leaves exactly one cleanup to run.
+                error.ConsumerAlreadyExists, error.ConsumerNameExist, error.ConsumerExistingActive => {
+                    const winner = try self.lookupConsumer(stream_name, consumer_name) orelse return err;
+                    subscription.deinit();
+                    existing = winner;
+                },
+                else => return err,
+            }
+        }
     }
 
     /// Get existing consumer or create new one based on configuration
@@ -1372,30 +1406,31 @@ pub const JetStream = struct {
             config.deliver_subject = ds;
         }
 
-        var setup = try self.preparePushConsumer(stream_name, subject, options.durable, config, null);
-        errdefer if (setup.existing) |info| info.deinit();
-
         // Use the reusable JetStream handler wrapper
         const JSHandler = JetStreamHandler(handlerFn);
 
-        // Subscribe to the delivery subject
-        const subscription = try self.nc.subscribe(setup.deliver_subject, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
-        errdefer subscription.deinit();
+        const subscriber = struct {
+            nc: *Connection,
+            handler_args: @TypeOf(handler_args),
+            manual_ack: bool,
 
-        // Create the consumer only once the delivery subscription exists: the
-        // SUB frame is queued ahead of the create request, so the server has
-        // interest in the deliver subject before it pushes anything to it.
-        var consumer_info = takeConsumerInfo(&setup.existing) orelse try self.addConsumer(stream_name, setup.config);
-        errdefer consumer_info.deinit();
+            fn subscribe(sub_ctx: @This(), deliver_subject: []const u8) !*Subscription {
+                return sub_ctx.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ sub_ctx.nc, sub_ctx.handler_args, sub_ctx.manual_ack });
+            }
+        }{ .nc = self.nc, .handler_args = handler_args, .manual_ack = options.manual_ack };
 
-        applyPendingLimits(subscription, &consumer_info.value.config);
+        var push = try self.subscribeToPushConsumer(stream_name, subject, options.durable, config, null, subscriber);
+        errdefer push.subscription.deinit();
+        errdefer push.consumer_info.deinit();
+
+        applyPendingLimits(push.subscription, &push.consumer_info.value.config);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
-            .subscription = subscription,
+            .subscription = push.subscription,
             .js = self,
-            .consumer_info = consumer_info,
+            .consumer_info = push.consumer_info,
             .deliver_subject_owned = generated_deliver_subject,
         };
 
@@ -1433,27 +1468,27 @@ pub const JetStream = struct {
             config.deliver_subject = ds;
         }
 
-        var setup = try self.preparePushConsumer(stream_name, subject, options.durable, config, null);
-        errdefer if (setup.existing) |info| info.deinit();
+        // Subscribe synchronously, without a callback handler
+        const subscriber = struct {
+            nc: *Connection,
 
-        // Create synchronous subscription (no callback handler)
-        const subscription = try self.nc.subscribeSync(setup.deliver_subject);
-        errdefer subscription.deinit();
+            fn subscribe(sub_ctx: @This(), deliver_subject: []const u8) !*Subscription {
+                return sub_ctx.nc.subscribeSync(deliver_subject);
+            }
+        }{ .nc = self.nc };
 
-        // Create the consumer only once the delivery subscription exists: the
-        // SUB frame is queued ahead of the create request, so the server has
-        // interest in the deliver subject before it pushes anything to it.
-        var consumer_info = takeConsumerInfo(&setup.existing) orelse try self.addConsumer(stream_name, setup.config);
-        errdefer consumer_info.deinit();
+        var push = try self.subscribeToPushConsumer(stream_name, subject, options.durable, config, null, subscriber);
+        errdefer push.subscription.deinit();
+        errdefer push.consumer_info.deinit();
 
-        applyPendingLimits(subscription, &consumer_info.value.config);
+        applyPendingLimits(push.subscription, &push.consumer_info.value.config);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
-            .subscription = subscription,
+            .subscription = push.subscription,
             .js = self,
-            .consumer_info = consumer_info,
+            .consumer_info = push.consumer_info,
             .deliver_subject_owned = generated_deliver_subject,
         };
         return js_sub;
@@ -1490,30 +1525,32 @@ pub const JetStream = struct {
             config.deliver_subject = ds;
         }
 
-        var setup = try self.preparePushConsumer(stream_name, subject, options.durable, config, queue);
-        errdefer if (setup.existing) |info| info.deinit();
-
         // Use the reusable JetStream handler wrapper
         const JSHandler = JetStreamHandler(handlerFn);
 
-        // Subscribe to the delivery subject with queue group
-        const subscription = try self.nc.queueSubscribe(setup.deliver_subject, queue, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
-        errdefer subscription.deinit();
+        const subscriber = struct {
+            nc: *Connection,
+            queue: []const u8,
+            handler_args: @TypeOf(handler_args),
+            manual_ack: bool,
 
-        // Create the consumer only once the delivery subscription exists: the
-        // SUB frame is queued ahead of the create request, so the server has
-        // interest in the deliver subject before it pushes anything to it.
-        var consumer_info = takeConsumerInfo(&setup.existing) orelse try self.addConsumer(stream_name, setup.config);
-        errdefer consumer_info.deinit();
+            fn subscribe(sub_ctx: @This(), deliver_subject: []const u8) !*Subscription {
+                return sub_ctx.nc.queueSubscribe(deliver_subject, sub_ctx.queue, JSHandler.wrappedHandler, .{ sub_ctx.nc, sub_ctx.handler_args, sub_ctx.manual_ack });
+            }
+        }{ .nc = self.nc, .queue = queue, .handler_args = handler_args, .manual_ack = options.manual_ack };
 
-        applyPendingLimits(subscription, &consumer_info.value.config);
+        var push = try self.subscribeToPushConsumer(stream_name, subject, options.durable, config, queue, subscriber);
+        errdefer push.subscription.deinit();
+        errdefer push.consumer_info.deinit();
+
+        applyPendingLimits(push.subscription, &push.consumer_info.value.config);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
-            .subscription = subscription,
+            .subscription = push.subscription,
             .js = self,
-            .consumer_info = consumer_info,
+            .consumer_info = push.consumer_info,
             .deliver_subject_owned = generated_deliver_subject,
         };
 
@@ -1551,27 +1588,28 @@ pub const JetStream = struct {
             config.deliver_subject = ds;
         }
 
-        var setup = try self.preparePushConsumer(stream_name, subject, options.durable, config, queue);
-        errdefer if (setup.existing) |info| info.deinit();
+        // Subscribe synchronously with a queue group, without a callback handler
+        const subscriber = struct {
+            nc: *Connection,
+            queue: []const u8,
 
-        // Create synchronous subscription with queue group
-        const subscription = try self.nc.queueSubscribeSync(setup.deliver_subject, queue);
-        errdefer subscription.deinit();
+            fn subscribe(sub_ctx: @This(), deliver_subject: []const u8) !*Subscription {
+                return sub_ctx.nc.queueSubscribeSync(deliver_subject, sub_ctx.queue);
+            }
+        }{ .nc = self.nc, .queue = queue };
 
-        // Create the consumer only once the delivery subscription exists: the
-        // SUB frame is queued ahead of the create request, so the server has
-        // interest in the deliver subject before it pushes anything to it.
-        var consumer_info = takeConsumerInfo(&setup.existing) orelse try self.addConsumer(stream_name, setup.config);
-        errdefer consumer_info.deinit();
+        var push = try self.subscribeToPushConsumer(stream_name, subject, options.durable, config, queue, subscriber);
+        errdefer push.subscription.deinit();
+        errdefer push.consumer_info.deinit();
 
-        applyPendingLimits(subscription, &consumer_info.value.config);
+        applyPendingLimits(push.subscription, &push.consumer_info.value.config);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
-            .subscription = subscription,
+            .subscription = push.subscription,
             .js = self,
-            .consumer_info = consumer_info,
+            .consumer_info = push.consumer_info,
             .deliver_subject_owned = generated_deliver_subject,
         };
 
