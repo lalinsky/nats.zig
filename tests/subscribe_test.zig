@@ -161,3 +161,36 @@ test "queueSubscribe smoke test" {
     try std.testing.expectEqualStrings("test", msg.subject);
     try std.testing.expectEqualStrings("Hello world!", msg.data);
 }
+
+// A subscription is created before it is registered with the connection, so
+// every registration failure has to unwind it completely. Registration used to
+// leave it at one of its two references, leaking the subscription, its subject
+// copy and - for the async variants - its handler context. Closing the
+// connection first makes registerSubscription fail deterministically; the
+// testing allocator reports any reference that was not unwound.
+test "subscribing on a closed connection unwinds completely" {
+    var conn = try utils.createDefaultConnection(std.testing.io);
+    defer utils.closeConnection(conn);
+
+    conn.close();
+
+    try std.testing.expectError(error.ConnectionClosed, conn.subscribeSync("test.unwind"));
+    try std.testing.expectError(error.ConnectionClosed, conn.queueSubscribeSync("test.unwind", "workers"));
+}
+
+// Same unwind, but through the async entry points: these also allocate a
+// handler context. Subscription.create takes ownership of it, so the entry
+// point must not clean it up as well - once the refcount unwind actually
+// destroys the subscription, doing both would free the context twice.
+test "subscribing with a handler on a closed connection unwinds completely" {
+    var conn = try utils.createDefaultConnection(std.testing.io);
+    defer utils.closeConnection(conn);
+
+    var collector: MessageCollector = .{};
+    defer collector.deinit();
+
+    conn.close();
+
+    try std.testing.expectError(error.ConnectionClosed, conn.subscribe("test.unwind", MessageCollector.processMsg, .{&collector}));
+    try std.testing.expectError(error.ConnectionClosed, conn.queueSubscribe("test.unwind", "workers", MessageCollector.processMsg, .{&collector}));
+}

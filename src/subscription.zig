@@ -88,7 +88,13 @@ pub const Subscription = struct {
     pub const default_pending_msgs_limit: u32 = 500_000;
     pub const default_pending_bytes_limit: u64 = 64 * 1024 * 1024;
 
+    /// Create a subscription. Takes ownership of `handler` on both success and
+    /// failure: on success `destroy` cleans it up, on failure this function
+    /// does. Callers must not register their own cleanup for it, or it would
+    /// be freed twice.
     pub fn create(nc: *Connection, sid: u64, subject: []const u8, queue_group: ?[]const u8, handler: ?MsgHandler) !*Subscription {
+        errdefer if (handler) |h| h.cleanup(nc.allocator);
+
         const sub = try nc.allocator.create(Subscription);
         errdefer nc.allocator.destroy(sub);
 
@@ -107,11 +113,12 @@ pub const Subscription = struct {
             .handler = handler,
         };
 
-        // Subscription starts with 1 reference (from RefCounter.init())
-        // Add an additional reference for the user - total will be 2 refs:
-        // 1. Connection reference (for hashmap storage)
-        // 2. User reference (for returned pointer)
-        sub.retain();
+        // Starts with the single reference from RefCounter.init(), owned by
+        // the caller. The connection takes its own reference only once
+        // registerSubscription has fully succeeded, so every failure between
+        // here and there unwinds through the caller's `errdefer sub.release()`
+        // and destroys the subscription.
+        _ = nc.live_subscriptions.fetchAdd(1, .monotonic);
 
         return sub;
     }
@@ -216,7 +223,9 @@ pub const Subscription = struct {
         }
         self.messages.deinit();
 
-        self.nc.allocator.destroy(self);
+        const nc = self.nc;
+        nc.allocator.destroy(self);
+        _ = nc.live_subscriptions.fetchSub(1, .release);
     }
 
     /// Wake subscription receivers and drain waiters when their owning
