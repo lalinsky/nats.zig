@@ -342,3 +342,47 @@ test "JetStream subscribe rejects an existing consumer that does not match" {
         .config = .{ .ack_wait = 60 * std.time.ns_per_s },
     }));
 }
+
+test "JetStream consumer config leaves unset fields to the server" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    var stream_info = try js.addStream(.{
+        .name = "TEST_DEFAULTS_STREAM",
+        .subjects = &.{"test.defaults.*"},
+        .max_msgs = 100,
+    });
+    defer stream_info.deinit();
+
+    // Subscribing without a config asks for explicit acks, because the server
+    // reads an omitted ack policy as 'none'. Everything else is the server's
+    // own default, sent back on the consumer info.
+    var sub = try js.subscribeSync("test.defaults.one", .{
+        .stream = "TEST_DEFAULTS_STREAM",
+        .durable = "defaults_consumer",
+    });
+    defer sub.deinit();
+
+    const config = sub.consumer_info.value.config;
+    try testing.expectEqual(.explicit, config.ack_policy);
+    try testing.expectEqual(.all, config.deliver_policy);
+    try testing.expectEqual(.instant, config.replay_policy);
+    try testing.expectEqual(@as(u64, 30 * std.time.ns_per_s), config.ack_wait.?);
+    try testing.expectEqual(@as(i64, 1000), config.max_ack_pending.?);
+    try testing.expectEqual(@as(i64, -1), config.max_deliver.?);
+
+    // addConsumer passes the config through as given, so an omitted ack policy
+    // reaches the server as one and comes back as 'none'.
+    var raw = try js.addConsumer("TEST_DEFAULTS_STREAM", .{
+        .name = "defaults_raw",
+        .durable_name = "defaults_raw",
+        .deliver_subject = "deliver.defaults",
+    });
+    defer raw.deinit();
+
+    try testing.expectEqual(.none, raw.value.config.ack_policy);
+}
