@@ -560,16 +560,40 @@ pub const Connection = struct {
         // async subscription's handler task can still be running its own
         // teardown through unregisterSubscription, and iterating the table
         // unsynchronized races that on the hashmap's internals.
+        //
+        // The release itself happens after unlocking, as in
+        // removeSubscriptionInternal: releasing the last reference destroys
+        // the subscription, which joins its handler task, and that task can
+        // be waiting on subs_mutex.
+        var detached = ArrayList(*Subscription).empty;
+        defer detached.deinit(self.allocator);
         {
             self.subs_mutex.lockUncancelable(self.io);
             defer self.subs_mutex.unlock(self.io);
 
+            detached.ensureTotalCapacity(self.allocator, self.subscriptions.count()) catch {};
+
             var iter = self.subscriptions.valueIterator();
             while (iter.next()) |sub_ptr| {
-                sub_ptr.*.release(); // Release connection's ownership reference
+                // Falling back to releasing under the lock is still better
+                // than leaking the reference outright; an allocation failure
+                // here means the process is already out of memory.
+                detached.append(self.allocator, sub_ptr.*) catch sub_ptr.*.release();
             }
             self.subscriptions.clearRetainingCapacity();
         }
+
+        for (detached.items) |sub| {
+            sub.release(); // Release connection's ownership reference
+        }
+
+        // Only now free the table's storage. A handler task that was blocked
+        // on subs_mutex during the loop above acquires it as soon as this
+        // function unlocks and calls remove() on the table - harmless while
+        // the table is merely empty, a use-after-free once its memory is
+        // gone. Releasing first is what closes that window: the release that
+        // destroys a subscription joins its handler task, so by this point
+        // those tasks are done with the table.
         self.subscriptions.deinit();
 
         // Subscriptions are owned by their creator, not by the connection, so
