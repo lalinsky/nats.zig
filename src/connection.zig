@@ -649,7 +649,10 @@ pub const Connection = struct {
         }
         if (added == 0) return error.InvalidUrl;
 
-        self.resolved_tls = resolveTlsOptions(self.options.tls, &self.server_pool);
+        // Only ever upgrade: addServer may have enabled TLS before connect.
+        if (self.resolved_tls == null) {
+            self.resolved_tls = resolveTlsOptions(self.options.tls, &self.server_pool);
+        }
         if (self.resolved_tls != null and !build_options.use_tls) {
             return error.TlsNotConfigured;
         }
@@ -693,10 +696,14 @@ pub const Connection = struct {
         _ = try self.server_pool.addServer(url, false);
 
         // A tls:// URL upgrades the whole pool; TLS is never downgraded.
+        // The scheme is taken from the URL itself, not the pool: the pool
+        // deduplicates by host:port, so a tls:// URL for an already-pooled
+        // plaintext server never shows up in it.
         if (self.resolved_tls == null) {
-            self.resolved_tls = resolveTlsOptions(self.options.tls, &self.server_pool);
-            if (self.resolved_tls != null and !build_options.use_tls) {
-                return error.TlsNotConfigured;
+            const trimmed = std.mem.trim(u8, url, " \t");
+            if (std.mem.startsWith(u8, trimmed, "tls://") or self.server_pool.anyExplicitTls()) {
+                if (!build_options.use_tls) return error.TlsNotConfigured;
+                self.resolved_tls = self.options.tls orelse TlsOptions{};
             }
         }
     }
@@ -3027,6 +3034,22 @@ test "resolveTlsOptions: tls is sticky across the whole pool" {
     // Explicit options always win.
     const custom: TlsOptions = .{ .insecure_skip_verify = true };
     try std.testing.expect(resolveTlsOptions(custom, &pool).?.insecure_skip_verify);
+}
+
+test "addServer with a tls:// duplicate of a pooled server upgrades the pool" {
+    if (!build_options.use_tls) return error.SkipZigTest;
+
+    const io = std.testing.io;
+    var connection = Connection.init(std.testing.allocator, io, .{});
+    defer connection.deinit();
+
+    try connection.addServer("nats://example:4222");
+    try std.testing.expect(connection.resolved_tls == null);
+
+    // Deduplicated by host:port in the pool, but the scheme must still
+    // enable TLS for the whole pool.
+    try connection.addServer("tls://example:4222");
+    try std.testing.expect(connection.resolved_tls != null);
 }
 
 test "connect with TLS options fails when TLS is compiled out" {
