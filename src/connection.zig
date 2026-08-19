@@ -474,7 +474,13 @@ pub const Connection = struct {
     // Connection manager task (owns reader/flusher tasks)
     manager_task: Io.Group = .init,
 
-    // Main connection mutex (protects most fields)
+    // Main connection mutex (protects most fields).
+    //
+    // Lock order: `mutex` is always acquired before `subs_mutex`, never after.
+    // Code holding `subs_mutex` must not call anything that takes `mutex` -
+    // notably `unsubscribeInternal` and `Subscription.drain`. Collect what is
+    // needed under `subs_mutex`, release it, then act (see `drain` and
+    // `resendSubscriptions`).
     mutex: xsync.Mutex = .init,
 
     // PING/PONG flush tracking (simplified counter approach)
@@ -492,6 +498,8 @@ pub const Connection = struct {
     // Subscriptions
     next_sid: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
     subscriptions: std.AutoHashMap(u64, *Subscription),
+    // Guards `subscriptions`. Acquired after `mutex` when both are held; see
+    // the lock-order note on `mutex`.
     subs_mutex: xsync.Mutex = .init,
 
     // Response management (shared subscription for request/reply)
@@ -2617,19 +2625,41 @@ pub const Connection = struct {
 
         // Add one count as a blocker, to avoid early switch to the draining_pubs phase
         _ = self.drain_subscription_count.fetchAdd(1, .release);
+        // Release the blocker on every path: bailing out with the count still
+        // raised would park waitForDrainCompletion forever.
+        defer self.notifySubscriptionDrainComplete();
 
-        // Start draining subscriptions
-        self.subs_mutex.lockUncancelable(self.io);
-        var iter = self.subscriptions.valueIterator();
-        while (iter.next()) |sub_ptr| {
-            const sub = sub_ptr.*;
-            _ = self.drain_subscription_count.fetchAdd(1, .release);
-            sub.drain(); // Drain the subscription
+        // Snapshot the subscriptions under subs_mutex and drain them only
+        // after unlocking. Subscription.drain() sends UNSUB through
+        // unsubscribeInternal, which takes the connection mutex, so draining
+        // while holding subs_mutex would acquire the two in the opposite
+        // order from subscribeInternal - an AB-BA deadlock against any
+        // concurrent subscribe().
+        var draining = ArrayList(*Subscription).empty;
+        defer {
+            for (draining.items) |sub| sub.release();
+            draining.deinit(self.allocator);
         }
-        self.subs_mutex.unlock(self.io);
 
-        // Release the blocker
-        self.notifySubscriptionDrainComplete();
+        {
+            self.subs_mutex.lockUncancelable(self.io);
+            defer self.subs_mutex.unlock(self.io);
+
+            try draining.ensureTotalCapacity(self.allocator, self.subscriptions.count());
+            var iter = self.subscriptions.valueIterator();
+            while (iter.next()) |sub_ptr| {
+                const sub = sub_ptr.*;
+                // Retained so a concurrent teardown cannot free it between
+                // the snapshot and the drain below.
+                sub.retain();
+                draining.appendAssumeCapacity(sub);
+                _ = self.drain_subscription_count.fetchAdd(1, .release);
+            }
+        }
+
+        for (draining.items) |sub| {
+            sub.drain();
+        }
     }
 
     pub fn isDraining(self: *Self) bool {
