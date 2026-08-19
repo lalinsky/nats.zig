@@ -214,3 +214,175 @@ test "JetStream pending limits remain bounded and track large ack windows" {
 
     try std.testing.expectEqual(nats.Subscription.default_pending_msgs_limit, default_sub.subscription.pending_msgs_limit.load(.acquire));
 }
+
+test "JetStream subscribe attaches to an existing consumer named in the config" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    var stream_info = try js.addStream(.{
+        .name = "TEST_ATTACH_STREAM",
+        .subjects = &.{"test.attach.*"},
+        .max_msgs = 100,
+    });
+    defer stream_info.deinit();
+
+    // A consumer already delivering to a subject of its own choosing.
+    var existing = try js.addConsumer("TEST_ATTACH_STREAM", .{
+        .name = "attach_consumer",
+        .durable_name = "attach_consumer",
+        .deliver_subject = "test.attach.deliver.existing",
+        .filter_subject = "test.attach.*",
+        .ack_policy = .explicit,
+    });
+    defer existing.deinit();
+
+    // Subscribing by that name must attach to it and receive on its deliver
+    // subject, not create a second consumer or wait on the requested one.
+    var sub = try js.subscribeSync(null, .{
+        .stream = "TEST_ATTACH_STREAM",
+        .config = .{
+            .name = "attach_consumer",
+            .deliver_subject = "test.attach.deliver.requested",
+        },
+    });
+    defer sub.deinit();
+
+    try testing.expectEqualStrings("attach_consumer", sub.consumer_info.value.name);
+    try testing.expectEqualStrings("test.attach.deliver.existing", sub.consumer_info.value.config.deliver_subject.?);
+
+    try conn.publish("test.attach.message", "attached");
+
+    const js_msg = try sub.nextMsg();
+    defer js_msg.deinit();
+
+    try testing.expectEqualStrings("attached", js_msg.msg.data);
+    try js_msg.ack();
+}
+
+test "JetStream subscribe rejects an existing consumer that does not match" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    var stream_info = try js.addStream(.{
+        .name = "TEST_MISMATCH_STREAM",
+        .subjects = &.{"test.mismatch.*"},
+        .max_msgs = 100,
+    });
+    defer stream_info.deinit();
+
+    var push_consumer = try js.addConsumer("TEST_MISMATCH_STREAM", .{
+        .name = "mismatch_push",
+        .durable_name = "mismatch_push",
+        .deliver_subject = "deliver.mismatch",
+        .filter_subject = "test.mismatch.one",
+        .ack_wait = 60 * std.time.ns_per_s,
+    });
+    defer push_consumer.deinit();
+
+    var pull_consumer = try js.addConsumer("TEST_MISMATCH_STREAM", .{
+        .name = "mismatch_pull",
+        .durable_name = "mismatch_pull",
+        .filter_subject = "test.mismatch.one",
+    });
+    defer pull_consumer.deinit();
+
+    // A filter that does not cover the requested subject delivers nothing.
+    try testing.expectError(error.ConsumerConfigMismatch, js.subscribeSync("test.mismatch.two", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_push",
+    }));
+
+    // Requesting an ack window the consumer does not have changes redelivery
+    // behaviour, silently, for every message.
+    try testing.expectError(error.ConsumerConfigMismatch, js.subscribeSync("test.mismatch.one", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_push",
+        .config = .{ .ack_wait = 10 * std.time.ns_per_s },
+    }));
+
+    // A consumer with no deliver group does not serve a queue subscription.
+    try testing.expectError(error.ConsumerConfigMismatch, js.queueSubscribeSync("test.mismatch.one", "workers", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_push",
+    }));
+
+    // Pull and push consumers are not interchangeable.
+    try testing.expectError(error.PushSubscribeToPullConsumer, js.subscribeSync("test.mismatch.one", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_pull",
+    }));
+
+    try testing.expectError(error.PullSubscribeToPushConsumer, js.pullSubscribe("test.mismatch.one", "mismatch_push", .{
+        .stream = "TEST_MISMATCH_STREAM",
+    }));
+
+    // The matching request still attaches.
+    var sub = try js.subscribeSync("test.mismatch.one", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_push",
+        .config = .{ .ack_wait = 60 * std.time.ns_per_s },
+    });
+    defer sub.deinit();
+
+    try testing.expectEqualStrings("deliver.mismatch", sub.consumer_info.value.config.deliver_subject.?);
+
+    // A second plain subscription would split the consumer's delivery with the
+    // first one, at random.
+    try testing.expectError(error.ConsumerAlreadyBound, js.subscribeSync("test.mismatch.one", .{
+        .stream = "TEST_MISMATCH_STREAM",
+        .durable = "mismatch_push",
+        .config = .{ .ack_wait = 60 * std.time.ns_per_s },
+    }));
+}
+
+test "JetStream consumer config leaves unset fields to the server" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    var stream_info = try js.addStream(.{
+        .name = "TEST_DEFAULTS_STREAM",
+        .subjects = &.{"test.defaults.*"},
+        .max_msgs = 100,
+    });
+    defer stream_info.deinit();
+
+    // Subscribing without a config asks for explicit acks, because the server
+    // reads an omitted ack policy as 'none'. Everything else is the server's
+    // own default, sent back on the consumer info.
+    var sub = try js.subscribeSync("test.defaults.one", .{
+        .stream = "TEST_DEFAULTS_STREAM",
+        .durable = "defaults_consumer",
+    });
+    defer sub.deinit();
+
+    const config = sub.consumer_info.value.config;
+    try testing.expectEqual(.explicit, config.ack_policy);
+    try testing.expectEqual(.all, config.deliver_policy);
+    try testing.expectEqual(.instant, config.replay_policy);
+    try testing.expectEqual(@as(u64, 30 * std.time.ns_per_s), config.ack_wait.?);
+    try testing.expectEqual(@as(i64, 1000), config.max_ack_pending.?);
+    try testing.expectEqual(@as(i64, -1), config.max_deliver.?);
+
+    // addConsumer passes the config through as given, so an omitted ack policy
+    // reaches the server as one and comes back as 'none'.
+    var raw = try js.addConsumer("TEST_DEFAULTS_STREAM", .{
+        .name = "defaults_raw",
+        .durable_name = "defaults_raw",
+        .deliver_subject = "deliver.defaults",
+    });
+    defer raw.deinit();
+
+    try testing.expectEqual(.none, raw.value.config.ack_policy);
+}
