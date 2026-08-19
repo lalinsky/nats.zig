@@ -22,6 +22,16 @@ const std = @import("std");
 ///
 /// This pattern is equivalent to std::shared_ptr in C++ and follows the same
 /// memory ordering guarantees as established in academic literature.
+///
+/// The count invariants are checked with `@panic` rather than
+/// `std.debug.assert`, so they hold in every optimization mode. Violating one
+/// is a memory-safety bug that produces no signal where it happens: an
+/// over-release wraps the count near the integer maximum, so the object is
+/// never destroyed and leaks instead, while a retain racing an in-flight
+/// destroy yields a use-after-free. Both are far cheaper to diagnose as an
+/// immediate crash than as corruption surfacing somewhere else later, and
+/// `ReleaseFast`/`ReleaseSmall` - the modes a client library ships in - are
+/// exactly where that instrumentation matters most.
 pub fn RefCounter(comptime T: type) type {
     return struct {
         refs: std.atomic.Value(T),
@@ -39,7 +49,7 @@ pub fn RefCounter(comptime T: type) type {
         /// from existing ones, which already provide necessary synchronization.
         pub fn incr(self: *Self) void {
             const prev_ref_count = self.refs.fetchAdd(1, .monotonic);
-            std.debug.assert(prev_ref_count > 0);
+            if (prev_ref_count == 0) @panic("reference count resurrected from zero");
         }
 
         /// Decreases the reference count and returns true if it reached zero.
@@ -47,7 +57,7 @@ pub fn RefCounter(comptime T: type) type {
         /// are visible before the count reaches zero.
         pub fn decr(self: *Self) bool {
             const prev_ref_count = self.refs.fetchSub(1, .release);
-            std.debug.assert(prev_ref_count > 0);
+            if (prev_ref_count == 0) @panic("reference count underflow (released too many times)");
             if (prev_ref_count == 1) {
                 // Use acquire load as substitute for fence (Zig 0.14 doesn't have @fence)
                 // This synchronizes with all release operations from other threads
