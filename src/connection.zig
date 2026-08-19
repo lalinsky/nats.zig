@@ -692,6 +692,14 @@ pub const Connection = struct {
             return error.ConnectionClosed;
         }
 
+        // Reject a tls:// URL up front when TLS is compiled out, before it
+        // can mutate the pool.
+        const trimmed = std.mem.trim(u8, url, " \t");
+        const wants_tls = std.mem.startsWith(u8, trimmed, "tls://");
+        if (wants_tls and !build_options.use_tls) {
+            return error.TlsNotConfigured;
+        }
+
         _ = try self.server_pool.addServer(url, false);
 
         // A tls:// URL upgrades the whole pool; TLS is never downgraded.
@@ -699,9 +707,7 @@ pub const Connection = struct {
         // deduplicates by host:port, so a tls:// URL for an already-pooled
         // plaintext server never shows up in it.
         if (self.resolved_tls == null) {
-            const trimmed = std.mem.trim(u8, url, " \t");
-            if (std.mem.startsWith(u8, trimmed, "tls://") or self.server_pool.anyExplicitTls()) {
-                if (!build_options.use_tls) return error.TlsNotConfigured;
+            if (wants_tls or self.server_pool.anyExplicitTls()) {
                 self.resolved_tls = self.options.tls orelse TlsOptions{};
             }
         }
@@ -3050,6 +3056,18 @@ test "addServer with a tls:// duplicate of a pooled server upgrades the pool" {
     // enable TLS for the whole pool.
     try connection.addServer("tls://example:4222");
     try std.testing.expect(connection.resolved_tls != null);
+}
+
+test "addServer with a tls:// URL fails without pool changes when TLS is compiled out" {
+    if (build_options.use_tls) return error.SkipZigTest;
+
+    const io = std.testing.io;
+    var connection = Connection.init(std.testing.allocator, io, .{});
+    defer connection.deinit();
+
+    try std.testing.expectError(error.TlsNotConfigured, connection.addServer("tls://example:4222"));
+    try std.testing.expectEqual(@as(usize, 0), connection.server_pool.getSize());
+    try std.testing.expect(connection.resolved_tls == null);
 }
 
 test "connect with TLS options fails when TLS is compiled out" {
