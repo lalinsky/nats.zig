@@ -56,6 +56,10 @@ const ServerBehavior = enum {
     stall_in_tls_handshake,
     /// Plaintext INFO, then respond to the ClientHello with garbage.
     garbage_instead_of_tls,
+    /// Plaintext INFO, then a handshake flight larger than the client's
+    /// read buffer: a ServerHello claiming a 100000-byte body, streamed
+    /// as well-formed TLS records that never complete the message.
+    oversized_handshake_flight,
 };
 
 const FakeServer = struct {
@@ -127,6 +131,29 @@ const FakeServer = struct {
                 _ = tcp_reader.interface.fillMore() catch return;
                 try tcp_writer.interface.writeAll("THIS IS NOT A TLS SERVER\r\n");
                 try tcp_writer.interface.flush();
+                return;
+            },
+            .oversized_handshake_flight => {
+                _ = tcp_reader.interface.fillMore() catch return; // ClientHello
+                // Handshake records of 16 KiB each; the first opens a
+                // ServerHello with a 100000-byte length (0x0186A0), so the
+                // flight never completes within the client's read buffer.
+                var record: [5 + 16384]u8 = @splat(0);
+                record[0] = 0x16; // handshake
+                record[1] = 0x03;
+                record[2] = 0x03; // TLS 1.2 record version
+                record[3] = 0x40; // length 16384
+                record[4] = 0x00;
+                record[5] = 0x02; // ServerHello
+                record[6] = 0x01;
+                record[7] = 0x86;
+                record[8] = 0xA0; // handshake length 100000
+                var sent: usize = 0;
+                while (sent < 128 * 1024) : (sent += 16384) {
+                    tcp_writer.interface.writeAll(&record) catch return;
+                    tcp_writer.interface.flush() catch return;
+                    @memset(record[5..], 0); // only the first record opens the message
+                }
                 return;
             },
             else => {},
@@ -444,6 +471,35 @@ const ReconnectTracker = struct {
 };
 
 var reconnect_tracker: ReconnectTracker = .{};
+
+test "tls: an oversized handshake flight fails cleanly" {
+    const io = testing.io;
+    const allocator = testing.allocator;
+
+    var server = try FakeServer.init(io, allocator, .oversized_handshake_flight);
+    defer server.deinit();
+
+    var server_err: ?anyerror = null;
+    var server_task = try io.concurrent(serverTask, .{ &server, &server_err });
+    defer server_task.cancel(io) catch {};
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "tls://127.0.0.1:{d}", .{server.port()});
+
+    var nc = Connection.init(allocator, io, .{
+        .tls = .{ .insecure_skip_verify = true },
+    });
+    defer nc.deinit();
+
+    // A handshake message spilling past its record is rejected by
+    // tls.zig before the flight can outgrow the read buffer; a flight
+    // of many unfragmented messages would hit the read-buffer guard in
+    // performTlsHandshake instead. Either way this must surface as an
+    // error from connect(), never a stall or a full-buffer assertion.
+    const result = nc.connect(url);
+    try testing.expect(result != error.Timeout);
+    try testing.expectError(error.TlsUnsupportedFragmentedHandshakeMessage, result);
+}
 
 test "tls: a client certificate without its key is rejected upfront" {
     const io = testing.io;
