@@ -5,6 +5,11 @@ const utils = @import("utils.zig");
 test {
     _ = @import("minimal_test.zig");
     _ = @import("auth_test.zig");
+    // The TLS tests connect to real TLS servers; with TLS compiled out
+    // they could only fail with TlsNotConfigured.
+    if (@import("build_options").use_tls) {
+        _ = @import("tls_test.zig");
+    }
     _ = @import("headers_test.zig");
     _ = @import("subscribe_test.zig");
     _ = @import("autounsubscribe_test.zig");

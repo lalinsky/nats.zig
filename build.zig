@@ -15,6 +15,8 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const use_tls = b.option(bool, "use_tls", "Build with TLS support via tls.zig") orelse true;
+
     // Parse build.zig.zon to extract version information
     const zon_content = @embedFile("build.zig.zon");
     const BuildZon = struct {
@@ -44,6 +46,7 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "version", parsed_zon.version);
     options.addOption([]const u8, "name", parsed_zon.name orelse "nats.zig");
     options.addOption([]const u8, "lang", "zig");
+    options.addOption(bool, "use_tls", use_tls);
 
     // This creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -59,8 +62,26 @@ pub fn build(b: *std.Build) void {
     });
     lib_mod.addImport("xsync", xsync.module("xsync"));
 
-    // Add build options to the module
-    lib_mod.addOptions("build_options", options);
+    // TLS support is a lazy dependency: only fetched when `use_tls` is set
+    // (the default). With TLS compiled out, the stub module keeps the code
+    // type-checking and TLS connections fail with error.TlsNotConfigured.
+    if (use_tls) {
+        if (b.lazyDependency("tls", .{
+            .target = target,
+            .optimize = optimize,
+        })) |tls_dep| {
+            lib_mod.addImport("tls", tls_dep.module("tls"));
+        }
+    } else {
+        lib_mod.addAnonymousImport("tls", .{
+            .root_source_file = b.path("src/tls_stub.zig"),
+        });
+    }
+
+    // Add build options to the module; the same module instance is shared
+    // with the integration tests below.
+    const options_mod = options.createModule();
+    lib_mod.addImport("build_options", options_mod);
 
     // Now, we will create a static library based on the module we created above.
     // This creates a `std.Build.Step.Compile`, which is the build step responsible
@@ -102,6 +123,7 @@ pub fn build(b: *std.Build) void {
     });
     integration_tests.root_module.addImport("nats", lib_mod);
     integration_tests.root_module.addImport("xsync", xsync.module("xsync"));
+    integration_tests.root_module.addImport("build_options", options_mod);
 
     const run_integration_tests = b.addRunArtifact(integration_tests);
     run_integration_tests.has_side_effects = true; // Allow repeated runs with Docker interactions
