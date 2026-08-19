@@ -16,6 +16,7 @@ const std = @import("std");
 // Re-export key types and functions
 pub const Connection = @import("connection.zig").Connection;
 pub const ConnectionOptions = @import("connection.zig").ConnectionOptions;
+pub const TlsOptions = @import("connection.zig").TlsOptions;
 pub const ConnectionStatus = @import("connection.zig").ConnectionStatus;
 pub const ConnectionError = @import("connection.zig").ConnectionError;
 pub const ProtocolError = @import("connection.zig").ProtocolError;
@@ -92,6 +93,11 @@ pub const creds = @import("creds.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = @import("net_util.zig");
+    // The TLS tests run a real tls.zig server, which the stub module does
+    // not provide; with TLS compiled out the whole file is skipped.
+    if (@import("build_options").use_tls) {
+        _ = @import("tls_test.zig");
+    }
     _ = @import("nkeys.zig");
     _ = @import("creds.zig");
     _ = @import("queue.zig");

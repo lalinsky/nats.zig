@@ -290,6 +290,60 @@ error twice in a row, the client stops reconnecting to it instead of
 exhausting the reconnect budget; reconnect-time authentication errors are
 also reported through the `error_cb` callback.
 
+### TLS
+
+TLS is enabled with the `tls://` URL scheme, or explicitly through the
+connection options:
+
+```zig
+// tls:// scheme, server certificate verified against the system trust store
+try nc.connect("tls://demo.nats.io:4443");
+
+// Custom CA bundle
+var nc2 = nats.Connection.init(init.gpa, init.io, .{
+    .tls = .{ .ca_file = "/path/to/ca.pem" },
+});
+
+// For servers that expect the TLS handshake before the initial INFO
+// (handshake-first mode, TLS-terminating proxies)
+var nc3 = nats.Connection.init(init.gpa, init.io, .{
+    .tls = .{ .ca_file = "/path/to/ca.pem", .handshake_first = true },
+});
+```
+
+Once enabled, TLS applies to every connection, including cluster members
+discovered at runtime. Certificate files are re-read on every (re)connect,
+so rotated certificates are picked up automatically. Setting
+`insecure_skip_verify` disables server certificate verification entirely;
+it is meant for testing only. Use `server_name` to set the name used for
+SNI and certificate verification when servers are dialed by IP address:
+
+```zig
+var nc4 = nats.Connection.init(init.gpa, init.io, .{
+    .tls = .{ .ca_file = "/path/to/ca.pem", .server_name = "nats.example.com" },
+});
+```
+
+For mutual TLS, provide a client certificate and key:
+
+```zig
+var nc5 = nats.Connection.init(init.gpa, init.io, .{
+    .tls = .{
+        .ca_file = "/path/to/ca.pem",
+        .cert_file = "/path/to/client-cert.pem",
+        .key_file = "/path/to/client-key.pem",
+    },
+});
+```
+
+With the server's `verify_and_map` mode, the client certificate is also
+the authentication: its identity is mapped to a configured user and no
+other credentials are needed.
+
+TLS support is provided by [tls.zig](https://github.com/ianic/tls.zig) and
+can be compiled out with `-Duse_tls=false`, in which case TLS connections
+fail with `error.TlsNotConfigured`.
+
 ## Selecting the I/O Backend
 
 The examples above use `init.io`, the threaded I/O implementation from the stdlib. This is suitable for development

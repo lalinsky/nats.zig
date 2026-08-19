@@ -151,3 +151,51 @@ services:
       interval: 1s
       timeout: 3s
       retries: 5
+
+  nats-tls:
+    image: nats:2.10-alpine
+    network_mode: host
+    command:
+      - "--config"
+      - "/etc/nats/tls.conf"
+      - "-D"
+    volumes:
+      - ./tests/configs/tls.conf:/etc/nats/tls.conf:ro
+      - ./tests/configs/certs:/etc/nats/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:18230/healthz"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+
+  nats-tls-first:
+    image: nats:2.10-alpine
+    network_mode: host
+    command:
+      - "--config"
+      - "/etc/nats/tls_first.conf"
+      - "-D"
+    volumes:
+      - ./tests/configs/tls_first.conf:/etc/nats/tls_first.conf:ro
+      - ./tests/configs/certs:/etc/nats/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:18231/healthz"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+
+  nats-tls-mtls:
+    image: nats:2.10-alpine
+    network_mode: host
+    command:
+      - "--config"
+      - "/etc/nats/tls_mtls.conf"
+      - "-D"
+    volumes:
+      - ./tests/configs/tls_mtls.conf:/etc/nats/tls_mtls.conf:ro
+      - ./tests/configs/certs:/etc/nats/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:18232/healthz"]
+      interval: 1s
+      timeout: 3s
+      retries: 5

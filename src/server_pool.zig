@@ -37,7 +37,7 @@ pub const Server = struct {
         var parsed_url = Url.parse(allocator, url_str) catch return ConnectionError.InvalidUrl;
         errdefer parsed_url.deinit();
 
-        if (!std.mem.eql(u8, parsed_url.scheme, "nats")) {
+        if (!std.mem.eql(u8, parsed_url.scheme, "nats") and !std.mem.eql(u8, parsed_url.scheme, "tls")) {
             return ConnectionError.InvalidUrl;
         }
 
@@ -55,6 +55,11 @@ pub const Server = struct {
         self.parsed_url.deinit();
         allocator.free(self.key);
         if (self.tls_name) |t| allocator.free(t);
+    }
+
+    /// Whether this server was configured with the tls:// scheme.
+    pub fn wantsTls(self: *const Server) bool {
+        return std.mem.eql(u8, self.parsed_url.scheme, "tls");
     }
 };
 
@@ -149,6 +154,16 @@ pub const ServerPool = struct {
 
     pub fn getSize(self: *ServerPool) usize {
         return self.servers.count();
+    }
+
+    /// Whether any explicitly configured server uses the tls:// scheme.
+    /// Implicit (discovered) servers are ignored: they arrive as bare
+    /// host:port and carry no scheme information.
+    pub fn anyExplicitTls(self: *ServerPool) bool {
+        for (self.servers.values()) |server| {
+            if (!server.is_implicit and server.wantsTls()) return true;
+        }
+        return false;
     }
 
     pub fn getFirstServer(self: *ServerPool) ?*Server {
