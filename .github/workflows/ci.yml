@@ -8,6 +8,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Without this the job inherits the 6 hour default, so anything that
+    # blocks burns a runner for the rest of the day instead of failing.
+    timeout-minutes: 20
 
     steps:
     - uses: actions/checkout@v4
@@ -17,16 +20,29 @@ jobs:
       with:
         version: 0.16.0
 
+    # apt is given an explicit lock timeout: the runner images periodically
+    # run unattended-upgrades, and apt waits for /var/lib/dpkg/lock-frontend
+    # forever by default. -y and the noninteractive frontend keep it from
+    # stopping on a confirmation prompt it can never receive.
     - name: Install libnats
-      run: sudo apt-get update && sudo apt-get install libnats-dev
+      timeout-minutes: 5
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo apt-get -o DPkg::Lock::Timeout=120 update
+        sudo apt-get -o DPkg::Lock::Timeout=120 install -y libnats-dev
 
     - name: Check code formatting
       run: zig fmt --check .
 
     - name: Run unit tests
+      timeout-minutes: 5
       run: zig build test-unit
 
+    # A deadlock in the client shows up here as a test that never returns, so
+    # this step needs a bound of its own rather than relying on the job one.
     - name: Run integration tests
+      timeout-minutes: 10
       run: zig build test-e2e
 
     - name: Build examples
