@@ -181,30 +181,41 @@ pub const ConsumerConfig = struct {
     durable_name: ?[]const u8 = null,
     /// A short description of the purpose of this consumer
     description: ?[]const u8 = null,
-    /// The point in the stream to receive messages from, either 'all', 'last', 'new', 'by_start_sequence', 'by_start_time', 'last_per_subject'
-    deliver_policy: enum { all, last, new, by_start_sequence, by_start_time, last_per_subject } = .all,
+    /// The point in the stream to receive messages from, either 'all', 'last', 'new', 'by_start_sequence', 'by_start_time', 'last_per_subject'.
+    /// Not sent when null, which the server reads as 'all'.
+    deliver_policy: ?enum { all, last, new, by_start_sequence, by_start_time, last_per_subject } = null,
     /// Used with deliver_policy 'by_start_sequence' to define the sequence to start at
     opt_start_seq: ?u64 = null,
     /// Used with deliver_policy 'by_start_time' to define the time to start at
     opt_start_time: ?[]const u8 = null,
     /// The subject to deliver messages to, omit for pull consumers
     deliver_subject: ?[]const u8 = null,
-    /// How messages are acknowledged, either 'none', 'all', or 'explicit'
-    ack_policy: enum { none, all, explicit } = .explicit,
-    /// How long (in nanoseconds) to allow messages to remain un-acknowledged before attempting redelivery
-    ack_wait: u64 = 30_000_000_000, // 30 seconds
-    /// The number of times a message will be redelivered to consumers if not acknowledged in time
-    max_deliver: i64 = -1,
+    /// How messages are acknowledged, either 'none', 'all', or 'explicit'.
+    /// Not sent when null, which the server reads as 'none' - but the subscribe
+    /// entry points ask for 'explicit' when the caller did not choose, since a
+    /// subscription that silently never acknowledges is not a useful default.
+    ack_policy: ?enum { none, all, explicit } = null,
+    /// How long (in nanoseconds) to allow messages to remain un-acknowledged before attempting redelivery.
+    /// Not sent when null; the server uses 30 seconds for the 'explicit' and
+    /// 'all' ack policies.
+    ack_wait: ?u64 = null,
+    /// The number of times a message will be redelivered to consumers if not acknowledged in time.
+    /// Not sent when null; the server uses -1, no limit.
+    max_deliver: ?i64 = null,
     /// Filter the stream by a single subject
     filter_subject: ?[]const u8 = null,
     /// Filter the stream by multiple subjects
     filter_subjects: ?[]const []const u8 = null,
-    /// How messages are sent, either 'instant' or 'original'
-    replay_policy: enum { instant, original } = .instant,
+    /// How messages are sent, either 'instant' or 'original'.
+    /// Not sent when null, which the server reads as 'instant'.
+    replay_policy: ?enum { instant, original } = null,
     /// The rate at which messages will be delivered to clients, expressed in bit per second
     rate_limit_bps: ?u64 = null,
-    /// The maximum number of messages without acknowledgement that can be outstanding
-    max_ack_pending: i64 = 1000,
+    /// The maximum number of messages without acknowledgement that can be outstanding.
+    /// Not sent when null, which lets the stream's consumer limits apply, and
+    /// where they set nothing the server uses 1000 for consumers that
+    /// acknowledge and no limit for ack policy 'none'.
+    max_ack_pending: ?i64 = null,
     /// If the Consumer is idle for more than this many nano seconds a empty message with Status header 100 will be sent
     idle_heartbeat: ?u64 = null,
     /// For push consumers this will regularly send an empty mess with Status header 100 and a reply subject
@@ -250,6 +261,8 @@ pub const ConsumerInfo = struct {
     num_waiting: u64,
     /// The number of pending pull requests
     num_pending: u64,
+    /// Whether a push consumer already has a subscription bound to it
+    push_bound: ?bool = null,
     /// When this consumer was created
     created: []const u8,
 };
@@ -685,8 +698,9 @@ pub const JetStream = struct {
         return try self.nc.allocator.dupe(u8, streams[0]);
     }
 
-    /// Get existing consumer or create new one based on configuration
-    fn getOrCreateConsumer(self: JetStream, stream_name: []const u8, subject: ?[]const u8, durable: ?[]const u8, base_config: ?ConsumerConfig, is_pull: bool, queue: ?[]const u8) !Result(ConsumerInfo) {
+    /// Fill in the consumer config fields that follow from the subscribe call
+    /// itself rather than from the caller's config.
+    fn buildConsumerConfig(base_config: ?ConsumerConfig, subject: ?[]const u8, durable: ?[]const u8, is_pull: bool, queue: ?[]const u8) ConsumerConfig {
         // Start with base config or empty config
         var config = base_config orelse ConsumerConfig{};
 
@@ -706,6 +720,12 @@ pub const JetStream = struct {
             config.deliver_group = q;
         }
 
+        // A consumer created through subscribe acknowledges explicitly unless
+        // asked otherwise: the server's own default for an omitted ack policy
+        // is 'none', which silently gives up redelivery. nats.go applies the
+        // same default in the same place (js.go:1877).
+        if (config.ack_policy == null) config.ack_policy = .explicit;
+
         // Configure for pull vs push consumer
         if (is_pull) {
             config.deliver_subject = null;
@@ -717,22 +737,206 @@ pub const JetStream = struct {
             config.max_expires = null;
         }
 
-        // If durable is provided, try to get existing consumer first
-        if (durable) |consumer_name| {
-            // Try to get existing consumer info
-            if (self.getConsumerInfo(stream_name, consumer_name)) |existing_info| {
-                log.debug("Found existing consumer: {s}", .{consumer_name});
-                return existing_info;
-            } else |err| switch (err) {
-                error.ConsumerNotFound => {
-                    // Consumer doesn't exist, we'll create it below
-                    log.debug("Consumer {s} not found, creating new one", .{consumer_name});
-                },
-                else => return err, // Other errors should be propagated
+        return config;
+    }
+
+    fn optStrEql(a: ?[]const u8, b: ?[]const u8) bool {
+        const lhs = a orelse return b == null;
+        const rhs = b orelse return false;
+        return std.mem.eql(u8, lhs, rhs);
+    }
+
+    fn configMismatch(comptime field: []const u8, requested: anytype, actual: anytype) error{ConsumerConfigMismatch} {
+        log.err("existing consumer has " ++ field ++ " {any}, but {any} was requested", .{ actual, requested });
+        return error.ConsumerConfigMismatch;
+    }
+
+    fn configMismatchStr(comptime field: []const u8, requested: ?[]const u8, actual: ?[]const u8) error{ConsumerConfigMismatch} {
+        log.err("existing consumer has " ++ field ++ " {?s}, but {?s} was requested", .{ actual, requested });
+        return error.ConsumerConfigMismatch;
+    }
+
+    /// Reject an existing consumer that does not deliver what the caller asked
+    /// for, rather than silently attaching to it. Mirrors processConsInfo and
+    /// checkConfig in nats.go, and _processConsInfo in nats.c.
+    ///
+    /// Every ConsumerConfig field the caller left null is left alone: null
+    /// means "whatever this consumer already is", so only fields that were
+    /// actually asked for can produce a mismatch.
+    fn checkExistingConsumer(existing: *const ConsumerInfo, requested: ConsumerConfig, is_pull: bool, subject: ?[]const u8, queue: ?[]const u8) !void {
+        const config = &existing.config;
+
+        // A consumer whose filter does not cover the requested subject would
+        // deliver nothing, or the wrong thing. Unlike nats.go, subscribing
+        // without a subject is allowed against a filtered consumer: binding to
+        // a durable by name alone is a normal way to use this API.
+        if (subject) |s| {
+            if (config.filter_subject) |filter| {
+                if (!std.mem.eql(u8, s, filter)) return configMismatchStr("filter_subject", s, filter);
             }
         }
 
-        // Create the consumer
+        // Pull and push consumers are not interchangeable, and the deliver
+        // subject is what tells them apart.
+        if (is_pull) {
+            if (config.deliver_subject != null) return error.PullSubscribeToPushConsumer;
+        } else {
+            if (config.deliver_subject == null) return error.PushSubscribeToPullConsumer;
+
+            if (config.deliver_group) |group| {
+                // A consumer with a deliver group only delivers to members of
+                // that group, so a plain subscription receives nothing.
+                const q = queue orelse return configMismatchStr("deliver_group", null, group);
+                if (!std.mem.eql(u8, q, group)) return configMismatchStr("deliver_group", q, group);
+            } else if (queue) |q| {
+                return configMismatchStr("deliver_group", q, null);
+            } else if (existing.push_bound orelse false) {
+                // Two plain subscriptions to one push consumer split its
+                // delivery between them at random.
+                return error.ConsumerAlreadyBound;
+            }
+        }
+
+        if (requested.description) |v| {
+            if (!optStrEql(v, config.description)) return configMismatchStr("description", v, config.description);
+        }
+        if (requested.deliver_policy) |v| {
+            if (v != config.deliver_policy) return configMismatch("deliver_policy", v, config.deliver_policy);
+        }
+        if (requested.opt_start_seq) |v| {
+            if (v != config.opt_start_seq) return configMismatch("opt_start_seq", v, config.opt_start_seq);
+        }
+        if (requested.opt_start_time) |v| {
+            if (!optStrEql(v, config.opt_start_time)) return configMismatchStr("opt_start_time", v, config.opt_start_time);
+        }
+        if (requested.ack_policy) |v| {
+            if (v != config.ack_policy) return configMismatch("ack_policy", v, config.ack_policy);
+        }
+        if (requested.ack_wait) |v| {
+            if (v != config.ack_wait) return configMismatch("ack_wait", v, config.ack_wait);
+        }
+        if (requested.max_deliver) |v| {
+            if (v != config.max_deliver) return configMismatch("max_deliver", v, config.max_deliver);
+        }
+        if (requested.replay_policy) |v| {
+            if (v != config.replay_policy) return configMismatch("replay_policy", v, config.replay_policy);
+        }
+        if (requested.rate_limit_bps) |v| {
+            if (v != config.rate_limit_bps) return configMismatch("rate_limit_bps", v, config.rate_limit_bps);
+        }
+        if (requested.max_ack_pending) |v| {
+            if (v != config.max_ack_pending) return configMismatch("max_ack_pending", v, config.max_ack_pending);
+        }
+        if (requested.idle_heartbeat) |v| {
+            if (v != config.idle_heartbeat) return configMismatch("idle_heartbeat", v, config.idle_heartbeat);
+        }
+        if (requested.max_waiting) |v| {
+            if (v != config.max_waiting) return configMismatch("max_waiting", v, config.max_waiting);
+        }
+        if (requested.num_replicas) |v| {
+            if (v != config.num_replicas) return configMismatch("num_replicas", v, config.num_replicas);
+        }
+        // Flow control the caller did not ask for is handled by the library
+        // either way, so only an unmet request for it is a mismatch.
+        if (requested.flow_control orelse false) {
+            if (!(config.flow_control orelse false)) return configMismatch("flow_control", true, config.flow_control);
+        }
+    }
+
+    /// Look up a named consumer, returning null when it is unnamed or does
+    /// not exist yet.
+    fn lookupConsumer(self: JetStream, stream_name: []const u8, name: ?[]const u8) !?Result(ConsumerInfo) {
+        const consumer_name = name orelse return null;
+
+        if (self.getConsumerInfo(stream_name, consumer_name)) |existing_info| {
+            log.debug("Found existing consumer: {s}", .{consumer_name});
+            return existing_info;
+        } else |err| switch (err) {
+            error.ConsumerNotFound => {
+                log.debug("Consumer {s} not found, creating new one", .{consumer_name});
+                return null;
+            },
+            else => return err, // Other errors should be propagated
+        }
+    }
+
+    /// Take ownership of a looked up consumer info, leaving null behind so the
+    /// errdefer guarding the lookup does not release it a second time.
+    fn takeConsumerInfo(info: *?Result(ConsumerInfo)) ?Result(ConsumerInfo) {
+        defer info.* = null;
+        return info.*;
+    }
+
+    /// A delivery subscription together with the consumer it delivers from.
+    const PushConsumerSubscription = struct {
+        subscription: *Subscription,
+        consumer_info: Result(ConsumerInfo),
+    };
+
+    /// Subscribe to a push consumer's deliver subject and then make sure the
+    /// consumer exists, in that order: the SUB frame is queued ahead of the
+    /// create request, so the server has interest in the deliver subject
+    /// before it can push anything to it.
+    ///
+    /// `subscriber` performs the subscribe itself, which differs per entry
+    /// point (callback or sync, with or without a queue group). It may be
+    /// called twice, so it must not consume anything it is given.
+    fn subscribeToPushConsumer(self: JetStream, stream_name: []const u8, subject: ?[]const u8, durable: ?[]const u8, base_config: ConsumerConfig, queue: ?[]const u8, subscriber: anytype) !PushConsumerSubscription {
+        const config = buildConsumerConfig(base_config, subject, durable, false, queue);
+
+        // The name addConsumer would target, which the caller can also have
+        // supplied through the config rather than through `durable`. Both
+        // official clients look the consumer up under either name.
+        const consumer_name = config.name orelse config.durable_name;
+
+        // When the consumer is already there, the server delivers to its
+        // deliver subject rather than to the one we would have asked for.
+        var existing = try self.lookupConsumer(stream_name, consumer_name);
+        errdefer if (existing) |info| info.deinit();
+
+        // Two passes at most: the second one always has a consumer to attach
+        // to, so it returns before reaching addConsumer again.
+        while (true) {
+            const deliver_subject = if (existing) |info| blk: {
+                try checkExistingConsumer(&info.value, base_config, false, subject, queue);
+                break :blk info.value.config.deliver_subject.?;
+            } else config.deliver_subject.?;
+
+            const subscription = try subscriber.subscribe(deliver_subject);
+            errdefer subscription.deinit();
+
+            if (takeConsumerInfo(&existing)) |info| {
+                return .{ .subscription = subscription, .consumer_info = info };
+            }
+
+            if (self.addConsumer(stream_name, config)) |info| {
+                return .{ .subscription = subscription, .consumer_info = info };
+            } else |err| switch (err) {
+                // Another client created the consumer between our lookup and
+                // this create, so it owns the deliver subject now. Attach to
+                // the consumer that won and subscribe where it actually
+                // delivers. Look it up before dropping the subscription, so a
+                // failing lookup leaves exactly one cleanup to run.
+                error.ConsumerAlreadyExists, error.ConsumerNameExist, error.ConsumerExistingActive => {
+                    const winner = try self.lookupConsumer(stream_name, consumer_name) orelse return err;
+                    subscription.deinit();
+                    existing = winner;
+                },
+                else => return err,
+            }
+        }
+    }
+
+    /// Get existing consumer or create new one based on configuration
+    fn getOrCreateConsumer(self: JetStream, stream_name: []const u8, subject: ?[]const u8, durable: ?[]const u8, base_config: ?ConsumerConfig, is_pull: bool, queue: ?[]const u8) !Result(ConsumerInfo) {
+        const config = buildConsumerConfig(base_config, subject, durable, is_pull, queue);
+
+        if (try self.lookupConsumer(stream_name, config.name orelse config.durable_name)) |existing_info| {
+            errdefer existing_info.deinit();
+            try checkExistingConsumer(&existing_info.value, base_config orelse .{}, is_pull, subject, queue);
+            return existing_info;
+        }
+
         return try self.addConsumer(stream_name, config);
     }
 
@@ -1291,9 +1495,10 @@ pub const JetStream = struct {
     /// byte limits, redeliveries, and control messages are independent of the
     /// number of unique unacknowledged messages.
     fn applyPendingLimits(subscription: *Subscription, consumer_config: *const ConsumerConfig) void {
-        if (consumer_config.max_ack_pending <= Subscription.default_pending_msgs_limit) return;
+        const configured = consumer_config.max_ack_pending orelse return;
+        if (configured <= Subscription.default_pending_msgs_limit) return;
 
-        const max_ack_pending: u64 = @intCast(consumer_config.max_ack_pending);
+        const max_ack_pending: u64 = @intCast(configured);
         const msgs_limit: u32 = std.math.cast(u32, max_ack_pending) orelse std.math.maxInt(u32);
         const bytes_limit = @max(max_ack_pending *| @as(u64, 1024 * 1024), Subscription.default_pending_bytes_limit);
         subscription.setPendingLimits(msgs_limit, bytes_limit);
@@ -1328,27 +1533,31 @@ pub const JetStream = struct {
             config.deliver_subject = ds;
         }
 
-        // Create or get consumer with complete config
-        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, null);
-        errdefer consumer_info.deinit();
-
-        const deliver_subject = consumer_info.value.config.deliver_subject.?;
-
         // Use the reusable JetStream handler wrapper
         const JSHandler = JetStreamHandler(handlerFn);
 
-        // Subscribe to the delivery subject
-        const subscription = try self.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
-        errdefer self.nc.unsubscribe(subscription);
+        const subscriber = struct {
+            nc: *Connection,
+            handler_args: @TypeOf(handler_args),
+            manual_ack: bool,
 
-        applyPendingLimits(subscription, &consumer_info.value.config);
+            fn subscribe(sub_ctx: @This(), deliver_subject: []const u8) !*Subscription {
+                return sub_ctx.nc.subscribe(deliver_subject, JSHandler.wrappedHandler, .{ sub_ctx.nc, sub_ctx.handler_args, sub_ctx.manual_ack });
+            }
+        }{ .nc = self.nc, .handler_args = handler_args, .manual_ack = options.manual_ack };
+
+        var push = try self.subscribeToPushConsumer(stream_name, subject, options.durable, config, null, subscriber);
+        errdefer push.subscription.deinit();
+        errdefer push.consumer_info.deinit();
+
+        applyPendingLimits(push.subscription, &push.consumer_info.value.config);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
-            .subscription = subscription,
+            .subscription = push.subscription,
             .js = self,
-            .consumer_info = consumer_info,
+            .consumer_info = push.consumer_info,
             .deliver_subject_owned = generated_deliver_subject,
         };
 
@@ -1386,24 +1595,27 @@ pub const JetStream = struct {
             config.deliver_subject = ds;
         }
 
-        // Create or get consumer with proper config
-        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, null);
-        errdefer consumer_info.deinit();
+        // Subscribe synchronously, without a callback handler
+        const subscriber = struct {
+            nc: *Connection,
 
-        const deliver_subject = consumer_info.value.config.deliver_subject.?;
+            fn subscribe(sub_ctx: @This(), deliver_subject: []const u8) !*Subscription {
+                return sub_ctx.nc.subscribeSync(deliver_subject);
+            }
+        }{ .nc = self.nc };
 
-        // Create synchronous subscription (no callback handler)
-        const subscription = try self.nc.subscribeSync(deliver_subject);
-        errdefer self.nc.unsubscribe(subscription);
+        var push = try self.subscribeToPushConsumer(stream_name, subject, options.durable, config, null, subscriber);
+        errdefer push.subscription.deinit();
+        errdefer push.consumer_info.deinit();
 
-        applyPendingLimits(subscription, &consumer_info.value.config);
+        applyPendingLimits(push.subscription, &push.consumer_info.value.config);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
-            .subscription = subscription,
+            .subscription = push.subscription,
             .js = self,
-            .consumer_info = consumer_info,
+            .consumer_info = push.consumer_info,
             .deliver_subject_owned = generated_deliver_subject,
         };
         return js_sub;
@@ -1440,27 +1652,32 @@ pub const JetStream = struct {
             config.deliver_subject = ds;
         }
 
-        // Create or get consumer with queue group
-        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, queue);
-        errdefer consumer_info.deinit();
-
-        const deliver_subject = consumer_info.value.config.deliver_subject.?;
-
         // Use the reusable JetStream handler wrapper
         const JSHandler = JetStreamHandler(handlerFn);
 
-        // Subscribe to the delivery subject with queue group
-        const subscription = try self.nc.queueSubscribe(deliver_subject, queue, JSHandler.wrappedHandler, .{ self.nc, handler_args, options.manual_ack });
-        errdefer self.nc.unsubscribe(subscription);
+        const subscriber = struct {
+            nc: *Connection,
+            queue: []const u8,
+            handler_args: @TypeOf(handler_args),
+            manual_ack: bool,
 
-        applyPendingLimits(subscription, &consumer_info.value.config);
+            fn subscribe(sub_ctx: @This(), deliver_subject: []const u8) !*Subscription {
+                return sub_ctx.nc.queueSubscribe(deliver_subject, sub_ctx.queue, JSHandler.wrappedHandler, .{ sub_ctx.nc, sub_ctx.handler_args, sub_ctx.manual_ack });
+            }
+        }{ .nc = self.nc, .queue = queue, .handler_args = handler_args, .manual_ack = options.manual_ack };
+
+        var push = try self.subscribeToPushConsumer(stream_name, subject, options.durable, config, queue, subscriber);
+        errdefer push.subscription.deinit();
+        errdefer push.consumer_info.deinit();
+
+        applyPendingLimits(push.subscription, &push.consumer_info.value.config);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
-            .subscription = subscription,
+            .subscription = push.subscription,
             .js = self,
-            .consumer_info = consumer_info,
+            .consumer_info = push.consumer_info,
             .deliver_subject_owned = generated_deliver_subject,
         };
 
@@ -1498,24 +1715,28 @@ pub const JetStream = struct {
             config.deliver_subject = ds;
         }
 
-        // Create or get consumer with queue group
-        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, options.durable, config, false, queue);
-        errdefer consumer_info.deinit();
+        // Subscribe synchronously with a queue group, without a callback handler
+        const subscriber = struct {
+            nc: *Connection,
+            queue: []const u8,
 
-        const deliver_subject = consumer_info.value.config.deliver_subject.?;
+            fn subscribe(sub_ctx: @This(), deliver_subject: []const u8) !*Subscription {
+                return sub_ctx.nc.queueSubscribeSync(deliver_subject, sub_ctx.queue);
+            }
+        }{ .nc = self.nc, .queue = queue };
 
-        // Create synchronous subscription with queue group
-        const subscription = try self.nc.queueSubscribeSync(deliver_subject, queue);
-        errdefer self.nc.unsubscribe(subscription);
+        var push = try self.subscribeToPushConsumer(stream_name, subject, options.durable, config, queue, subscriber);
+        errdefer push.subscription.deinit();
+        errdefer push.consumer_info.deinit();
 
-        applyPendingLimits(subscription, &consumer_info.value.config);
+        applyPendingLimits(push.subscription, &push.consumer_info.value.config);
 
         // Create JetStream subscription wrapper
         const js_sub = try self.nc.allocator.create(JetStreamSubscription);
         js_sub.* = JetStreamSubscription{
-            .subscription = subscription,
+            .subscription = push.subscription,
             .js = self,
-            .consumer_info = consumer_info,
+            .consumer_info = push.consumer_info,
             .deliver_subject_owned = generated_deliver_subject,
         };
 
@@ -1534,15 +1755,6 @@ pub const JetStream = struct {
 
         defer if (options.stream == null and subject != null) self.nc.allocator.free(stream_name);
 
-        // Create or get consumer (pull consumers require a name)
-        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, durable, options.config, true, null);
-        errdefer consumer_info.deinit();
-
-        // Get the consumer name (should be set from durable parameter)
-        const consumer_name = consumer_info.value.config.name orelse
-            consumer_info.value.config.durable_name orelse
-            durable;
-
         // Generate unique inbox prefix for this pull subscription
         const inbox_base = try inbox.newInbox(self.nc.allocator);
         defer self.nc.allocator.free(inbox_base);
@@ -1554,9 +1766,19 @@ pub const JetStream = struct {
         const wildcard_subject = try std.fmt.allocPrint(self.nc.allocator, "{s}*", .{inbox_prefix});
         defer self.nc.allocator.free(wildcard_subject);
 
-        // Create the persistent wildcard inbox subscription
+        // Create the persistent wildcard inbox subscription before the consumer
+        // exists, so no response can be delivered without local interest.
         const inbox_subscription = try self.nc.subscribeSync(wildcard_subject);
-        errdefer self.nc.unsubscribe(inbox_subscription);
+        errdefer inbox_subscription.deinit();
+
+        // Create or get consumer (pull consumers require a name)
+        var consumer_info = try self.getOrCreateConsumer(stream_name, subject, durable, options.config, true, null);
+        errdefer consumer_info.deinit();
+
+        // Get the consumer name (should be set from durable parameter)
+        const consumer_name = consumer_info.value.config.name orelse
+            consumer_info.value.config.durable_name orelse
+            durable;
 
         applyPendingLimits(inbox_subscription, &consumer_info.value.config);
 
