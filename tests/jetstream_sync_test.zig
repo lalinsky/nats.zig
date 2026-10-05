@@ -334,6 +334,17 @@ test "JetStream subscribe rejects an existing consumer that does not match" {
 
     try testing.expectEqualStrings("deliver.mismatch", sub.consumer_info.value.config.deliver_subject.?);
 
+    // The server marks the consumer bound asynchronously, once it notices the
+    // interest, so wait for that before checking a second subscription.
+    const wait_start = std.Io.Timestamp.now(io, .awake);
+    while (true) {
+        var info = try js.getConsumerInfo("TEST_MISMATCH_STREAM", "mismatch_push");
+        defer info.deinit();
+        if (info.value.push_bound orelse false) break;
+        if (wait_start.untilNow(io, .awake).nanoseconds >= 5 * std.time.ns_per_s) return error.GiveUpTimeout;
+        try io.sleep(.fromMilliseconds(10), .awake);
+    }
+
     // A second plain subscription would split the consumer's delivery with the
     // first one, at random.
     try testing.expectError(error.ConsumerAlreadyBound, js.subscribeSync("test.mismatch.one", .{
