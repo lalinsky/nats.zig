@@ -79,3 +79,32 @@ test "JetStream pull consumer basic fetch" {
     // Acknowledge messages
     try batch2.messages[0].ack();
 }
+
+test "JetStream pull subscribe resolves the stream from the subject" {
+    const io = std.testing.io;
+
+    const nc = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(nc);
+
+    var js = nc.jetstream(.{});
+
+    var stream_info = try js.addStream(.{
+        .name = "TEST_PULL_LOOKUP_STREAM",
+        .subjects = &.{"test.pull.lookup.*"},
+        .storage = .memory,
+    });
+    defer stream_info.deinit();
+
+    // No .stream: the name is looked up by subject, and must outlive the call.
+    var subscription = try js.pullSubscribe("test.pull.lookup.*", "pull_lookup_consumer", .{});
+    defer subscription.deinit();
+
+    try nc.publish("test.pull.lookup.msg", "looked up");
+
+    var batch = try subscription.fetch(1, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    defer batch.deinit();
+
+    try testing.expectEqual(null, batch.err);
+    try testing.expectEqual(1, batch.messages.len);
+    try testing.expectEqualStrings("looked up", batch.messages[0].msg.data);
+}
