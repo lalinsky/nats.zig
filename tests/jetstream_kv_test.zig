@@ -238,3 +238,47 @@ test "KV status operation" {
     try testing.expect(status.value.is_compressed == true);
     try testing.expectEqualStrings("JetStream", status.value.backing_store);
 }
+
+test "KV key expired by its TTL reads as purged" {
+    const io = std.testing.io;
+
+    const conn = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(conn);
+
+    var js = conn.jetstream(.{});
+
+    const bucket_name = try utils.generateUniqueName(testing.allocator, "ttlbucket");
+    defer testing.allocator.free(bucket_name);
+
+    var kv_manager = js.kvManager();
+    var kv = try kv_manager.createBucket(.{
+        .bucket = bucket_name,
+        .history = 1,
+        .limit_marker_ttl = .fromSeconds(10),
+    });
+    defer kv.deinit();
+    defer kv_manager.deleteBucket(bucket_name) catch {};
+
+    _ = try kv.put("expiring", "value", .{ .ttl = .fromSeconds(1) });
+
+    // Once the value expires, the server replaces it with a marker carrying
+    // Nats-Marker-Reason: MaxAge, kept for limit_marker_ttl, which must not
+    // read as a live value.
+    const wait_start = std.Io.Timestamp.now(io, .awake);
+    while (true) {
+        var entry = kv.get("expiring") catch |err| switch (err) {
+            error.KeyNotFound => break,
+            else => return err,
+        };
+        entry.deinit();
+        if (wait_start.untilNow(io, .awake).nanoseconds >= 5 * std.time.ns_per_s) return error.GiveUpTimeout;
+        try io.sleep(.fromMilliseconds(100), .awake);
+    }
+
+    const history = try kv.history("expiring");
+    defer history.deinit();
+    defer for (history.value) |*entry| entry.deinit();
+
+    const last = history.value[history.value.len - 1];
+    try testing.expectEqual(nats.KVOperation.PURGE, last.operation);
+}

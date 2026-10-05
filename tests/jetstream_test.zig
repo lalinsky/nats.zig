@@ -894,7 +894,7 @@ test "JetStream publish with expected last subject sequence" {
     try testing.expect(pub_ack2.value.seq == pub_ack1.value.seq + 1);
 
     // Third publish with incorrect expected_last_subject_seq (should fail)
-    // Note: Current NATS server (2.10.29) returns error 10071 for both expected_last_seq and expected_last_subject_seq
+    // The server returns error 10071 for both expected_last_seq and expected_last_subject_seq
     const wrong_result = js.publish(subject, "wrong subject seq", .{ .expected_last_subject_seq = 999 });
     try testing.expectError(nats.JetStreamError.StreamWrongLastSequence, wrong_result);
 }
