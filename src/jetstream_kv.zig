@@ -28,7 +28,6 @@ const JetStreamSubscription = @import("jetstream.zig").JetStreamSubscription;
 const JetStreamMessage = @import("jetstream.zig").JetStreamMessage;
 const Subscription = @import("subscription.zig").Subscription;
 const Message = @import("message.zig").Message;
-const timestamp = @import("timestamp.zig");
 const newInbox = @import("inbox.zig").newInbox;
 const queue = @import("queue.zig");
 const nuid = @import("nuid.zig");
@@ -342,42 +341,6 @@ pub const KV = struct {
         return try self.parseMessage(msg);
     }
 
-    /// Parse a KV entry from a stored message
-    fn parseEntry(self: *KV, stored_msg: *Message, key: []const u8, delta: u64) !KVEntry {
-        // Determine operation from parsed headers
-        var operation = KVOperation.PUT;
-        if (stored_msg.headerGet(KvOperationHdr)) |op_value| {
-            operation = try KVOperation.fromString(op_value);
-        }
-
-        // Map TTL marker reasons to KV operations
-        if (stored_msg.headerGet(NatsMarkerReasonHdr)) |marker_reason| {
-            if (MarkerReason.fromString(marker_reason)) |reason| {
-                operation = switch (reason) {
-                    .MaxAge, .Purge => .PURGE,
-                    .Remove => .DEL,
-                };
-            }
-        }
-
-        // Parse timestamp from Nats-Time-Stamp header, fallback to zero if not present
-        var created: Io.Timestamp = .zero;
-        if (stored_msg.headerGet("Nats-Time-Stamp")) |timestamp_str| {
-            created = timestamp.parseTimestamp(timestamp_str) catch .zero;
-        }
-
-        return KVEntry{
-            .bucket = self.bucket_name,
-            .key = key,
-            .value = stored_msg.data,
-            .created = created,
-            .revision = stored_msg.seq,
-            .delta = delta,
-            .operation = operation,
-            .msg = stored_msg,
-        };
-    }
-
     /// Put a value into a key
     pub fn put(self: *KV, key: []const u8, value: []const u8, options: PutOptions) !u64 {
         const subject = try self.getKeySubject(key);
@@ -566,6 +529,25 @@ pub const KV = struct {
         return try KVWatcher.init(self, &.{subject}, options);
     }
 
+    /// The operation a stored KV message represents. Besides the client's own
+    /// KV-Operation header, the server leaves markers with Nats-Marker-Reason
+    /// when a key expires or is removed, which read as a purge or delete the
+    /// same way. Matches nats.go.
+    fn entryOperation(msg: *Message) !KVOperation {
+        if (msg.headerGet(KvOperationHdr)) |op_value| {
+            return KVOperation.fromString(op_value);
+        }
+        if (msg.headerGet(NatsMarkerReasonHdr)) |marker_reason| {
+            if (MarkerReason.fromString(marker_reason)) |reason| {
+                return switch (reason) {
+                    .MaxAge, .Purge => .PURGE,
+                    .Remove => .DEL,
+                };
+            }
+        }
+        return .PUT;
+    }
+
     /// Parse a JetStream message into a KVEntry
     /// Extracts Message pointer without calling js_msg.deinit() since we reference memory inside the message
     fn parseJetStreamMessage(self: *KV, js_msg: *JetStreamMessage) !KVEntry {
@@ -579,11 +561,7 @@ pub const KV = struct {
         }
         const key = msg.subject[self.subject_prefix.len..];
 
-        // Determine operation from parsed headers
-        var operation = KVOperation.PUT;
-        if (msg.headerGet(KvOperationHdr)) |op_value| {
-            operation = try KVOperation.fromString(op_value);
-        }
+        const operation = try entryOperation(msg);
 
         return KVEntry{
             .bucket = self.bucket_name,
@@ -606,11 +584,7 @@ pub const KV = struct {
         }
         const key = msg.subject[self.subject_prefix.len..];
 
-        // Determine operation from parsed headers
-        var operation = KVOperation.PUT;
-        if (msg.headerGet(KvOperationHdr)) |op_value| {
-            operation = try KVOperation.fromString(op_value);
-        }
+        const operation = try entryOperation(msg);
 
         return KVEntry{
             .bucket = self.bucket_name,
@@ -880,3 +854,17 @@ pub const KVManager = struct {
         try self.js.deleteStream(stream_name);
     }
 };
+
+test "server delete markers read as purge or delete" {
+    const cases = [_]struct { reason: []const u8, operation: KVOperation }{
+        .{ .reason = "MaxAge", .operation = .PURGE },
+        .{ .reason = "Purge", .operation = .PURGE },
+        .{ .reason = "Remove", .operation = .DEL },
+    };
+    for (cases) |case| {
+        var msg = Message.init(std.testing.allocator);
+        defer msg.deinit();
+        try msg.headerSet(NatsMarkerReasonHdr, case.reason);
+        try std.testing.expectEqual(case.operation, try KV.entryOperation(&msg));
+    }
+}
