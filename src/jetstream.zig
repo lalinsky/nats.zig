@@ -425,10 +425,6 @@ pub const MessageBatch = struct {
 pub const PullSubscription = struct {
     /// JetStream context
     js: JetStream,
-    /// Stream name
-    stream_name: []const u8,
-    /// Consumer name
-    consumer_name: []const u8,
     /// Consumer information
     consumer_info: Result(ConsumerInfo),
     /// Persistent wildcard inbox subscription
@@ -474,7 +470,7 @@ pub const PullSubscription = struct {
         defer self.js.nc.allocator.free(request_json);
 
         // Build the full API subject
-        const api_subject = try std.fmt.allocPrint(self.js.nc.allocator, "{s}CONSUMER.MSG.NEXT.{s}.{s}", .{ default_api_prefix, self.stream_name, self.consumer_name });
+        const api_subject = try std.fmt.allocPrint(self.js.nc.allocator, "{s}CONSUMER.MSG.NEXT.{s}.{s}", .{ default_api_prefix, self.consumer_info.value.stream_name, self.consumer_info.value.name });
         defer self.js.nc.allocator.free(api_subject);
 
         // Send the pull request with reply subject
@@ -1775,19 +1771,12 @@ pub const JetStream = struct {
         var consumer_info = try self.getOrCreateConsumer(stream_name, subject, durable, options.config, true, null);
         errdefer consumer_info.deinit();
 
-        // Get the consumer name (should be set from durable parameter)
-        const consumer_name = consumer_info.value.config.name orelse
-            consumer_info.value.config.durable_name orelse
-            durable;
-
         applyPendingLimits(inbox_subscription, &consumer_info.value.config);
 
         // Allocate PullSubscription
         const pull_subscription = try self.nc.allocator.create(PullSubscription);
         pull_subscription.* = PullSubscription{
             .js = self,
-            .stream_name = stream_name,
-            .consumer_name = consumer_name,
             .consumer_info = consumer_info,
             .inbox_subscription = inbox_subscription,
             .inbox_prefix = inbox_prefix,
