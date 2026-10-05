@@ -191,7 +191,17 @@ pub const Subscription = struct {
 
     /// Unsubscribe from the server and release the user reference.
     /// After calling this, the subscription should not be used.
+    ///
+    /// Do not call from the subscription's own message handler: this joins
+    /// that handler's task, and a task cannot wait for itself.
     pub fn deinit(self: *Subscription) void {
+        // Join the handler while the caller's reference still keeps the
+        // subscription alive: a handler that reaches its autounsubscribe
+        // limit drops the connection's reference itself, and must never be
+        // the one dropping the last reference, since destroy() joins it.
+        self.messages.close();
+        self.handler_group.cancel(self.nc.io);
+
         self.nc.unsubscribe(self);
         self.release(); // Release user reference
     }
