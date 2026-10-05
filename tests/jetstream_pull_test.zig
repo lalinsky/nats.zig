@@ -108,3 +108,41 @@ test "JetStream pull subscribe resolves the stream from the subject" {
     try testing.expectEqual(1, batch.messages.len);
     try testing.expectEqualStrings("looked up", batch.messages[0].msg.data);
 }
+
+test "JetStream pull fetch ignores a status left over from an earlier request" {
+    const io = std.testing.io;
+
+    const nc = try utils.createDefaultConnection(io);
+    defer utils.closeConnection(nc);
+
+    var js = nc.jetstream(.{});
+
+    var stream_info = try js.addStream(.{
+        .name = "TEST_PULL_STALE_STREAM",
+        .subjects = &.{"test.pull.stale.*"},
+        .storage = .memory,
+    });
+    defer stream_info.deinit();
+
+    var subscription = try js.pullSubscribe("test.pull.stale.*", "pull_stale_consumer", .{
+        .stream = "TEST_PULL_STALE_STREAM",
+    });
+    defer subscription.deinit();
+
+    // Nothing to fetch: this gives up locally, and the server's 408 for the
+    // expired request arrives afterwards.
+    var empty = try subscription.fetch(1, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } });
+    defer empty.deinit();
+    try testing.expectEqual(0, empty.messages.len);
+    try io.sleep(.fromMilliseconds(200), .awake);
+
+    try nc.publish("test.pull.stale.msg", "fresh");
+
+    // The leftover 408 belongs to the first request and must not end this one.
+    var batch = try subscription.fetch(1, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    defer batch.deinit();
+
+    try testing.expectEqual(null, batch.err);
+    try testing.expectEqual(1, batch.messages.len);
+    try testing.expectEqualStrings("fresh", batch.messages[0].msg.data);
+}

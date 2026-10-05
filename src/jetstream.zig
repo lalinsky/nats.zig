@@ -492,9 +492,15 @@ pub const PullSubscription = struct {
         while (!batch_complete and messages.items.len < request.batch) {
             if (self.inbox_subscription.nextMsgTimeout(receive_deadline)) |raw_msg| {
                 log.debug("Message: subject={s}, reply={s}, data='{s}'", .{ raw_msg.subject, raw_msg.reply orelse "none", raw_msg.data });
-                // JetStream messages arrive with original subjects and ACK reply subjects
-                // The timestamp in the ACK subject ensures messages belong to this fetch request
-                // (timestamps are monotonically increasing and unique per message delivery)
+
+                // Status messages are addressed to the reply subject of the
+                // request they answer. One for an earlier fetch that gave up
+                // locally says nothing about this one. Data messages from
+                // earlier requests are still the consumer's, so they are kept.
+                if (raw_msg.status_code > 0 and !std.mem.eql(u8, raw_msg.subject, reply_subject)) {
+                    raw_msg.deinit();
+                    continue;
+                }
 
                 if (raw_msg.status_code == STATUS_NOT_FOUND) {
                     // No messages available
