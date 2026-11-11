@@ -35,7 +35,7 @@ pub const Node = enum(u16) {
 };
 
 pub fn createConnection(io: std.Io, node: Node, opts: nats.ConnectionOptions) !*nats.Connection {
-    const port = @intFromEnum(node);
+    const port = @backingInt(node);
     const url = try std.fmt.allocPrint(std.testing.allocator, "nats://127.0.0.1:{d}", .{port});
     defer std.testing.allocator.free(url);
 
@@ -126,7 +126,7 @@ pub fn waitForHealthyServices(allocator: std.mem.Allocator, timeout: std.Io.Dura
 /// against a server that is still coming up.
 fn allServerPortsOpen(io: std.Io) bool {
     for ([_]Node{ .node1, .node2, .node3, .token_auth, .user_pass, .nkey_auth, .jwt_auth, .tls, .tls_first, .tls_mtls }) |node| {
-        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(@intFromEnum(node)) };
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(@backingInt(node)) };
         const stream = address.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch return false;
         stream.close(io);
     }

@@ -27,7 +27,7 @@ const log = std.log.default;
 const ca_file = "tests/configs/certs/ca.pem";
 
 fn tlsUrl(buf: []u8, node: utils.Node) ![]const u8 {
-    return std.fmt.bufPrint(buf, "tls://localhost:{d}", .{@intFromEnum(node)});
+    return std.fmt.bufPrint(buf, "tls://localhost:{d}", .{@backingInt(node)});
 }
 
 /// Subscribe, publish, and receive one message over the connection.

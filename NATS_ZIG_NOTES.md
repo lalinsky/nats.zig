@@ -1338,3 +1338,13 @@ green over 37.
 **Measured against nats-server 2.15.1** (nats-py, an isolated server): a core subject of 3000 bytes is delivered; an object store with a 240-byte tenant (bucket `gen-<tenant>`) puts and gets; a named consumer created with a 547-byte API subject is created. The server bounds the protocol line by `max_control_line` (4096 by default).
 
 **Change** (`src/validation.zig`, `src/root.zig`): `max_subject_len = 1024` (exported, so a caller can derive its own limits from it) replaces the literal 255 in `validateSubject`; names keep 255. A test pins a 300-byte subject, the consumer-create subject for a 128-byte tenant, and the bound itself.
+
+## 44. Patch 43: Zig 0.17.1 in CI, the floor at 0.17.0, `@backingInt` (2026-11-11)
+
+**How it appeared.** ZeBridge moved to Zig 0.17.1 (its `minimum_zig_version`, CI and release builds). The fork still declared `minimum_zig_version = "0.16.0"`, wrong since patch 41 (the 0.17 port), and its CI installed 0.16.0; that CI runs only on `main` and pull requests, so the `zebridge` branch never exercised it. `zig fmt --check` under 0.17.1 failed on three files: its formatter rewrites `@intFromEnum` on an enum value to `@backingInt`.
+
+**Change**: `build.zig.zon` `minimum_zig_version = "0.17.0"` (the floor the code needs; `@backingInt` exists in 0.17.0, not in 0.16.0), `.github/workflows/ci.yml` installs 0.17.1, and `zig fmt` applied to `src/nkeys.zig`, `tests/tls_test.zig` and `tests/utils.zig` (nine `@intFromEnum` → `@backingInt`, nothing else).
+
+**Verified:** `test-unit` 144/144 and `zig build examples` on both 0.17.1 and 0.17.0; `zig fmt --check` clean on every tracked `.zig` file (the untracked `zig-pkg/` dependency copies are not ours); the ZeBridge bridge and libzb build against it.
+
+**Found, not fixed:** `zig build test-e2e` (nats-server 2.15.2, the docker compose servers) crashes with a segmentation fault at `0x5555555555555575` in `JetStreamMessage.sendAck` (`jetstream_message.zig:95`), reached from the push subscription's auto-ack in `jetstream.zig` (`js_msg.ack()` after the user handler). The address is the fill of freed (undefined) memory, and the handler is documented as owning the message's cleanup: the auto-ack touches a message the handler may already have freed. It reproduces on the unchanged patch 42 on both 0.17.1 and 0.17.0, so it predates this patch. ZeBridge is not on this path: the bridge and libzb use only `pullSubscribe` and synchronous core subscriptions (`subscribeSync`, `queueSubscribeSync`), never `JetStream.subscribe` with a handler.

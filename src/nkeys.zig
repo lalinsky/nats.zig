@@ -42,11 +42,11 @@ pub const KeyType = enum(u8) {
 
     fn fromByte(b: u8) ?KeyType {
         return switch (b) {
-            @intFromEnum(KeyType.account) => .account,
-            @intFromEnum(KeyType.cluster) => .cluster,
-            @intFromEnum(KeyType.server) => .server,
-            @intFromEnum(KeyType.operator) => .operator,
-            @intFromEnum(KeyType.user) => .user,
+            @backingInt(KeyType.account) => .account,
+            @backingInt(KeyType.cluster) => .cluster,
+            @backingInt(KeyType.server) => .server,
+            @backingInt(KeyType.operator) => .operator,
+            @backingInt(KeyType.user) => .user,
             else => null,
         };
     }
@@ -91,7 +91,7 @@ pub const SeedKeyPair = struct {
     /// Encode the public key ("U..." for user keys).
     pub fn publicKeyText(self: *const SeedKeyPair, out: *[public_key_text_len]u8) []const u8 {
         var raw: [raw_public_key_len]u8 = undefined;
-        raw[0] = @intFromEnum(self.key_type);
+        raw[0] = @backingInt(self.key_type);
         raw[1..33].* = self.key_pair.public_key.toBytes();
         appendChecksum(&raw);
         return base32Encode(&raw, out);
@@ -118,7 +118,7 @@ pub fn verify(expected: KeyType, public_text: []const u8, msg: []const u8, signa
     const decoded = try base32Decode(public_text, &raw);
     if (decoded.len != raw_public_key_len) return Error.InvalidEncoding;
     try verifyChecksum(&raw);
-    if (raw[0] != @intFromEnum(expected)) return Error.InvalidPrefix;
+    if (raw[0] != @backingInt(expected)) return Error.InvalidPrefix;
     const pk = Ed25519.PublicKey.fromBytes(raw[1..33].*) catch return Error.InvalidEncoding;
     const sig = Ed25519.Signature.fromBytes(signature);
     sig.verify(msg, pk) catch return false;
@@ -131,7 +131,7 @@ pub fn encodeSeed(key_type: KeyType, seed: *const [32]u8, out: *[seed_text_len]u
     var raw: [raw_seed_len]u8 = undefined;
     defer std.crypto.secureZero(u8, &raw);
 
-    const kt = @intFromEnum(key_type);
+    const kt = @backingInt(key_type);
     raw[0] = seed_prefix | (kt >> 5);
     raw[1] = (kt & 0x1f) << 3;
     raw[2..34].* = seed.*;
@@ -290,7 +290,7 @@ test "public key seed is rejected as a prefix error" {
     var raw: [raw_seed_len]u8 = undefined;
     _ = encodeSeed(.user, &raw_seed, &seed_buf);
     _ = try base32Decode(seed_buf[0..seed_text_len], &raw);
-    raw[0] = @intFromEnum(KeyType.user); // not the seed prefix
+    raw[0] = @backingInt(KeyType.user); // not the seed prefix
     appendChecksum(&raw);
     var reencoded: [seed_text_len]u8 = undefined;
     _ = base32Encode(&raw, &reencoded);
