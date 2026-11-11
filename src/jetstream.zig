@@ -2026,6 +2026,9 @@ pub const JetStream = struct {
                     log.err("Failed to wrap JetStream message: {}", .{err});
                     return;
                 };
+                // The handler may deinit it; the free waits for the auto-ack below.
+                js_msg.lifetime.store(.in_handler, .release);
+                defer js_msg.endHandler();
 
                 // Call user handler with JetStream message - handler owns cleanup responsibility
                 // Support both void and fallible handlers

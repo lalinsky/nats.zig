@@ -54,8 +54,25 @@ pub const JetStreamMessage = struct {
     metadata: MsgMetadata = .{},
     /// Atomic flag to track acknowledgment status (prevents duplicate ack/nak)
     acked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Who frees the message. A push subscription's handler owns it and may `deinit` it, but
+    /// the subscription still auto-acks it after the handler returns: while the handler runs,
+    /// `deinit` only records the request and the subscription frees it after the ack
+    /// (`endHandler`). Freed first, the ack read a released message: freed memory, or a pooled
+    /// message already reused by the next delivery, acked in its place.
+    lifetime: std.atomic.Value(Lifetime) = .init(.owned),
+
+    pub const Lifetime = enum(u8) { owned, in_handler, free_requested };
 
     pub fn deinit(self: *JetStreamMessage) void {
+        if (self.lifetime.cmpxchgStrong(.in_handler, .free_requested, .acq_rel, .acquire) == null) return;
+        self.msg.deinit();
+    }
+
+    /// The push subscription's side, once the handler and the auto-ack are done: frees the
+    /// message if the handler asked to, otherwise hands it to the handler's owner, whose
+    /// later `deinit` frees it at once. Nothing may touch `self` after this.
+    pub fn endHandler(self: *JetStreamMessage) void {
+        if (self.lifetime.cmpxchgStrong(.in_handler, .owned, .acq_rel, .acquire) == null) return;
         self.msg.deinit();
     }
 
@@ -241,4 +258,23 @@ pub fn createJetStreamMessage(nc: *Connection, msg: *Message) !*JetStreamMessage
     }
 
     return js_msg;
+}
+
+test "a push handler's deinit waits for the subscription's ack, then the message is freed once" {
+    // Freed in the handler: still readable for the ack, freed by `endHandler`. The testing
+    // allocator reports a leak if neither frees it and fails on a double free.
+    var freed = Message.init(std.testing.allocator);
+    const js = try createJetStreamMessage(undefined, &freed);
+    js.lifetime.store(.in_handler, .release);
+    js.deinit();
+    try std.testing.expectEqual(JetStreamMessage.Lifetime.free_requested, js.lifetime.load(.acquire));
+    js.endHandler();
+
+    // Kept by the handler (to free later, from anywhere): handed back, freed by that deinit.
+    var kept = Message.init(std.testing.allocator);
+    const k = try createJetStreamMessage(undefined, &kept);
+    k.lifetime.store(.in_handler, .release);
+    k.endHandler();
+    try std.testing.expectEqual(JetStreamMessage.Lifetime.owned, k.lifetime.load(.acquire));
+    k.deinit();
 }
